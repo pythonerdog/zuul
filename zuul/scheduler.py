@@ -25,6 +25,7 @@ import socket
 import sys
 import threading
 import time
+import collections
 
 from zuul import configloader
 from zuul import model
