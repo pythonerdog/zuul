@@ -1,0 +1,6 @@
+---
+fixes:
+  - |
+    Files matcher has been fixed to act like irrelevant files matcher
+    when no files are present in the tested change, i.e. it now matches
+    such empty changes instead of rejecting them.

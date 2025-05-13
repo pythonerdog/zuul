@@ -19,9 +19,6 @@ class TestPushRequirements(ZuulTestCase):
     config_file = 'zuul-push-reqs.conf'
     tenant_config_file = 'config/push-reqs/main.yaml'
 
-    def setup_config(self):
-        super(TestPushRequirements, self).setup_config()
-
     def test_push_requirements(self):
         self.executor_server.hold_jobs_in_build = True
 

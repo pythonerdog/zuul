@@ -1,0 +1,5 @@
+---
+fixes:
+  - |
+    Fixed a bug where multiple connections of the same type would not filter
+    trigger events coming from the wrong connection.

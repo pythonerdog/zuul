@@ -1,0 +1,10 @@
+---
+features:
+  - |
+    Added a new
+    :attr:`tenant.untrusted-projects.<project>.always-dynamic-branches`
+    tenant project configuration option.  This may be used to specify
+    branches from which Zuul should never load static configuration
+    and instead treat every change as if it newly proposed dynamic
+    configuration.  This is potentially useful for large numbers of
+    rarely-used feature branches.

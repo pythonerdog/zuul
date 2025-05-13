@@ -1,0 +1,28 @@
+---
+upgrade:
+  - |
+    A significant SQL schema migration is included which requires
+    extra care when upgrading.
+
+    It is recommended to make a database backup before upgrading in
+    case of problems.  It is also recommended to test the migration
+    with a copy of the database in a development environment first in
+    order to ascertain expected runtime and detect any data integrity
+    problems early.
+
+    Zuul is unable to operate as normal during the schema upgrade.
+    The following procedure is recommended:
+
+      * Perform a database backup
+      * Stop all Zuul components
+      * Start one scheduler and wait for it to complete the migration
+        and initialization
+      * Start the rest of Zuul
+
+    If the migration fails and the backing database is PostgreSQL, the
+    migration will be rolled back and Zuul may be restarted on the
+    previous version.  If the backing database is MySQL, if the error
+    happens early enough the migration may be rolled back (look for
+    "Early error in schema migration, rolling back" in scheduler
+    logs).  If an error happens late in the migration, manual
+    intervention may be required.

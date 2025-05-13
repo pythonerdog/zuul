@@ -1,0 +1,12 @@
+---
+upgrade:
+  - |
+    The maximum combined stdout and stderr output from a single
+    Ansible task has been limited to 1GiB.  In the unlikely event that
+    an existing job legitimately exceeds this limit, a new executor
+    configuration option, :attr:`executor.output_max_bytes`, has been
+    provided to temporarily increase the limit.  This option is likely
+    to be removed in a future version of Zuul.  To avoid this issue,
+    Ansible tasks with large volumes of output should be adjusted to
+    redirect that output to a file which is separately collected and
+    processed.

@@ -1,0 +1,34 @@
+- pipeline:
+    name: check
+    manager: independent
+    trigger:
+      gerrit:
+        - event: patchset-created
+        - event: comment-added
+          comment: '^(Patch Set [0-9]+:\n\n)?(?i:recheck)$'
+    success:
+      gerrit:
+        Verified: 1
+    failure:
+      gerrit:
+        Verified: -1
+
+- job:
+    name: base
+    parent: null
+
+- job:
+    name: test-job
+    run: playbooks/run.yaml
+    nodeset:
+      nodes:
+        - name: controller
+          label: foo
+
+- job:
+    name: second-job
+    run: playbooks/run.yaml
+    nodeset:
+      nodes:
+        - name: controller
+          label: foo

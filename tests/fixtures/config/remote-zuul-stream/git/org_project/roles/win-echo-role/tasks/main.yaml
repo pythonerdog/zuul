@@ -1,0 +1,2 @@
+- name: Echo message
+  win_command: "cmd /c echo {{item}}"

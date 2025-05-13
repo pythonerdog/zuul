@@ -1,0 +1,5 @@
+---
+fixes:
+  - |
+    When using GitHub app authentication the fallback to anonymous access
+    was broken for repositories not having installed the zuul app.

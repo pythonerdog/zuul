@@ -1,0 +1,5 @@
+---
+features:
+  - |
+    Zuul now supports triggering a smart reconfiguration by using the command
+    ``zuul-scheduler smart-reconfigure``.

@@ -1,0 +1,19 @@
+---
+upgrade:
+  - |
+    The restricted Ansible environment used for untrusted playbooks
+    has been relaxed.
+
+    Zuul previously attempted to restrict the actions of playbooks
+    running in the untrusted execution context on the executor so that
+    users would not be able to load custom Ansible plugins, execute
+    code on the executor, or use certain functions of built-in Ansible
+    modules.  This was done in an attempt to improve the security of
+    the Zuul executor.  However, the approach has proved laborious,
+    prone to error, and increasingly incompatible with newer versions
+    of Ansible.
+
+    Therefore it has been removed, and now playbooks within both the
+    trusted and untrusted execution contexts have access to the full
+    suite of Ansible modules.  See the :ref:`executor_security`
+    section for information on caveats relating to executor security.

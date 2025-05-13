@@ -19,6 +19,8 @@
       github:
         - event: pull_request
           action: edited
+        - event: pull_request
+          action: reopened
     start:
       github: {}
     success:
@@ -70,15 +72,15 @@
 
 - project:
     name: org/project3
+    queue: cogated
     gate:
-      queue: cogated
       jobs:
         - project3-test
 
 - project:
     name: org/project4
+    queue: cogated
     gate:
-      queue: cogated
       jobs:
         - project4-test
 

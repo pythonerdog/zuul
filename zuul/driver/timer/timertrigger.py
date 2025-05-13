@@ -1,5 +1,6 @@
 # Copyright 2012 Hewlett-Packard Development Company, L.P.
 # Copyright 2013 OpenStack Foundation
+# Copyright 2023 Acme Gating, LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may
 # not use this file except in compliance with the License. You may obtain
@@ -17,17 +18,20 @@ import voluptuous as v
 
 from zuul.trigger import BaseTrigger
 from zuul.driver.timer.timermodel import TimerEventFilter
-from zuul.driver.util import to_list
+from zuul.driver.util import to_list, make_regex
 
 
 class TimerTrigger(BaseTrigger):
     name = 'timer'
 
-    def getEventFilters(self, trigger_conf):
+    def getEventFilters(self, connection_name, trigger_conf,
+                        parse_context):
         efilters = []
         for trigger in to_list(trigger_conf):
-            f = TimerEventFilter(trigger=self,
-                                 types=['timer'],
+            types = [make_regex('timer')]
+            f = TimerEventFilter(connection_name=connection_name,
+                                 trigger=self,
+                                 types=types,
                                  timespecs=to_list(trigger['time']))
 
             efilters.append(f)

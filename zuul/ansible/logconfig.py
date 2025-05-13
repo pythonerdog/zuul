@@ -73,6 +73,7 @@ _DEFAULT_SERVER_LOGGING_CONFIG = {
     'version': 1,
     'formatters': {
         'simple': {
+            'class': 'zuul.lib.logutil.MultiLineFormatter',
             'format': '%(asctime)s %(levelname)s %(name)s: %(message)s'
         },
     },
@@ -90,6 +91,10 @@ _DEFAULT_SERVER_LOGGING_CONFIG = {
             'handlers': ['console'],
             'level': 'INFO',
         },
+        'zuul.GerritConnection.io': {
+            'handlers': ['console'],
+            'level': 'WARN',
+        },
         'sqlalchemy.engine': {
             'handlers': ['console'],
             'level': 'WARN',
@@ -98,9 +103,9 @@ _DEFAULT_SERVER_LOGGING_CONFIG = {
             'handlers': ['console'],
             'level': 'INFO',
         },
-        'gear': {
+        'alembic.runtime.migration': {
             'handlers': ['console'],
-            'level': 'WARN',
+            'level': 'INFO',
         },
         'alembic': {
             'handlers': ['console'],
@@ -135,7 +140,8 @@ def _read_config_file(filename: str):
         raise ValueError("Unable to read logging config file at %s" % filename)
 
     if os.path.splitext(filename)[1] in ('.yml', '.yaml', '.json'):
-        return yaml.safe_load(open(filename, 'r'))
+        with open(filename, 'r') as f:
+            return yaml.safe_load(f)
     return filename
 
 

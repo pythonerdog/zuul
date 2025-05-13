@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-
 # Copyright 2014 Hewlett-Packard Development Company, L.P.
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -13,6 +11,8 @@
 # WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 # License for the specific language governing permissions and limitations
 # under the License.
+
+from unittest import mock
 
 from tests.base import ZuulTestCase, ZuulGithubAppTestCase
 from zuul.driver.zuul.zuulmodel import ZuulTriggerEvent
@@ -35,9 +35,10 @@ class TestZuulTriggerParentChangeEnqueued(ZuulTestCase):
         A.addApproval('Code-Review', 2)
         B1.addApproval('Code-Review', 2)
         B2.addApproval('Code-Review', 2)
-        A.addApproval('Verified', 1)    # required by gate
-        B1.addApproval('Verified', -1)  # should go to check
-        B2.addApproval('Verified', 1)   # should go to gate
+        A.addApproval('Verified', 1, username="for-check")   # reqd by check
+        A.addApproval('Verified', 1, username="for-gate")    # reqd by gate
+        B1.addApproval('Verified', 1, username="for-check")  # go to check
+        B2.addApproval('Verified', 1, username="for-gate")   # go to gate
         B1.addApproval('Approved', 1)
         B2.addApproval('Approved', 1)
         B1.setDependsOn(A, 1)
@@ -65,28 +66,24 @@ class TestZuulTriggerParentChangeEnqueued(ZuulTestCase):
         # Now directly enqueue a change into the check. As no pipeline reacts
         # on parent-change-enqueued from pipeline check no
         # parent-change-enqueued event is expected.
-        zuultrigger_event_count = 0
+        _add_trigger_event = self.scheds.first.sched.addTriggerEvent
 
-        def counting_put(*args, **kwargs):
-            nonlocal zuultrigger_event_count
-            if isinstance(args[0], ZuulTriggerEvent):
-                zuultrigger_event_count += 1
-            self.sched.trigger_event_queue.put_orig(*args, **kwargs)
+        def addTriggerEvent(driver_name, event):
+            self.assertNotIsInstance(event, ZuulTriggerEvent)
+            _add_trigger_event(driver_name, event)
 
-        self.sched.trigger_event_queue.put_orig = \
-            self.sched.trigger_event_queue.put
-        self.sched.trigger_event_queue.put = counting_put
+        with mock.patch.object(
+            self.scheds.first.sched, "addTriggerEvent", addTriggerEvent
+        ):
+            C = self.fake_gerrit.addFakeChange('org/project', 'master', 'C')
+            C.addApproval('Verified', 1, username="for-check")
+            D = self.fake_gerrit.addFakeChange('org/project', 'master', 'D')
+            D.addApproval('Verified', 1, username="for-check")
+            D.setDependsOn(C, 1)
+            self.fake_gerrit.addEvent(C.getPatchsetCreatedEvent(1))
 
-        C = self.fake_gerrit.addFakeChange('org/project', 'master', 'C')
-        C.addApproval('Verified', -1)
-        D = self.fake_gerrit.addFakeChange('org/project', 'master', 'D')
-        D.addApproval('Verified', -1)
-        D.setDependsOn(C, 1)
-        self.fake_gerrit.addEvent(C.getPatchsetCreatedEvent(1))
-
-        self.waitUntilSettled()
-        self.assertEqual(len(self.history), 4)
-        self.assertEqual(zuultrigger_event_count, 0)
+            self.waitUntilSettled()
+            self.assertEqual(len(self.history), 4)
 
 
 class TestZuulTriggerParentChangeEnqueuedGithub(ZuulGithubAppTestCase):
@@ -103,7 +100,7 @@ class TestZuulTriggerParentChangeEnqueuedGithub(ZuulGithubAppTestCase):
         # and B2 in gate because of differing pipeline requirements.
         self.executor_server.hold_jobs_in_build = True
         A = self.fake_github.openFakePullRequest('org/project', 'master', 'A')
-        msg = "Depends-On: https://github.com/org/project1/pull/%s" % A.number
+        msg = "Depends-On: https://github.com/org/project/pull/%s" % A.number
         B1 = self.fake_github.openFakePullRequest(
             'org/project', 'master', 'B1', body=msg)
         B2 = self.fake_github.openFakePullRequest(
@@ -112,6 +109,7 @@ class TestZuulTriggerParentChangeEnqueuedGithub(ZuulGithubAppTestCase):
         B1.addReview('derp', 'APPROVED')
         B2.addReview('derp', 'APPROVED')
         A.addLabel('for-gate')    # required by gate
+        A.addLabel('for-check')   # required by check
         B1.addLabel('for-check')  # should go to check
         B2.addLabel('for-gate')   # should go to gate
 
@@ -146,35 +144,37 @@ class TestZuulTriggerParentChangeEnqueuedGithub(ZuulGithubAppTestCase):
         # on parent-change-enqueued from pipeline check no
         # parent-change-enqueued event is expected.
         self.waitUntilSettled()
-        zuultrigger_event_count = 0
 
-        def counting_put(*args, **kwargs):
-            nonlocal zuultrigger_event_count
-            if isinstance(args[0], ZuulTriggerEvent):
-                zuultrigger_event_count += 1
-            self.sched.trigger_event_queue.put_orig(*args, **kwargs)
+        _add_trigger_event = self.scheds.first.sched.addTriggerEvent
 
-        self.sched.trigger_event_queue.put_orig = \
-            self.sched.trigger_event_queue.put
-        self.sched.trigger_event_queue.put = counting_put
+        def addTriggerEvent(driver_name, event):
+            self.assertNotIsInstance(event, ZuulTriggerEvent)
+            _add_trigger_event(driver_name, event)
 
-        C = self.fake_github.openFakePullRequest('org/project', 'master', 'C')
-        C.addLabel('for-check')  # should go to check
+        with mock.patch.object(
+            self.scheds.first.sched, "addTriggerEvent", addTriggerEvent
+        ):
+            C = self.fake_github.openFakePullRequest(
+                'org/project', 'master', 'C'
+            )
+            C.addLabel('for-check')  # should go to check
 
-        msg = "Depends-On: https://github.com/org/project1/pull/%s" % C.number
-        D = self.fake_github.openFakePullRequest(
-            'org/project', 'master', 'D', body=msg)
-        D.addLabel('for-check')  # should go to check
-        self.fake_github.emitEvent(C.getPullRequestOpenedEvent())
+            msg = "Depends-On: https://github.com/org/project1/pull/{}".format(
+                C.number
+            )
+            D = self.fake_github.openFakePullRequest(
+                'org/project', 'master', 'D', body=msg)
+            D.addLabel('for-check')  # should go to check
+            self.fake_github.emitEvent(C.getPullRequestOpenedEvent())
 
-        self.waitUntilSettled()
-        self.assertEqual(len(self.history), 4)
-        self.assertEqual(zuultrigger_event_count, 0)
+            self.waitUntilSettled()
+            self.assertEqual(len(self.history), 4)
 
         # After starting recording installation containing org2/project
         # should not be contacted
-        inst_id_to_check = self.fake_github.installation_map['org2/project']
-        inst_clients = [x for x in self.fake_github.recorded_clients
+        gh_manager = self.fake_github._github_client_manager
+        inst_id_to_check = gh_manager.installation_map['org2/project']
+        inst_clients = [x for x in gh_manager.recorded_clients
                         if x._inst_id == inst_id_to_check]
         self.assertEqual(len(inst_clients), 0)
 
@@ -210,21 +210,30 @@ class TestZuulTriggerProjectChangeMerged(ZuulTestCase):
         self.assertEqual(C.reported, 0)
         self.assertEqual(D.reported, 0)
         self.assertEqual(E.reported, 0)
-        self.assertEqual(
-            B.messages[0],
+        self.assertIn(
             "Merge Failed.\n\nThis change or one of its cross-repo "
             "dependencies was unable to be automatically merged with the "
             "current state of its repository. Please rebase the change and "
-            "upload a new patchset.")
+            "upload a new patchset.",
+            B.messages[0])
+        self.assertIn(
+            'Error merging gerrit/org/project for 2,2',
+            B.messages[0])
 
-        self.assertTrue("project:org/project status:open" in
+        self.assertTrue("project:{org/project} status:open" in
                         self.fake_gerrit.queries)
+
+        # Ensure the gerrit driver has updated its cache after the
+        # previous comments were left:
+        self.fake_gerrit.addEvent(A.getChangeCommentEvent(2))
+        self.fake_gerrit.addEvent(B.getChangeCommentEvent(2))
+        self.waitUntilSettled()
 
         # Reconfigure and run the test again.  This is a regression
         # check to make sure that we don't end up with a stale trigger
         # cache that has references to projects from the old
         # configuration.
-        self.sched.reconfigure(self.config)
+        self.scheds.execute(lambda app: app.sched.reconfigure(app.config))
 
         D.addApproval('Code-Review', 2)
         self.fake_gerrit.addEvent(D.addApproval('Approved', 1))
@@ -237,11 +246,14 @@ class TestZuulTriggerProjectChangeMerged(ZuulTestCase):
         self.assertEqual(C.reported, 0)
         self.assertEqual(D.reported, 2)
         self.assertEqual(E.reported, 1)
-        self.assertEqual(
-            E.messages[0],
+        self.assertIn(
             "Merge Failed.\n\nThis change or one of its cross-repo "
             "dependencies was unable to be automatically merged with the "
             "current state of its repository. Please rebase the change and "
-            "upload a new patchset.")
-        self.assertIn("project:org/project status:open",
+            "upload a new patchset.",
+            E.messages[0])
+        self.assertIn(
+            'Error merging gerrit/org/project for 5,2',
+            E.messages[0])
+        self.assertIn("project:{org/project} status:open",
                       self.fake_gerrit.queries)

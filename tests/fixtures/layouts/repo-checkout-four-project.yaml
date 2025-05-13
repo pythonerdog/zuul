@@ -48,40 +48,40 @@
 
 - project:
     name: org/project1
+    queue: integrated
     check:
       jobs:
         - integration
     gate:
-      queue: integrated
       jobs:
         - integration
 
 - project:
     name: org/project2
+    queue: integrated
     check:
       jobs:
         - integration
     gate:
-      queue: integrated
       jobs:
         - integration
 
 - project:
     name: org/project3
+    queue: integrated
     check:
       jobs:
         - integration
     gate:
-      queue: integrated
       jobs:
         - integration
 
 - project:
     name: org/project4
+    queue: integrated
     check:
       jobs:
         - integration
     gate:
-      queue: integrated
       jobs:
         - integration

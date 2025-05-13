@@ -1,0 +1,5 @@
+---
+upgrade:
+  - |
+    Zuul now requires at least Nodepool version of 4.2.0 due to an
+    internal API change.

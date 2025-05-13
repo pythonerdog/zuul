@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # Copyright 2013 OpenStack Foundation
 # Copyright 2015 Hewlett-Packard Development Company, L.P.
 #
@@ -14,45 +14,82 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-import urllib2
+try:
+    from urllib.request import urlopen
+except ImportError:
+    from urllib2 import urlopen
 import json
 import argparse
 
 parser = argparse.ArgumentParser()
 parser.add_argument('url', help='The URL of the running Zuul instance')
-parser.add_argument('tenant', help='The Zuul tenant')
-parser.add_argument('pipeline', help='The name of the Zuul pipeline')
+parser.add_argument('tenant', help='The Zuul tenant', nargs='?')
+parser.add_argument('pipeline', help='The name of the Zuul pipeline',
+                    nargs='?')
+parser.add_argument('--use-config',
+                    metavar='CONFIG',
+                    help='The name of the zuul-client config to use')
 options = parser.parse_args()
 
+command = 'zuul-client'
+if options.use_config:
+    command += f' --use-config {options.use_config}'
+
 # Check if tenant is white label
-info = json.loads(urllib2.urlopen('%s/api/info' % options.url).read())
+info = json.loads(urlopen('%s/api/info' % options.url).read())
 api_tenant = info.get('info', {}).get('tenant')
+tenants = []
 if api_tenant:
     if api_tenant == options.tenant:
-        status_url = '%s/api/status' % options.url
+        tenants.append(None)
     else:
         print("Error: %s doesn't match tenant %s (!= %s)" % (
             options.url, options.tenant, api_tenant))
         exit(1)
 else:
-    status_url = '%s/api/tenant/%s/status' % (options.url, options.tenant)
+    tenants_url = '%s/api/tenants' % options.url
+    data = json.loads(urlopen(tenants_url).read())
+    for tenant in data:
+        tenants.append(tenant['name'])
 
-data = json.loads(urllib2.urlopen(status_url).read())
+for tenant in tenants:
+    if tenant is None:
+        status_url = '%s/api/status' % options.url
+    else:
+        status_url = '%s/api/tenant/%s/status' % (options.url, tenant)
 
-for pipeline in data['pipelines']:
-    if pipeline['name'] != options.pipeline:
-        continue
-    for queue in pipeline['change_queues']:
-        for head in queue['heads']:
-            for change in head:
-                if not change['live']:
-                    continue
-                cid, cps = change['id'].split(',')
-                print(
-                    "zuul enqueue --tenant %s --trigger gerrit "
-                    "--pipeline %s --project %s --change %s,%s" % (
-                        options.tenant,
-                        options.pipeline,
-                        change['project'],
-                        cid, cps)
-                )
+    data = json.loads(urlopen(status_url).read())
+
+    for pipeline in data['pipelines']:
+        if options.pipeline and pipeline['name'] != options.pipeline:
+            continue
+        for queue in pipeline.get('change_queues', []):
+            for head in queue['heads']:
+                for change in head:
+                    if not change['live']:
+                        continue
+
+                    if change['id'] and ',' in change['id']:
+                        # change triggered
+                        cid, cps = change['id'].split(',')
+                        print("%s enqueue"
+                              " --tenant %s"
+                              " --pipeline %s"
+                              " --project %s"
+                              " --change %s,%s" % (command, tenant,
+                                                   pipeline['name'],
+                                                   change['project_canonical'],
+                                                   cid, cps))
+                    else:
+                        # ref triggered
+                        cmd = '%s enqueue-ref' \
+                              ' --tenant %s' \
+                              ' --pipeline %s' \
+                              ' --project %s' \
+                              ' --ref %s' % (command, tenant,
+                                             pipeline['name'],
+                                             change['project_canonical'],
+                                             change['ref'])
+                        if change['id']:
+                            cmd += ' --newrev %s' % change['id']
+                        print(cmd)

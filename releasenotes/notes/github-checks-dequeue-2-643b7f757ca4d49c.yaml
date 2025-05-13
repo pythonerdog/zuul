@@ -1,0 +1,6 @@
+---
+features:
+  - |
+    Changes can now be dequeued via the Github checks API. If a github
+    reporter is configured to use the checks API, all running checks will
+    provide a custom "Abort" action.

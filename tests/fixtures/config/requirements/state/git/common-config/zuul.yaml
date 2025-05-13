@@ -49,6 +49,23 @@
       gerrit:
         Verified: -1
 
+- pipeline:
+    name: wip-check
+    manager: independent
+    require:
+      gerrit:
+        wip: false
+    trigger:
+      gerrit:
+        - event: patchset-created
+        - event: comment-added
+    success:
+      gerrit:
+        Verified: 1
+    failure:
+      gerrit:
+        Verified: -1
+
 - job:
     name: base
     parent: null
@@ -72,5 +89,11 @@
 - project:
     name: status-project
     status-check:
+      jobs:
+        - project-job
+
+- project:
+    name: wip-project
+    wip-check:
       jobs:
         - project-job

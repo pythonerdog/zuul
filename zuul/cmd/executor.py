@@ -1,6 +1,6 @@
-#!/usr/bin/env python
 # Copyright 2012 Hewlett-Packard Development Company, L.P.
 # Copyright 2013-2014 OpenStack Foundation
+# Copyright 2021-2022 Acme Gating, LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may
 # not use this file except in compliance with the License. You may obtain
@@ -18,7 +18,6 @@ import logging
 import os
 import sys
 import signal
-import tempfile
 
 import zuul.cmd
 import zuul.executor.server
@@ -35,20 +34,25 @@ class Executor(zuul.cmd.ZuulDaemonApp):
         parser.add_argument('--keep-jobdir', dest='keep_jobdir',
                             action='store_true',
                             help='keep local jobdirs after run completes')
-        parser.add_argument('command',
-                            choices=zuul.executor.server.COMMANDS,
-                            nargs='?')
+        self.addSubCommands(parser, zuul.executor.server.COMMANDS)
         return parser
 
     def parseArguments(self, args=None):
         super(Executor, self).parseArguments()
-        if self.args.command:
-            self.args.nodaemon = True
 
     def exit_handler(self, signum, frame):
-        self.executor.stop()
-        self.executor.join()
-        sys.exit(0)
+        if self.config.has_option('executor', 'sigterm_method'):
+            graceful = self.config.get('executor', 'sigterm_method')
+        else:
+            graceful = 'graceful'
+        if graceful.lower() == 'graceful':
+            self.executor.graceful()
+        elif graceful.lower() == 'stop':
+            self.executor.stop()
+        else:
+            self.log.error("Unknown value for executor.sigterm_method:"
+                           f"'{graceful}'. Expected 'graceful' or 'stop'")
+            self.executor.graceful()
 
     def start_log_streamer(self):
         pipe_read, pipe_write = os.pipe()
@@ -63,20 +67,25 @@ class Executor(zuul.cmd.ZuulDaemonApp):
 
             # Keep running until the parent dies:
             pipe_read = os.fdopen(pipe_read)
-            pipe_read.read()
+            try:
+                pipe_read.read()
+            except KeyboardInterrupt:
+                pass
             self.log.info("Stopping log streamer")
             streamer.stop()
             os._exit(0)
         else:
             os.close(pipe_read)
+            self.log_streamer_pipe = pipe_write
             self.log_streamer_pid = child_pid
 
     def run(self):
-        if self.args.command in zuul.executor.server.COMMANDS:
-            self.send_command(self.args.command)
-            sys.exit(0)
+        self.handleCommands()
 
-        self.configure_connections(source_only=True)
+        self.setup_logging('executor', 'log_config')
+        self.log = logging.getLogger("zuul.Executor")
+
+        self.configure_connections(sources=True, check_bwrap=True)
 
         if self.config.has_option('executor', 'job_dir'):
             self.job_dir = os.path.expanduser(
@@ -86,10 +95,9 @@ class Executor(zuul.cmd.ZuulDaemonApp):
                     job_dir=self.job_dir))
                 sys.exit(1)
         else:
-            self.job_dir = tempfile.gettempdir()
-
-        self.setup_logging('executor', 'log_config')
-        self.log = logging.getLogger("zuul.Executor")
+            self.job_dir = '/var/lib/zuul/builds'
+            if not os.path.exists(self.job_dir):
+                os.mkdir(self.job_dir)
 
         self.finger_port = int(
             get_default(self.config, 'executor', 'finger_port',
@@ -99,7 +107,8 @@ class Executor(zuul.cmd.ZuulDaemonApp):
         self.start_log_streamer()
 
         ExecutorServer = zuul.executor.server.ExecutorServer
-        self.executor = ExecutorServer(self.config, self.connections,
+        self.executor = ExecutorServer(self.config,
+                                       self.connections,
                                        jobdir_root=self.job_dir,
                                        keep_jobdir=self.args.keep_jobdir,
                                        log_streaming_port=self.finger_port)
@@ -107,19 +116,18 @@ class Executor(zuul.cmd.ZuulDaemonApp):
 
         if self.args.nodaemon:
             signal.signal(signal.SIGTERM, self.exit_handler)
-            while True:
-                try:
-                    signal.pause()
-                except KeyboardInterrupt:
-                    print("Ctrl + C: asking executor to exit nicely...\n")
-                    self.exit_handler(signal.SIGINT, None)
-        else:
-            self.executor.join()
+
+        while True:
+            try:
+                self.executor.join()
+                break
+            except KeyboardInterrupt:
+                print("Ctrl + C: asking executor to exit nicely...\n")
+                self.exit_handler(signal.SIGINT, None)
+
+        os.close(self.log_streamer_pipe)
+        os.waitpid(self.log_streamer_pid, 0)
 
 
 def main():
     Executor().main()
-
-
-if __name__ == "__main__":
-    main()

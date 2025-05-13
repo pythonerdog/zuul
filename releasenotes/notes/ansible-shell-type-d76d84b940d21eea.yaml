@@ -1,0 +1,10 @@
+---
+features:
+  - |
+    Zuul now honors the shell-type configuration from nodepool and
+    uses it to set ansible_shell_type, a setting that is required
+    when connecting to Windows workers over ssh.
+
+    For Linux workers, there is a long standing ansible issue with 
+    using non-default ansible_shell_type and become, so this feature
+    is primarily targeting Windows workers.

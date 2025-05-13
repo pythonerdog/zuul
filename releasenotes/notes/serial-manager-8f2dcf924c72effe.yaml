@@ -1,0 +1,6 @@
+features:
+  - |
+    The :value:`pipeline.manager.serial` pipeline manager has been
+    added.  It is designed to handle serialized deployment pipelines
+    where supercedent is unsuitable in the case that not all jobs run
+    on every merge.

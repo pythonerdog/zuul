@@ -1,0 +1,27 @@
+- pipeline:
+    name: check
+    manager: independent
+    post-review: true
+    trigger:
+      gerrit:
+        - event: patchset-created
+    success:
+      gerrit:
+        Verified: 1
+    failure:
+      gerrit:
+        Verified: -1
+
+- job:
+    name: base
+    parent: null
+
+- job:
+    name: json-results-strings
+    attempts: 1
+    run: playbooks/json-results-strings.yaml
+
+- project:
+    check:
+      jobs:
+        - json-results-strings

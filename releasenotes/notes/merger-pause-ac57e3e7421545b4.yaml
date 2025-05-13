@@ -1,0 +1,5 @@
+---
+features:
+  - |
+    The zuul-executor now also pauses all merger related tasks when it's paused.
+    Further the zuul-merger can also be paused by running ``zuul-merger pause``.

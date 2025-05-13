@@ -20,18 +20,14 @@ from zuul.executor.sensors import SensorInterface
 class PauseSensor(SensorInterface):
     log = logging.getLogger("zuul.executor.sensor.pause")
 
-    def __init__(self):
-        self.pause = False
+    def __init__(self, statsd, base_key, pause=False):
+        super().__init__(statsd, base_key)
+        self.pause = pause
 
     def isOk(self):
+        if self.statsd:
+            self.statsd.gauge(self.base_key + '.pause', int(self.pause))
         if self.pause:
             return False, 'paused'
         else:
             return True, 'running'
-
-    def reportStats(self, statsd, base_key):
-        if self.pause:
-            value = 1
-        else:
-            value = 0
-        statsd.gauge(base_key + '.pause', value)

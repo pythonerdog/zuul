@@ -1,0 +1,4 @@
+---
+features:
+  - |
+    Zuul now supports Ansible 2.9 for running jobs.

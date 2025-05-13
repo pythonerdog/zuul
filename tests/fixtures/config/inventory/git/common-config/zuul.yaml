@@ -5,12 +5,17 @@
     trigger:
       gerrit:
         - event: patchset-created
+      github:
+        - event: pull_request
+          action: opened
     success:
       gerrit:
         Verified: 1
+      github: {}
     failure:
       gerrit:
         Verified: -1
+      github: {}
 
 - nodeset:
     name: nodeset1
@@ -66,11 +71,63 @@
     run: playbooks/single-inventory.yaml
 
 - job:
+    name: executor-only-inventory
+    nodeset:
+      nodes: []
+    run: playbooks/executor-only-inventory.yaml
+
+- job:
     name: group-inventory
     nodeset: nodeset1
     run: playbooks/group-inventory.yaml
+    group-vars:
+      ceph-osd:
+        ceph_var: ceph
 
 - job:
     name: hostvars-inventory
     run: playbooks/hostvars-inventory.yaml
     nodeset: nodeset2
+    vars:
+      all_var: all
+
+- job:
+    name: jinja2-message
+    files: jinja.txt
+    nodeset:
+      nodes:
+        - name: ubuntu-xenial
+          label: ubuntu-xenial
+    run: playbooks/jinja2-message.yaml
+
+- job:
+    name: network
+    files: network.txt
+    nodeset:
+      nodes:
+        - name: controller
+          label: ubuntu-xenial
+        - name: appliance
+          label: network
+    host-vars:
+      appliance:
+        ansible_network_os: foo
+    run: playbooks/network.yaml
+
+- job:
+    name: ansible-version8-inventory
+    nodeset:
+      nodes:
+        - name: ubuntu-xenial
+          label: ubuntu-xenial
+    ansible-version: '8'
+    run: playbooks/ansible-version.yaml
+
+- job:
+    name: ansible-version9-inventory
+    nodeset:
+      nodes:
+        - name: ubuntu-xenial
+          label: ubuntu-xenial
+    ansible-version: '9'
+    run: playbooks/ansible-version.yaml

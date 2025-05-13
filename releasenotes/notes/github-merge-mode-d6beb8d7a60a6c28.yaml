@@ -1,0 +1,9 @@
+---
+upgrade:
+  - |
+    Zuul's GitHub driver has updated the default merge mode to better align
+    with GitHub's default behavior. This change requires Git 2.33.0 or newer
+    unless you explicitly override Zuul's default merge mode for a project.
+    Additionally, if you aren't overriding the merge mode then the merge
+    algorithm chosen may change depending on your Git and GitHub versions.
+    This is expected to provide more deterministic results.

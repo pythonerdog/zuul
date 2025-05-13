@@ -1,0 +1,14 @@
+- nodeset:
+    name: fast-nodeset
+    nodes:
+      - name: controller
+        label: fast-label
+
+- job:
+    name: test-job
+    nodeset:
+      alternatives:
+        - fast-nodeset
+        - nodes:
+            - name: controller
+              label: slow-label

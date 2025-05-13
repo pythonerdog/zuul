@@ -1,0 +1,7 @@
+- pipeline:
+    name: check
+    manager: independent
+    trigger:
+      pagure:
+        - event: pg_push
+          ref: '(?!invalid)'

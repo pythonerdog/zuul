@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-
 # Copyright 2012-2014 Hewlett-Packard Development Company, L.P.
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -16,7 +14,7 @@
 
 import time
 
-from tests.base import ZuulTestCase
+from tests.base import ZuulTestCase, simple_layout
 
 
 class TestRequirementsApprovalNewerThan(ZuulTestCase):
@@ -199,6 +197,20 @@ class TestRequirementsVote1(ZuulTestCase):
         self.assertEqual(len(self.history), 1)
         self.assertEqual(self.history[0].name, job)
 
+        tenant = self.scheds.first.sched.abide.tenants.get('tenant-one')
+        self.assertEqual(len(tenant.layout.loading_errors), 1)
+        self.assertEqual(tenant.layout.loading_errors[0].name,
+                         'Gerrit require-approval Deprecation')
+        self.assertEqual(tenant.layout.loading_errors[0].severity,
+                         'warning')
+        self.assertIn('require-approval',
+                      tenant.layout.loading_errors[0].short_error)
+        self.assertIn('require-approval',
+                      tenant.layout.loading_errors[0].error)
+        self.assertIsNotNone(tenant.layout.loading_errors[0].key.context)
+        self.assertIsNotNone(tenant.layout.loading_errors[0].key.mark)
+        self.assertIsNotNone(tenant.layout.loading_errors[0].key.error_text)
+
 
 class TestRequirementsVote2(ZuulTestCase):
     """Requirements with a voting requirement"""
@@ -258,6 +270,20 @@ class TestRequirementsVote2(ZuulTestCase):
         self.assertEqual(len(self.history), 2)
         self.assertEqual(self.history[1].name, job)
 
+        tenant = self.scheds.first.sched.abide.tenants.get('tenant-one')
+        self.assertEqual(len(tenant.layout.loading_errors), 1)
+        self.assertEqual(tenant.layout.loading_errors[0].name,
+                         'Gerrit require-approval Deprecation')
+        self.assertEqual(tenant.layout.loading_errors[0].severity,
+                         'warning')
+        self.assertIn('require-approval',
+                      tenant.layout.loading_errors[0].short_error)
+        self.assertIn('require-approval',
+                      tenant.layout.loading_errors[0].error)
+        self.assertIsNotNone(tenant.layout.loading_errors[0].key.context)
+        self.assertIsNotNone(tenant.layout.loading_errors[0].key.mark)
+        self.assertIsNotNone(tenant.layout.loading_errors[0].key.error_text)
+
 
 class TestRequirementsState(ZuulTestCase):
     """Requirements with simple state requirement"""
@@ -307,6 +333,18 @@ class TestRequirementsState(ZuulTestCase):
         self.assertEqual(len(self.history), 0)
 
         B = self.fake_gerrit.addFakeChange('status-project', 'master', 'B')
+        self.fake_gerrit.addEvent(B.addApproval('Code-Review', 2))
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 1)
+
+    def test_pipeline_require_wip(self):
+        A = self.fake_gerrit.addFakeChange('wip-project', 'master', 'A')
+        A.setWorkInProgress(True)
+        self.fake_gerrit.addEvent(A.addApproval('Code-Review', 2))
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 0)
+
+        B = self.fake_gerrit.addFakeChange('wip-project', 'master', 'B')
         self.fake_gerrit.addEvent(B.addApproval('Code-Review', 2))
         self.waitUntilSettled()
         self.assertEqual(len(self.history), 1)
@@ -413,3 +451,289 @@ class TestRequirementsReject(ZuulTestCase):
     def test_trigger_require_reject(self):
         "Test trigger requirement: rejections absent"
         return self._test_require_reject('org/project2', 'project2-job')
+
+    def test_pipeline_requirement_reject_unrelated(self):
+        "Test if reject is obeyed if another unrelated approval is present"
+
+        # Having no approvals whatsoever shall not reject the change
+        A = self.fake_gerrit.addFakeChange('org/project3', 'master', 'A')
+        self.fake_gerrit.addEvent(A.getChangeCommentEvent(1))
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 1)
+
+        # Setting another unrelated approval shall not change the behavior of
+        # the configured reject.
+        comment = A.addApproval('Approved', 1, username='reviewer_e')
+        self.fake_gerrit.addEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 2)
+
+        # Setting the approval 'Verified' to a rejected value shall not lead to
+        # a build.
+        comment = A.addApproval('Verified', -1, username='jenkins')
+        self.fake_gerrit.addEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 2)
+
+        # Setting the approval 'Verified' to an accepted value shall lead to
+        # a build.
+        comment = A.addApproval('Verified', 1, username='jenkins')
+        self.fake_gerrit.addEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 3)
+
+
+class TestRequirementsTrustedCheck(ZuulTestCase):
+    config_file = "zuul-gerrit-github.conf"
+    tenant_config_file = "config/requirements/trusted-check/main.yaml"
+
+    def test_non_live_requirements(self):
+        # Test that pipeline requirements are applied to non-live
+        # changes.
+        A = self.fake_gerrit.addFakeChange('org/project', 'master', 'A')
+        B = self.fake_gerrit.addFakeChange('org/project', 'master', 'B')
+        B.setDependsOn(A, 1)
+        B.addApproval('Code-Review', 2)
+
+        self.fake_gerrit.addEvent(B.getPatchsetCreatedEvent(1))
+        self.waitUntilSettled()
+        self.assertHistory([])
+
+        self.fake_gerrit.addEvent(A.addApproval('Code-Review', 2))
+        self.fake_gerrit.addEvent(B.getPatchsetCreatedEvent(1))
+        self.waitUntilSettled()
+        self.assertHistory([
+            dict(name='check-job', result='SUCCESS', changes='1,1 2,1')],
+            ordered=False)
+
+    def test_other_connections(self):
+        # Test allow-other-connections: False
+        A = self.fake_github.openFakePullRequest("gh/project", "master", "A")
+        B = self.fake_gerrit.addFakeChange('org/project', 'master', 'B')
+        B.data["commitMessage"] = "{}\n\nDepends-On: {}\n".format(
+            B.subject, A.url,
+        )
+        B.addApproval('Code-Review', 2)
+
+        self.fake_gerrit.addEvent(B.getPatchsetCreatedEvent(1))
+        self.waitUntilSettled()
+        self.assertHistory([])
+
+
+class TestGerritTriggerRequirements(ZuulTestCase):
+    scheduler_count = 1
+
+    @simple_layout('layouts/gerrit-trigger-requirements.yaml')
+    def test_require_open(self):
+        # Test trigger require-open
+        jobname = 'require-open'
+        project = 'org/project'
+        A = self.fake_gerrit.addFakeChange(project, 'master', 'A')
+        # A comment event that we will keep submitting to trigger
+        comment = A.getChangeCommentEvent(1, f'test {jobname}')
+
+        # It's open, so it should be enqueued
+        self.fake_gerrit.addEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 1)
+        self.assertEqual(self.history[0].name, jobname)
+
+        # Not open, so should be ignored
+        A.setMerged()
+        self.fake_gerrit.addEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 1)
+        self.assertEqual(self.history[0].name, jobname)
+
+    @simple_layout('layouts/gerrit-trigger-requirements.yaml')
+    def test_reject_open(self):
+        # Test trigger reject-open
+        jobname = 'reject-open'
+        project = 'org/project'
+        A = self.fake_gerrit.addFakeChange(project, 'master', 'A')
+        # A comment event that we will keep submitting to trigger
+        comment = A.getChangeCommentEvent(1, f'test {jobname}')
+
+        # It's open, so it should not be enqueued
+        self.fake_gerrit.addEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 0)
+
+        # Not open, so should be enqueued
+        A.setMerged()
+        self.fake_gerrit.addEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 1)
+        self.assertEqual(self.history[0].name, jobname)
+
+    @simple_layout('layouts/gerrit-trigger-requirements.yaml')
+    def test_require_wip(self):
+        # Test trigger require-wip
+        jobname = 'require-wip'
+        project = 'org/project'
+        A = self.fake_gerrit.addFakeChange(project, 'master', 'A')
+        # A comment event that we will keep submitting to trigger
+        comment = A.getChangeCommentEvent(1, f'test {jobname}')
+
+        # It's not WIP, so it should be ignored
+        self.fake_gerrit.addEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 0)
+
+        # WIP, so should be enqueued
+        A.setWorkInProgress(True)
+        self.fake_gerrit.addEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 1)
+        self.assertEqual(self.history[0].name, jobname)
+
+    @simple_layout('layouts/gerrit-trigger-requirements.yaml')
+    def test_reject_wip(self):
+        # Test trigger reject-wip
+        jobname = 'reject-wip'
+        project = 'org/project'
+        A = self.fake_gerrit.addFakeChange(project, 'master', 'A')
+        # A comment event that we will keep submitting to trigger
+        comment = A.getChangeCommentEvent(1, f'test {jobname}')
+
+        # It's not WIP, so it should be enqueued
+        self.fake_gerrit.addEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 1)
+        self.assertEqual(self.history[0].name, jobname)
+
+        # WIP, so should be ignored
+        A.setWorkInProgress(True)
+        self.fake_gerrit.addEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 1)
+        self.assertEqual(self.history[0].name, jobname)
+
+    @simple_layout('layouts/gerrit-trigger-requirements.yaml')
+    def test_require_current_patchset(self):
+        # Test trigger require-current_patchset
+        jobname = 'require-current-patchset'
+        project = 'org/project'
+        A = self.fake_gerrit.addFakeChange(project, 'master', 'A')
+        # A comment event that we will keep submitting to trigger
+        comment = A.getChangeCommentEvent(1, f'test {jobname}')
+
+        # It's current, so it should be enqueued
+        self.fake_gerrit.addEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 1)
+        self.assertEqual(self.history[0].name, jobname)
+
+        # Not current, so should be ignored
+        A.addPatchset()
+        self.fake_gerrit.addEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 1)
+        self.assertEqual(self.history[0].name, jobname)
+
+    @simple_layout('layouts/gerrit-trigger-requirements.yaml')
+    def test_reject_current_patchset(self):
+        # Test trigger reject-current_patchset
+        jobname = 'reject-current-patchset'
+        project = 'org/project'
+        A = self.fake_gerrit.addFakeChange(project, 'master', 'A')
+        # A comment event that we will keep submitting to trigger
+        comment = A.getChangeCommentEvent(1, f'test {jobname}')
+
+        # It's current, so it should be ignored
+        self.fake_gerrit.addEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 0)
+
+        # Not current, so should be enqueued
+        A.addPatchset()
+        self.fake_gerrit.addEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 1)
+        self.assertEqual(self.history[0].name, jobname)
+
+    @simple_layout('layouts/gerrit-trigger-requirements.yaml')
+    def test_require_status(self):
+        # Test trigger require-status
+        jobname = 'require-status'
+        project = 'org/project'
+        A = self.fake_gerrit.addFakeChange(project, 'master', 'A')
+        # A comment event that we will keep submitting to trigger
+        comment = A.getChangeCommentEvent(1, f'test {jobname}')
+
+        # It's not merged, so it should be ignored
+        self.fake_gerrit.addEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 0)
+
+        # Merged, so should be enqueued
+        A.setMerged()
+        self.fake_gerrit.addEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 1)
+        self.assertEqual(self.history[0].name, jobname)
+
+    @simple_layout('layouts/gerrit-trigger-requirements.yaml')
+    def test_reject_status(self):
+        # Test trigger reject-status
+        jobname = 'reject-status'
+        project = 'org/project'
+        A = self.fake_gerrit.addFakeChange(project, 'master', 'A')
+        # A comment event that we will keep submitting to trigger
+        comment = A.getChangeCommentEvent(1, f'test {jobname}')
+
+        # It's not merged, so it should be enqueued
+        self.fake_gerrit.addEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 1)
+        self.assertEqual(self.history[0].name, jobname)
+
+        # Merged, so should be ignored
+        A.setMerged()
+        self.fake_gerrit.addEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 1)
+        self.assertEqual(self.history[0].name, jobname)
+
+    @simple_layout('layouts/gerrit-trigger-requirements.yaml')
+    def test_require_approval(self):
+        # Test trigger require-approval
+        jobname = 'require-approval'
+        project = 'org/project'
+        A = self.fake_gerrit.addFakeChange(project, 'master', 'A')
+        # A comment event that we will keep submitting to trigger
+        comment = A.getChangeCommentEvent(1, f'test {jobname}')
+
+        # Missing approval, so it should be ignored
+        self.fake_gerrit.addEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 0)
+
+        # Has approval, so it should be enqueued
+        A.addApproval('Verified', 1, username='zuul')
+        self.fake_gerrit.addEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 1)
+        self.assertEqual(self.history[0].name, jobname)
+
+    @simple_layout('layouts/gerrit-trigger-requirements.yaml')
+    def test_reject_approval(self):
+        # Test trigger reject-approval
+        jobname = 'reject-approval'
+        project = 'org/project'
+        A = self.fake_gerrit.addFakeChange(project, 'master', 'A')
+        # A comment event that we will keep submitting to trigger
+        comment = A.getChangeCommentEvent(1, f'test {jobname}')
+
+        # Missing approval, so it should be enqueued
+        self.fake_gerrit.addEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 1)
+        self.assertEqual(self.history[0].name, jobname)
+
+        # Has approval, so it should be ignored
+        A.addApproval('Verified', 1, username='zuul')
+        self.fake_gerrit.addEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 1)
+        self.assertEqual(self.history[0].name, jobname)

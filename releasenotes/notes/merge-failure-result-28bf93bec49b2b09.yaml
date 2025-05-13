@@ -1,0 +1,6 @@
+---
+features:
+  - |
+    A new buildset result ``MERGE_FAILURE`` is stored in the build
+    database in the case where a buildset is unable to be merged by
+    the upstream code review system.

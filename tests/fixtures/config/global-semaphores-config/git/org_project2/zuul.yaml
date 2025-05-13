@@ -1,0 +1,14 @@
+- semaphore:
+    name: project2-semaphore
+    max: 12
+
+- job:
+    name: test-project2-semaphore
+    semaphores: project2-semaphore
+
+- project:
+    check:
+      jobs:
+        - test-global-semaphore
+        - test-common-semaphore
+        - test-project2-semaphore

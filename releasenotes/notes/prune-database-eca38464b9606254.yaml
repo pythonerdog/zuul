@@ -1,0 +1,21 @@
+---
+features:
+  - |
+    A new command, ``prune-database`` has been added to `zuul-admin`
+    in order to remove database entries older than a certain age.
+upgrade:
+  - |
+    A SQL schema migration is added in order to add an ``updated``
+    column to the buildset table which will be used by the
+    `prune-database` command to determine which buildsets to delete.
+    The migration will attempt to use the most recent timestamp
+    associated with the buildset when initializing this column,
+    however, if no timestamps are available, it will initialize it to
+    1970-01-01.  Since this is considerably before Zuul's birthdate,
+    this means that any buildsets without timestamp information will
+    be pruned the first time `prune-database` is run.  It is expected
+    that buildsets with no timestamps, even very recent ones, are
+    typically uninteresting and therefore this should not cause a
+    hardship.  If this is not the case for your installation, you may
+    want to inspect the database and change the ``updated`` column to
+    a more recent value in these cases.

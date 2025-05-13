@@ -22,18 +22,22 @@ if [[ ! -d "${ZUUL_DIR}/.tox/venv" ]]; then
         tox -e venv --notest
     popd
 fi
+
+ANSIBLE_VERSION="2.7"
+ANSIBLE_ROOT="${ZUUL_DIR}/.tox/venv/lib/zuul/ansible/${ANSIBLE_VERSION}"
+ARA_DIR=$(dirname $("${ANSIBLE_ROOT}/bin/python3" -c 'import ara; print(ara.__file__)'))
+
 # Source tox environment
 source ${ZUUL_DIR}/.tox/venv/bin/activate
 
-# Install ARA if it's not installed (not in requirements.txt by default)
-python -c "import ara" &> /dev/null
-if [ $? -eq 1 ]; then
-    echo "ARA isn't installed... Installing it."
-    pip install ara
-fi
-ARA_DIR=$(dirname $(python3 -c 'import ara; print(ara.__file__)'))
-
 WORK_DIR=$(mktemp -d /tmp/zuul_logs_XXXX)
+
+# Copy zuul ansible modules into workdir
+ZUUL_ANSIBLE="${WORK_DIR}/zuul-ansible"
+mkdir -p "${ZUUL_ANSIBLE}/zuul"
+cp -Lr "${ZUUL_DIR}/zuul/ansible/${ANSIBLE_VERSION}" "${ZUUL_ANSIBLE}/zuul/ansible"
+touch "${ZUUL_ANSIBLE}/zuul/ansible/__init__.py"
+touch "${ZUUL_ANSIBLE}/zuul/__init__.py"
 
 if [ -z $1 ] ; then
     INVENTORY=$WORK_DIR/hosts.yaml
@@ -62,11 +66,12 @@ gathering = smart
 gather_subset = !all
 fact_caching = jsonfile
 fact_caching_connection = ~/.cache/facts
-lookup_plugins = $ZUUL_DIR/zuul/ansible/lookup
-callback_plugins = $ZUUL_DIR/zuul/ansible/callback:$ARA_DIR/plugins/callbacks
-module_utils = $ZUUL_DIR/zuul/ansible/module_utils
+lookup_plugins = ${ZUUL_ANSIBLE}/zuul/ansible/base/lookup
+callback_plugins = ${ZUUL_ANSIBLE}/zuul/ansible/base/callback:$ARA_DIR/plugins/callbacks
+action_plugins = ${ZUUL_ANSIBLE}/zuul/ansible/base/action
+module_utils = ${ZUUL_ANSIBLE}/zuul/ansible/base/module_utils
 stdout_callback = zuul_stream
-library = $ZUUL_DIR/zuul/ansible/library
+library = ${ZUUL_ANSIBLE}/zuul/ansible/base/library
 retry_files_enabled = False
 EOF
 
@@ -75,8 +80,14 @@ python3 $ZUUL_DIR/zuul/ansible/logconfig.py
 export ZUUL_JOB_LOG_CONFIG=$WORK_DIR/logging.json
 export ARA_DIR=$WORK_DIR/.ara
 export ARA_LOG_CONFIG=$ZUUL_JOB_LOG_CONFIG
+export PYTHONPATH="${ZUUL_ANSIBLE}:${PYTHONPATH}"
+export ZUUL_JOBDIR=$WORK_DIR
 rm -rf $ARA_DIR
-ansible-playbook $ZUUL_DIR/playbooks/zuul-stream/fixtures/test-stream.yaml
-ansible-playbook $ZUUL_DIR/playbooks/zuul-stream/fixtures/test-stream-failure.yaml
+
+"${ANSIBLE_ROOT}/bin/ansible" all -m zuul_console
+
+ANSIBLE="${ANSIBLE_ROOT}/bin/ansible-playbook"
+"${ANSIBLE}" "${ZUUL_DIR}/playbooks/zuul-stream/fixtures/test-stream.yaml"
+"${ANSIBLE}" "${ZUUL_DIR}/playbooks/zuul-stream/fixtures/test-stream-failure.yaml"
 # ansible-playbook $ZUUL_DIR/playbooks/zuul-stream/functional.yaml
 echo "Logs are in $WORK_DIR"

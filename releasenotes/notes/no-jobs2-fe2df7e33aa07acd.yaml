@@ -1,0 +1,5 @@
+---
+fixes:
+  - |
+    Further instances of reporting NO_JOBS results to the database
+    when not necessary have been corrected.

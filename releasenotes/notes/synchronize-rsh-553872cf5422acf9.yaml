@@ -1,0 +1,6 @@
+---
+security:
+  - |
+    The synchronize rsh rsync_opts is now prohibited for security reasons
+    as it could be used to circumvent executor host command execution
+    restrictions.

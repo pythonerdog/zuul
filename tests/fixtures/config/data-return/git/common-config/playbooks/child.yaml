@@ -1,7 +1,13 @@
-- hosts: localhost
+- hosts: node
   tasks:
     - name: Assert returned variables are valid
       assert:
         that:
           - child.value1 == 'data-return-relative'
           - child.value2 == 'data-return'
+          - returned_secret_password == 'fromreturn'
+          - jobvar == 'job'
+          - hostvar == 'host'
+          - groupvar == 'group'
+          - extravar == 'extra'
+          - test_secret.password == 'fromsecret'

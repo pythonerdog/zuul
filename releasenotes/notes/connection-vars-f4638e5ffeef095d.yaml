@@ -1,0 +1,15 @@
+---
+security:
+  - |
+    The following connection-related variables are no longer allowed
+    to be set in job definitions, as they may be used to circumvent
+    security measures:
+
+      * ansible_connection
+      * ansible_host
+      * ansible_python_interpreter
+      * ansible_shell_executable
+      * ansible_user
+
+    They may still be set using the corresponding settings in
+    Nodepool.

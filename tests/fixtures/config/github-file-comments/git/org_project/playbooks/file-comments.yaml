@@ -1,0 +1,28 @@
+- hosts: all
+  tasks:
+    - zuul_return:
+        data:
+          zuul:
+            file_comments:
+              README:
+                - line: 1
+                  message: "Simple line annotation"
+                - line: 2
+                  message: "Line annotation with level"
+                  level: warning
+                - line: 6
+                  message: "simple range annotation"
+                  level: info
+                  range:
+                    start_line: 4
+                    start_character: 0
+                    end_line: 6
+                    end_character: 10
+                - line: 7
+                  message: "Columns must be part of the same line"
+                  level: error
+                  range:
+                    start_line: 7
+                    start_character: 13
+                    end_line: 7
+                    end_character: 26

@@ -1,0 +1,7 @@
+---
+deprecations:
+  - |
+    The replacement fields ``change``, ``changes``, and ``status_url``
+    available in some pipeline reporter configurations are deprecated.
+    Use ``item_url``, which is automatically the best URL for
+    information about the item instead.

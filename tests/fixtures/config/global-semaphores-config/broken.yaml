@@ -1,0 +1,10 @@
+- tenant:
+    name: tenant-two
+    semaphores:
+      - global-semaphore
+    source:
+      gerrit:
+        config-projects:
+          - common-config
+        untrusted-projects:
+          - org/project2

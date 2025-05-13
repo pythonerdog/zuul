@@ -1,0 +1,8 @@
+upgrade:
+  - |
+    The default for `auth_type` has changed from
+    ``digest`` to ``basic``.  Digest authentication has not been supported
+    in Gerrit since version 2.15.
+
+    If your Zuul connects to an older version of Gerrit via HTTP
+    authentication, you may now need to explicitly set this value.

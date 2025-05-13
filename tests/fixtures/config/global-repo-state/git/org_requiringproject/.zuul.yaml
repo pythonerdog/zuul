@@ -1,0 +1,8 @@
+- project:
+    name: org/requiringproject
+    gate:
+      jobs:
+        - require-test1
+        - require-test2:
+            dependencies:
+              - require-test1

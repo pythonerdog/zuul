@@ -1,0 +1,5 @@
+---
+fixes:
+  - |
+    Correct the behavior of the timer driver to not trigger for branches
+    configured as always-dynamic.

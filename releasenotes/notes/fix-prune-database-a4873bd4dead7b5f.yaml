@@ -1,0 +1,16 @@
+---
+fixes:
+  - |
+    The `zuul-admin prune-database` command did not completely delete
+    expected data from the database.  It may not have deleted all of
+    the buildsets older than the specified cutoff time, and it may
+    have left orphaned data in ancillary tables.  This has been
+    corrected and it should now work as expected.  Additionally, a
+    `--batch-size` argument has been added so that it may delete data
+    in multiple transactions which can facilitate smoother operation
+    when run while Zuul is operational.
+
+    Users who have previously run the command may need to manually
+    delete rows from the `zuul_build`, `zuul_build_event`,
+    `zuul_artifact`, and `zuul_provides` tables which do not have
+    corresponding entries in the `zuul_buildset` table.

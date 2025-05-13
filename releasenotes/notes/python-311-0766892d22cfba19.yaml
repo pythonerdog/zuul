@@ -1,0 +1,5 @@
+---
+upgrade:
+  - |
+    Python 3.11 is now the only version of Python with which Zuul is
+    tested.

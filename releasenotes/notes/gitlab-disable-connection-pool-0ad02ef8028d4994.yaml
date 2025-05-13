@@ -1,0 +1,6 @@
+---
+features:
+  - |
+    It is now possible to disable connection pooling in the Gitlab
+    driver with :attr:`<gitlab connection>.disable_connection_pool`.
+    This option may be useful under adverse network conditions.

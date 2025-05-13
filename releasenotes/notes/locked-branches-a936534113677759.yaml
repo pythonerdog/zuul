@@ -1,0 +1,5 @@
+---
+features:
+  - |
+    The GitHub driver now supports excluding locked (read-only) branches
+    with the `exclude-locked-branches` tenant configuration setting.

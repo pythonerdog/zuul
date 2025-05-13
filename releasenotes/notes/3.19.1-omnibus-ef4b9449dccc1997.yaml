@@ -1,0 +1,42 @@
+---
+security:
+  - |
+    A long-standing security vulnerability regarding executing code on
+    the executor was corrected.
+
+    The Zuul executor was designed to prohibit executing command or
+    shell tasks on the executor itself (i.e., localhost in Ansible)
+    from untrusted playbooks.  Tobias Henkel discovered that this
+    check has been broken for some time, likely since June of 2018.
+
+    The use of bubblewrap means that any commands executed via this
+    vulnerability would still be contained within the restricted
+    environment, meaning that they can not access files outside of the
+    build directory or continue running longer than the job.  However,
+    by executing arbitrary commands, users may have been able to
+    connect to unprotected internal network services.
+
+    Because this bug is so long-standing, it is possible, even likely,
+    that users may have accidentally come to rely on it.  We
+    discovered two jobs in the zuul-jobs library which did so:
+    dco-license and promote-docker-image.  The promote-docker-image
+    job has been altered so it no longer needs to run a command on the
+    executor.  The dco-license job has been altered to run on a node.
+    If you would prefer to run it on the exceutor, you can create a
+    new job in a config-project that uses the validate-dco-license
+    role.
+
+    You may want to look for other jobs in your system which may be
+    affected by this.  To aid in that, we have created a script which
+    will examine the job-output.json files created by previous builds
+    and output any tasks it finds which are now (once again)
+    prohibited.  This script is available here:
+
+      https://opendev.org/zuul/zuul/src/branch/master/tools/find-untrusted-exec.py
+fixes:
+  - |
+    The dependency on kazoo has been upgraded to 2.8.0 which has an important
+    fix for using Zookeeper over TLS.
+  - |
+    The Github access token URL has been updated in order to remove a
+    deprecation warning.

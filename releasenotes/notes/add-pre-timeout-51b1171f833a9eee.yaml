@@ -1,0 +1,11 @@
+---
+features:
+  - |
+    Jobs now have the ability to set a :attr:`job.pre-timeout` value. This
+    timeout limits the amount of time that pre-run playbooks may consume.
+    This timeout counts against the normal :attr:`job.timeout` value and if
+    :attr:`job.pre-timeout` is unset then :attr:`job.timeout` is used.
+fixes:
+  - |
+    Job json API responses now include the :attr:`job.post-timeout`
+    configuration value for the job.

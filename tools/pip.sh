@@ -22,17 +22,61 @@ if [[ ! $(command -v yarn) ]]
 then
     pip install nodeenv
     # Initialize nodeenv and tell it to re-use the currently active virtualenv
-    # TODO(jeblair): remove node version pin.  upath 1.0.4 objects to node >9.
-    nodeenv --python-virtualenv -n 8.11.1
+    attempts=0
+    set +e
+    until nodeenv --python-virtualenv -n 23.10.0 ; do
+        ((attempts++))
+        if [[ $attempts > 2 ]]
+        then
+            echo "Failed creating nodeenv"
+            exit 1
+        fi
+    done
+    set -e
     # Use -g because inside of the virtualenv '-g' means 'install into the'
     # virtualenv - as opposed to installing into the local node_modules.
     # Avoid writing a package-lock.json file since we don't use it.
     # Avoid writing yarn into package.json.
     npm install -g --no-package-lock --no-save yarn
 fi
-if [[ ! -f zuul/web/static/status.html ]]
+if [[ ! -f zuul/web/static/index.html ]]
 then
-    yarn install
-    npm run build:dev
+    mkdir -p zuul/web/static
+    ln -sfn ../zuul/web/static web/build
+    pushd web/
+        if [[ -n "${YARN_REGISTRY}" ]]
+        then
+            echo "Using yarn registry: ${YARN_REGISTRY}"
+            sed -i "s#https://registry.yarnpkg.com#${YARN_REGISTRY}#" yarn.lock
+        fi
+
+        # Be forgiving of package retrieval errors
+        attempts=0
+        set +e
+        until yarn install; do
+            ((attempts++))
+            if [[ $attempts > 2 ]]
+            then
+                echo "Failed installing npm packages"
+                exit 1
+            fi
+        done
+        set -e
+
+        yarn build
+        if [[ -n "${YARN_REGISTRY}" ]]
+        then
+            echo "Resetting yarn registry"
+            sed -i "s#${YARN_REGISTRY}#https://registry.yarnpkg.com#" yarn.lock
+        fi
+    popd
 fi
 pip install $*
+
+# Fail-fast if pip detects conflicts
+pip check
+
+# Check if we're installing zuul. If so install the managed ansible as well.
+if echo "$*" | grep -vq requirements.txt; then
+    zuul-manage-ansible -v
+fi

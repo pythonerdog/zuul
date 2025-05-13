@@ -1,0 +1,15 @@
+---
+upgrade:
+  - |
+    An error was found in a change related to Zuul's internal
+    configuration cache which could cause Zuul to use cached in-repo
+    configuration files which no longer exist.  If a ``zuul.yaml`` (or
+    ``zuul.d/*`` or any related variant) file was deleted or renamed,
+    Zuul would honor that change immediately, but would attempt to
+    load both the old and new contents from its cache upon the next
+    restart.
+
+    This error was introduced in version 4.8.0.
+
+    If upgrading from 4.8.0, run ``zuul-scheduler full-reconfigure``
+    in order to correctly update the cache.

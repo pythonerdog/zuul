@@ -1,0 +1,5 @@
+---
+upgrade:
+  - |
+    Ansible 2.7 is now deprecated since it only receives security updates
+    and will be end of life soon.

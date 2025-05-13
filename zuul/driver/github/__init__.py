@@ -15,6 +15,7 @@
 from zuul.driver import Driver, ConnectionInterface, TriggerInterface
 from zuul.driver import SourceInterface, ReporterInterface
 from zuul.driver.github import githubconnection
+from zuul.driver.github import githubmodel
 from zuul.driver.github import githubtrigger
 from zuul.driver.github import githubsource
 from zuul.driver.github import githubreporter
@@ -30,12 +31,16 @@ class GithubDriver(Driver, ConnectionInterface, TriggerInterface,
     def getTrigger(self, connection, config=None):
         return githubtrigger.GithubTrigger(self, connection, config)
 
+    def getTriggerEventClass(self):
+        return githubmodel.GithubTriggerEvent
+
     def getSource(self, connection):
         return githubsource.GithubSource(self, connection)
 
-    def getReporter(self, connection, pipeline, config=None):
+    def getReporter(self, connection, pipeline, config=None,
+                    parse_context=None):
         return githubreporter.GithubReporter(
-            self, connection, pipeline, config)
+            self, connection, pipeline, config, parse_context)
 
     def getTriggerSchema(self):
         return githubtrigger.getSchema()

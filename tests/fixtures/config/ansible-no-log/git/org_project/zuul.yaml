@@ -18,6 +18,7 @@
 
 - job:
     name: no-log-unreachable
+    attempts: 1
     run: playbooks/no-log-unreachable.yaml
 
 - project:

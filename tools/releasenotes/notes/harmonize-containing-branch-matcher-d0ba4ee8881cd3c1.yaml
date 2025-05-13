@@ -1,0 +1,6 @@
+---
+upgrade:
+  - |
+    The branch matcher for containing branches of a tag will now perform a
+    normal regex match instead of requiring a full-match. This was done to
+    harmonize the matching behavior between the different change-types.

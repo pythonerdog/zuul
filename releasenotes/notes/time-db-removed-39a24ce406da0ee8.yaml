@@ -1,0 +1,10 @@
+---
+upgrade:
+  - |
+    The scheduler time database has been removed.  This was stored in
+    the scheduler state directory, typically ``/var/lib/zuul/times``.
+    The entire state directory on the scheduler is no longer used and
+    may now be removed.
+
+    Zuul now derives its estimated build duration times from the SQL
+    database.

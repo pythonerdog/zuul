@@ -1,0 +1,6 @@
+---
+features:
+  - |
+    Added the :attr:`pipeline.no-jobs` reporter action so that
+    reporters may be run when an item is dequeued into a pipeline
+    without having run any jobs.

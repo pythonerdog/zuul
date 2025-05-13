@@ -1,0 +1,40 @@
+---
+deprecations:
+  - |
+    The :attr:`job.cleanup-run` attribute is deprecated.  Instead,
+    list cleanup playbooks under :attr:`job.post-run` and set the
+    :attr:`job.post-run.cleanup` flag.
+upgrade:
+  - |
+    Existing cleanup-run playbooks are now executed during the
+    post-run phase of the job.  This is a change in behavior that will
+    run playbooks in a different order than before.  Previously all
+    cleanup-run playbooks would run after all post-run playbooks.
+    Zuul will now run post-run, then cleanup-run playbooks at each
+    level of the inheritance hierarchy (interleaving post-run and
+    cleanup-run playbooks from different levels of the hierarchy).
+
+    Note that this may have an impact on some jobs.  In particular, be
+    on the lookout for jobs with post-run playbooks that assume that
+    other, more-nested, post-run playbooks always run (for example, log
+    collection playbooks).  Ensure that log collection happens no more
+    nested than at the job level where logs are created.  Also be aware
+    of cleanup-run playbooks that remove artifacts required by post-run
+    playbooks.  Since more-nested cleanup-run playbooks can now run
+    before less-nested post-run playbooks, it may be necessary to move
+    cleanup actions to less-nested levels.
+
+    To facilitate upgrades, Zuul will ignore the result of cleanup-run
+    playbooks when specified using the old syntax, but once migrated
+    to the new syntax using post-run, these playbooks may cause a
+    POST_FAILURE just like any other post-run playbook.
+security:
+  - |
+    A vulnerability was discovered which could potentially allow jobs
+    with a malicious cleanup-run playbook to access the credentials of
+    their parents or the nodepool ssh key.
+
+    To protect against this, cleanup-run playbooks are now executed
+    during the post-run phase of the job, and Zuul will only execute
+    the post-run playbooks corresponding to the inheritance level of
+    previously-executed pre-run playbooks.

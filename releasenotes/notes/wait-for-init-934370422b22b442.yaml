@@ -1,0 +1,8 @@
+---
+features:
+  - |
+    The scheduler now accepts an argument `--wait-for-init` which will
+    cause it to wait until all tenants have been initialized before it
+    begins processing pipelines.  This may help large systems with
+    excess scheduler capacity perform a rolling restart of schedulers
+    more quickly.

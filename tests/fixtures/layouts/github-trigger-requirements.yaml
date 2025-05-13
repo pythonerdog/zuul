@@ -1,0 +1,112 @@
+- pipeline:
+    name: require-status
+    manager: independent
+    trigger:
+      github:
+        - event: pull_request
+          action: comment
+          comment: test require-status
+          require:
+            status:
+              - zuul:tenant-one/check:success
+    success:
+      github:
+        comment: true
+
+- pipeline:
+    name: reject-status
+    manager: independent
+    trigger:
+      github:
+        - event: pull_request
+          action: comment
+          comment: test reject-status
+          reject:
+            status:
+              - zuul:tenant-one/check:failure
+    success:
+      github:
+        comment: true
+
+- pipeline:
+    name: require-review
+    manager: independent
+    trigger:
+      github:
+        - event: pull_request
+          action: comment
+          comment: test require-review
+          require:
+            review:
+              - type: approved
+                permission: write
+    success:
+      github:
+        comment: true
+
+- pipeline:
+    name: reject-review
+    manager: independent
+    trigger:
+      github:
+        - event: pull_request
+          action: comment
+          comment: test reject-review
+          reject:
+            review:
+              - type: changes_requested
+                permission: write
+    success:
+      github:
+        comment: true
+
+- pipeline:
+    name: require-label
+    manager: independent
+    trigger:
+      github:
+        - event: pull_request
+          action: comment
+          comment: test require-label
+          require:
+            label:
+              - approved
+    success:
+      github:
+        comment: true
+
+- pipeline:
+    name: reject-label
+    manager: independent
+    trigger:
+      github:
+        - event: pull_request
+          action: comment
+          comment: test reject-label
+          reject:
+            label:
+              - rejected
+    success:
+      github:
+        comment: true
+
+- job:
+    name: base
+    parent: null
+    run: playbooks/base.yaml
+
+- job: {name: require-status}
+- job: {name: reject-status}
+- job: {name: require-review}
+- job: {name: reject-review}
+- job: {name: require-label}
+- job: {name: reject-label}
+
+- project:
+    name: org/project
+    require-status: {jobs: [require-status]}
+    reject-status: {jobs: [reject-status]}
+    require-review: {jobs: [require-review]}
+    reject-review: {jobs: [reject-review]}
+    require-label: {jobs: [require-label]}
+    reject-label: {jobs: [reject-label]}

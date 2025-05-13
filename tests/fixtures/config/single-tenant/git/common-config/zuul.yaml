@@ -4,6 +4,8 @@
     trigger:
       gerrit:
         - event: patchset-created
+        - event: comment-added
+          comment: '^(Patch Set [0-9]+:\n\n)?(?i:recheck)$'
     success:
       gerrit:
         Verified: 1
@@ -41,6 +43,21 @@
           ref: ^(?!refs/).*$
     precedence: low
 
+- pipeline:
+    name: promote
+    manager: supercedent
+    trigger:
+      gerrit:
+        - event: change-merged
+    precedence: low
+
+- pipeline:
+    name: periodic
+    manager: independent
+    trigger:
+      timer:
+        - time: '0 0 * * *'
+
 - job:
     name: base
     parent: null
@@ -74,11 +91,21 @@
 
 - job:
     name: project-post
+    tags:
+      - post
     nodeset:
       nodes:
         - name: static
           label: ubuntu-xenial
     run: playbooks/project-post.yaml
+
+- job:
+    name: project-promote
+    nodeset:
+      nodes:
+        - name: static
+          label: ubuntu-xenial
+    run: playbooks/project-promote.yaml
 
 - job:
     name: project-test2
@@ -123,9 +150,13 @@
     post:
       jobs:
         - project-post
+    promote:
+      jobs:
+        - project-promote
 
 - project:
     name: org/project1
+    queue: integrated
     check:
       jobs:
         - project-merge
@@ -136,7 +167,6 @@
         - project1-project2-integration:
             dependencies: project-merge
     gate:
-      queue: integrated
       jobs:
         - project-merge
         - project-test1:
@@ -145,9 +175,16 @@
             dependencies: project-merge
         - project1-project2-integration:
             dependencies: project-merge
+    post:
+      jobs:
+        - project-post
+    promote:
+      jobs:
+        - project-promote
 
 - project:
     name: org/project2
+    queue: integrated
     check:
       jobs:
         - project-merge
@@ -158,7 +195,6 @@
         - project1-project2-integration:
             dependencies: project-merge
     gate:
-      queue: integrated
       jobs:
         - project-merge
         - project-test1:
@@ -170,6 +206,7 @@
 
 - project:
     name: common-config
+    queue: integrated
     check:
       jobs:
         - project-merge
@@ -180,7 +217,6 @@
         - project1-project2-integration:
             dependencies: project-merge
     gate:
-      queue: integrated
       jobs:
         - project-merge
         - project-test1:
@@ -189,3 +225,68 @@
             dependencies: project-merge
         - project1-project2-integration:
             dependencies: project-merge
+
+- job:
+    name: test-job
+    run: playbooks/project-merge.yaml
+    required-projects:
+      - org/project
+
+- job:
+    name: complete-job
+    description: A fake job to test attribute
+    abstract: true
+    run: playbooks/run.yaml
+    pre-run: playbooks/pre-run.yaml
+    post-run:
+      - playbooks/post-run-01.yaml
+      - playbooks/post-run-02.yaml
+    cleanup-run: playbooks/cleanup-run.yaml
+
+- image:
+    name: ubuntu-xenial
+    type: cloud
+
+- flavor:
+    name: normal
+
+- label:
+    name: ubuntu-xenial
+    image: ubuntu-xenial
+    flavor: normal
+
+- label:
+    name: label1
+    image: ubuntu-xenial
+    flavor: normal
+
+- label:
+    name: label2
+    image: ubuntu-xenial
+    flavor: normal
+
+- section:
+    name: aws-us-east-1
+    region: us-east-1
+    connection: aws
+    host-key-checking: false
+    boot-timeout: 300
+    launch-timeout: 600
+    launch-attempts: 2
+    object-storage:
+      bucket-name: zuul
+    key-name: zuul
+    flavors:
+      - name: normal
+        instance-type: t3.medium
+    images:
+      - name: ubuntu-xenial
+        image-id: ami-1e749f67
+
+- provider:
+    name: aws-us-east-1-main
+    section: aws-us-east-1
+    labels:
+      - name: ubuntu-xenial
+      - name: label1
+      - name: label2

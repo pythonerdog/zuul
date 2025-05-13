@@ -78,6 +78,65 @@
         comment: true
         status: failure
 
+- pipeline:
+    name: checks-api-reporting
+    description: Reporting via Githubs Checks API
+    manager: independent
+    trigger:
+      github:
+        - event: push
+        - event: pull_request
+          action: opened
+    start:
+      github:
+        check: in_progress
+    success:
+      github:
+        check: success
+    failure:
+      github:
+        check: failure
+    dequeue:
+      github:
+        check: cancelled
+
+- pipeline:
+    name: checks-api-reporting-skipped
+    description: Reporting via Githubs Checks API
+    manager: independent
+    trigger:
+      github:
+        - event: push
+        - event: pull_request
+          action: opened
+    start:
+      github:
+        check: in_progress
+    success:
+      github:
+        check: success
+    failure:
+      github:
+        check: failure
+    dequeue:
+      github:
+        check: skipped
+
+- pipeline:
+    name: gate
+    manager: dependent
+    trigger:
+      github:
+        - event: pull_request
+          action: comment
+          comment: merge me
+    success:
+      github:
+        status: success
+        merge: true
+    failure:
+      github: {}
+
 - job:
     name: base
     parent: null
@@ -102,5 +161,23 @@
 - project:
     name: org/project2
     push-reporting:
+      jobs:
+        - project-test1
+
+- project:
+    name: org/project3
+    checks-api-reporting:
+      jobs:
+        - project-test1
+    gate:
+      jobs:
+        - project-test1
+
+- project:
+    name: org/project4
+    checks-api-reporting-skipped:
+      jobs:
+        - project-test1
+    gate:
       jobs:
         - project-test1

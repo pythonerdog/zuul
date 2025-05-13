@@ -1,0 +1,6 @@
+---
+upgrade:
+  - |
+    Support for Ansible version 5 has been removed.  Migrate any
+    existing jobs which rely on this version to Ansible version 6
+    before upgrading.

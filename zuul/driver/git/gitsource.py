@@ -15,6 +15,7 @@
 import logging
 from zuul.source import BaseSource
 from zuul.model import Project
+from zuul.zk.change_cache import ChangeKey
 
 
 class GitSource(BaseSource):
@@ -27,18 +28,31 @@ class GitSource(BaseSource):
                                         hostname, config)
 
     def getRefSha(self, project, ref):
-        raise NotImplemented()
+        raise NotImplementedError()
 
     def isMerged(self, change, head=None):
-        raise NotImplemented()
+        raise NotImplementedError()
 
-    def canMerge(self, change, allow_needs):
-        raise NotImplemented()
+    def canMerge(self, change, allow_needs, event=None, allow_refresh=False):
+        raise NotImplementedError()
 
-    def getChange(self, event, refresh=False):
-        return self.connection.getChange(event, refresh)
+    def getChangeKey(self, event):
+        connection_name = self.connection.connection_name
+        revision = f'{event.oldrev}..{event.newrev}'
+        if event.ref and event.ref.startswith('refs/heads/'):
+            branch = event.ref[len('refs/heads/'):]
+            return ChangeKey(connection_name, event.project_name,
+                             'Branch', branch, revision)
+        if event.ref:
+            return ChangeKey(connection_name, event.project_name,
+                             'Ref', event.ref, revision)
+        self.log.warning("Unable to format change key for %s" % (self,))
 
-    def getChangeByURL(self, url):
+    def getChange(self, change_key, refresh=False, event=None):
+        return self.connection.getChange(change_key, refresh=refresh,
+                                         event=event)
+
+    def getChangeByURL(self, url, event):
         return None
 
     def getChangesDependingOn(self, change, projects, tenant):
@@ -54,20 +68,23 @@ class GitSource(BaseSource):
             self.connection.addProject(p)
         return p
 
-    def getProjectBranches(self, project, tenant):
-        return self.connection.getProjectBranches(project, tenant)
+    def getProjectBranches(self, project, tenant, min_ltime=-1):
+        return self.connection.getProjectBranches(project, tenant, min_ltime)
+
+    def getProjectBranchCacheLtime(self):
+        return -1
 
     def getGitUrl(self, project):
         return self.connection.getGitUrl(project)
 
     def getProjectOpenChanges(self, project):
-        raise NotImplemented()
+        raise NotImplementedError()
 
-    def getRequireFilters(self, config):
+    def getRequireFilters(self, config, parse_context):
         return []
 
-    def getRejectFilters(self, config):
+    def getRejectFilters(self, config, parse_context):
         return []
 
     def getRefForChange(self, change):
-        raise NotImplemented()
+        raise NotImplementedError()

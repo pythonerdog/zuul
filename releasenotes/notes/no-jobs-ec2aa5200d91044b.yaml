@@ -1,0 +1,6 @@
+---
+fixes:
+  - |
+    A change in 5.2.3 began reporting NO_JOBS results to the database
+    which was unintentional.  This has been corrected and they are no
+    longer recorded in the database.

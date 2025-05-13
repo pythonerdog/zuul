@@ -15,7 +15,7 @@
 import re
 
 
-DEPENDS_ON_RE = re.compile(r"^Depends-On: (.*?)\s*$",
+DEPENDS_ON_RE = re.compile(r"^Depends-On:(.*?)\s*$",
                            re.MULTILINE | re.IGNORECASE)
 
 
@@ -25,5 +25,5 @@ def find_dependency_headers(message):
     for match in DEPENDS_ON_RE.findall(message):
         if match in dependencies:
             continue
-        dependencies.append(match)
+        dependencies.append(match.strip())
     return dependencies

@@ -1,6 +1,16 @@
 - hosts: localhost
   tasks:
     - zuul_return:
+        secret_data:
+          # This one should get through
+          returned_secret_password: fromreturn
+          # Everything else should be superceded by precedence
+          test_secret:
+            password: fromreturn
+          jobvar: return
+          hostvar: return
+          groupvar: return
+          extravar: return
         data:
           zuul:
             log_url: http://example.com/test/log/url/

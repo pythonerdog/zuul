@@ -1,0 +1,85 @@
+- job:
+    name: job1
+    files:
+      - job1.txt
+
+- job:
+    name: job2
+    files:
+      - job2.txt
+
+- job:
+    name: job3
+    files:
+      - job3.txt
+
+- job:
+    name: job4
+    files:
+      - job4.txt
+
+- job:
+    name: job5
+    files:
+      - job5.txt
+
+- job:
+    name: job6
+    files:
+      - job6.txt
+
+- job:
+    name: job7
+    files:
+      - job7.txt
+
+- job:
+    name: job8
+    files:
+      - job8.txt
+
+- job:
+    name: job9
+    files:
+      - job9.txt
+
+- job:
+    name: job-soft
+    files:
+      - job-soft.txt
+      
+- project:
+    name: org/project
+    check:
+      jobs:
+        - job-soft
+        - job1:
+            dependencies:
+              - name: job-soft
+                soft: true
+        - job2:
+            dependencies:
+              - job1
+              - name: job-soft
+                soft: true
+        - job3:
+            dependencies:
+              - job2
+              - name: job-soft
+                soft: true
+        - job4
+        - job5:
+            dependencies:
+              - name: job4
+                soft: true
+        - job6:
+            dependencies:
+              - job5
+        - job7
+        - job8:
+            dependencies:
+              - job7
+        - job9:
+            dependencies:
+              - name: job8
+                soft: true

@@ -1,0 +1,5 @@
+---
+features:
+  - |
+    The ability to configure Microsoft Login as an OpenID Connect
+    authentication provider has been added.

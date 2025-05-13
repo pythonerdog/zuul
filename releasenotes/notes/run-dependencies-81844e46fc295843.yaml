@@ -1,0 +1,15 @@
+---
+features:
+  - |
+    Zuul will now run any job that is a hard dependency of a job that
+    is set to run.
+
+    Previously if job B had a hard dependency on job A, and job A did
+    not run due to a file matcher, Zuul would report an error.  Now it
+    will instead ignore the file matcher on job A as long as job B is
+    to be run.
+
+    This will allow for simpler file matchers, more intuitive
+    behavior, and enable a new pattern for job graphs where job A
+    might have a file matcher that never matches, but job B will cause
+    it to run regardless.

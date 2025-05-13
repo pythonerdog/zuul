@@ -1,0 +1,10 @@
+---
+features:
+  - |
+    A new tenant project configuration option,
+    `implied-branch-matchers` has been added.  This is useful in
+    conjunction with the branch exclusion options which may cause Zuul
+    to change behavior as the set of load branches switches between
+    one and more than one.  The operator can fix the appropriate
+    behavior in the tenant config file rather than relying on the
+    heuristic in these cases.

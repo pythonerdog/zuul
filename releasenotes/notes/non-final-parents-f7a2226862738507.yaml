@@ -1,0 +1,12 @@
+---
+upgrade:
+  - |
+    Additional syntax checking is performed on job configuration
+    changes so that Zuul will report an error if a job inherits from a
+    non-permitted parent (such as a final job, intermediate job when
+    the child is not abstract, or a protected job in another project).
+    Previously, these situations might only be discovered when
+    freezing a job graph.
+
+    If any jobs currently in this situation exist, they will be
+    reported as configuration errors.

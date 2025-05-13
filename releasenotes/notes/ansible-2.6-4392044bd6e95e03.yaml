@@ -1,0 +1,4 @@
+---
+upgrade:
+  - |
+    Support for Ansible 2.6 has been removed.

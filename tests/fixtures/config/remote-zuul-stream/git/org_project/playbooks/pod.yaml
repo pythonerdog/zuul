@@ -1,0 +1,21 @@
+- hosts: all
+  tasks:
+    - zuul_console:
+        state: absent
+      failed_when: false
+
+    # This task should cause the port forwarder to crash since it
+    # attempts to connect (even though the task is skipped).
+    - name: "first shell"
+      shell: "echo first shell"
+      when: false
+
+    - zuul_console:
+
+    # Subsequent tasks should work, if the forwarder is up.
+    - name: "second shell"
+      shell: "echo second shell"
+      when: false
+
+    - name: "third shell"
+      shell: "echo third shell"

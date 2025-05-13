@@ -1,0 +1,6 @@
+---
+upgrade:
+  - |
+    Signal based triggering of full-reconfiguration in the scheduler
+    (deprecated since 3.3.0) has been removed.  Use ``zuul-scheduler
+    full-reconfigure`` instead.

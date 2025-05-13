@@ -1,0 +1,10 @@
+---
+features:
+  - |
+    Add replication_timeout to Gerrit connection configuration. Setting
+    this to a positive value makes Zuul's Gerrit connection replication
+    aware. Zuul will wait up to this many seconds for replication to
+    complete for events like patchset-created, change-merged, and
+    ref-updated before continuing to process those primary events.
+    This is useful if you have configured Zuul to look at a Gerrit
+    replica for git data.

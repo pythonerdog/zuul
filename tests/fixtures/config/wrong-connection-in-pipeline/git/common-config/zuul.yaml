@@ -1,0 +1,33 @@
+- pipeline:
+    name: gate
+    manager: dependent
+    trigger:
+      review_gerrit:
+        - event: comment-added
+          approval:
+            - Approved: 1
+    success:
+      another_gerrit:
+        Verified: 2
+        submit: true
+    failure:
+      another_gerrit:
+        Verified: -2
+    start:
+      another_gerrit:
+        Verified: 0
+    precedence: high
+
+- job:
+    name: base
+    parent: null
+
+- job:
+    name: test-job
+    run: playbooks/test-job.yaml
+
+- project:
+    name: review.example.com/org/project
+    gate:
+      jobs:
+        - test-job

@@ -1,0 +1,5 @@
+---
+fixes:
+  - |
+    A bug which prevented change cache cleanup (and therefore caused
+    ZooKeeper usage to grow without limits) was fixed.

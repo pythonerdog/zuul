@@ -1,0 +1,4 @@
+---
+features:
+  - |
+    The MQTT reporter now includes artifact information along with build results.

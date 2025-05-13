@@ -1,0 +1,25 @@
+- project:
+    queue: integrated
+    check:
+      jobs:
+        - project-merge
+        - project-test1:
+            dependencies: project-merge
+        - project-test2:
+            dependencies: project-merge
+        - project1-project2-integration:
+            dependencies:
+              - project-test1
+              - project-test2
+    gate:
+      jobs:
+        - project-merge
+        - project-test1:
+            dependencies: project-merge
+        - project-test2:
+            dependencies: project-merge
+        - project1-project2-integration:
+            dependencies:
+              - project-merge
+              - project-test1
+              - project-test2

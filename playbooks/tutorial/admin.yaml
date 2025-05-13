@@ -1,0 +1,84 @@
+# Stop the basic tutorial
+- name: Run podman-compose down
+  when: not local
+  shell:
+    cmd: podman-compose -p zuul-tutorial stop
+    chdir: src/opendev.org/zuul/zuul/doc/source/examples
+
+- name: Run podman-compose down
+  when: local
+  shell:
+    cmd: podman-compose -p zuul-tutorial stop
+    chdir: ../../doc/source/examples
+
+# Restart with the new config
+- name: Run podman-compose up
+  when: not local
+  shell:
+    cmd: podman-compose -p zuul-tutorial up -d
+    chdir: src/opendev.org/zuul/zuul/doc/source/examples
+  environment:
+    ZUUL_TUTORIAL_CONFIG: "./keycloak/etc_zuul/"
+
+- name: Run podman-compose up
+  when: local
+  shell:
+    cmd: podman-compose -p zuul-tutorial up -d
+    chdir: ../../doc/source/examples
+  environment:
+    ZUUL_TUTORIAL_CONFIG: "./keycloak/etc_zuul/"
+
+# Start keycloak
+- name: Run podman-compose up
+  when: not local
+  shell:
+    cmd: podman-compose -p zuul-tutorial-keycloak up -d
+    chdir: src/opendev.org/zuul/zuul/doc/source/examples/keycloak
+
+- name: Run podman-compose up
+  when: local
+  shell:
+    cmd: podman-compose -p zuul-tutorial-keycloak up -d
+    chdir: ../../doc/source/examples/keycloak
+
+# Verify that Zuul runs with the new config
+- name: Wait for Zuul
+  uri:
+    url: http://localhost:9000/api/tenant/example-tenant/status
+    method: GET
+    return_content: true
+    status_code: 200
+    body_format: json
+  register: result
+  retries: 30
+  delay: 10
+  until: result.status == 200 and result.json["zuul_version"] is defined
+  changed_when: false
+
+# In case ZK is shutdown first, allow the locks to expire.
+- name: Delay for ZK lock expiration
+  wait_for:
+    timeout: 30
+  delegate_to: localhost
+
+- name: Verify Keycloak authentication is available
+  uri:
+    url: http://localhost:9000/api/tenant/example-tenant/info
+    method: GET
+    return_content: true
+    status_code: 200
+    body_format: json
+  register: result
+  failed_when: result.json["info"]["capabilities"]["auth"]["realms"]["zuul-demo"]["authority"] != "http://keycloak:8082/realms/zuul-demo"
+  changed_when: false
+
+- name: Verify that old builds are available
+  uri:
+    url: "http://localhost:9000/api/tenant/example-tenant/builds"
+    method: GET
+    return_content: true
+    status_code: 200
+    body_format: json
+  register: result
+  failed_when: "result.json | length < 4"
+  changed_when: false

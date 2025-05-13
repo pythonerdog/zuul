@@ -1,0 +1,80 @@
+query canMergeData(
+  $owner: String!
+  $repo: String!
+  $pull: Int!
+  $head_sha: String!
+  $ref_name: String!
+) {
+  repository(owner: $owner, name: $repo) {
+    branchProtectionRules(first: 100) {
+      pageInfo {
+        endCursor
+        hasNextPage
+      }
+      nodes {
+        pattern
+        requiredStatusCheckContexts
+        requiresApprovingReviews
+        requiresCodeOwnerReviews
+	requiresConversationResolution
+        matchingRefs(first: 100, query: $ref_name) {
+          nodes {
+            name
+          }
+        }
+      }
+    }
+    pullRequest(number: $pull) {
+      id
+      isDraft
+      mergeable
+      reviewDecision
+      reviewThreads(first: 100) {
+        pageInfo {
+          endCursor
+          hasNextPage
+        }
+        nodes {
+          isResolved
+        }
+      }
+    }
+    object(expression: $head_sha) {
+      ... on Commit {
+        id
+        checkSuites(first: 100) {
+          pageInfo {
+            endCursor
+            hasNextPage
+          }
+          nodes {
+	    id
+            app {
+              name
+              slug
+            }
+            checkRuns(first: 100) {
+              pageInfo {
+                endCursor
+                hasNextPage
+              }
+              nodes {
+                name
+                conclusion
+              }
+            }
+          }
+        }
+        status {
+          contexts {
+            creator {
+              login
+            }
+            state
+            context
+          }
+        }
+      }
+    }
+  }
+}

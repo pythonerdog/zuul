@@ -1,0 +1,55 @@
+---
+security:
+  - |
+    The ability to use Ansible Jinja templates in Zuul job variables
+    is partially restricted.
+
+    It was found that the ability to use Jinja templates in Zuul job
+    variables could be used to expose the contents of secrets.  To
+    remedy this, the values of Zuul job variables are frozen at the
+    start of the job and these values are used for trusted playbooks
+    and playbooks with secrets.  The freezing action is taken without
+    access to any secrets so they can not be exposed.
+
+    This means that Zuul job variables which reference non-secret
+    values that are known at the start of the job (including any
+    zuul.* variable) will continue to work as expected.  Job variables
+    which reference secrets will not work (they will be undefined).
+    In untrusted playbooks, job variables are still dynamically
+    evaluated and can make use of values that are set after the start
+    of the job.
+
+    Additionally, `job.extra-vars` are no longer passed to Ansible
+    using the "-e" command line options.  They could be used to expose
+    secrets because they take precedence over some internal playbook
+    variables in some circumstances.  Zuul's extra-vars are now passed
+    as normal inventory variables, however, they retain precedence
+    over all other Zuul job variables (`vars`, `host-vars`, and
+    `group-vars`) except secrets.
+
+    Secrets are also now passed as inventory variables as well for the
+    same reason.  They have the highest precedence of all Zuul job
+    variables.  Their values are tagged with ``!unsafe`` so that
+    Ansible will not evaluate them as Jinja expressions.
+
+    If you are certain that a value contained within a secret is safe
+    to evaluate as a Jinja expression, you may work around this
+    limitation using the following construct in a playbook:
+
+    .. code-block:: yaml
+
+       - set_fact:
+           unsafe_var_eval: "{{ hostvars['localhost'].secret.var }}"
+
+    This will force an explicit evaluation of the variable.  This is
+    generally safe to do in a situation where a playbook is accessing
+    a single secret by name, with no other secrets in scope.  Do not
+    use this capability with more than one secret that is not under
+    the control of the project where the playbook is defined.
+
+    Similarly, versions of all the original job variables tagged with
+    ``!unsafe`` are available under the ``unsafe_vars`` variable
+    hierarchy.  For example, the job variable `myvar` would be
+    available under `unsafe_vars.myvar`.  It is not recommended to
+    evaluate ``unsafe_vars`` expressions except in the most controlled
+    of circumstances.  They are almost impossible to render safely.

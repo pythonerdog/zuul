@@ -1,0 +1,9 @@
+- job:
+    name: test-post
+    run: playbooks/test-post.yaml
+
+
+- project:
+    post:
+      jobs:
+        - test-post

@@ -1,4 +1,8 @@
 - job:
+    name: add-host
+    run: playbooks/add-host.yaml
+
+- job:
     parent: python27
     name: faillocal
     run: playbooks/faillocal.yaml
@@ -12,12 +16,26 @@
     name: org/project
     check:
       jobs:
-        - python27
-        - faillocal
-        - check-vars
-        - check-hostvars
-        - check-secret-names
-        - timeout
-        - post-timeout
-        - hello-world
-        - failpost
+        # The one-line dependencies below are only here to sequence
+        # the jobs so that we don't have too many ansible processes
+        # running at once during unit tests.
+        - add-host
+        - python27: {dependencies: add-host}
+        - faillocal: {dependencies: python27}
+        - check-vars: {dependencies: python27}
+        - check-hostvars:
+            dependencies:
+              - check-vars
+        - check-secret-names:
+            dependencies:
+              - check-hostvars
+        - timeout: {dependencies: check-hostvars}
+        - pre-timeout: {dependencies: check-hostvars}
+        - post-timeout: {dependencies: check-secret-names}
+        - hello-world: {dependencies: check-secret-names}
+        - failpost: {dependencies: hello-world}
+        - multiple-child: {dependencies: hello-world}
+        - multiple-child-no-run: {dependencies: multiple-child}
+        - multiple-run: {dependencies: multiple-child-no-run}
+        - multiple-run-failure: {dependencies: multiple-run}
+        - bubblewrap: {dependencies: multiple-run}

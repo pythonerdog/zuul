@@ -1,0 +1,4 @@
+features:
+  - |
+    It is now possible to select the merge method GitHub uses to merge a Pull
+    Request to the base branch.

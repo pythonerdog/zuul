@@ -1,0 +1,1044 @@
+:root {
+    /* Zuul color schema based on the default Patternfly 4 colors, but
+     * with a slightly different green tone to improve usability for
+     * users who are colorblind.
+     *
+     * This colors are also suitable for the dark mode.
+     */
+    --zuul-color-success: #5ba352; /* --pf-global--palette--green-400 */
+    --zuul-color-danger: #c9190b; /* --pf-global--palette--red-100 */
+    --zuul-color-warning: #f0ab00; /* --pf-global--warning-color--100 */
+    --zuul-color-info: #2b9af3; /* --pf-global--info-color--100 */
+    --zuul-color-disabled: #8a8d90; /* --pf-global--palette--black-500 */
+}
+
+:root:where(.pf-theme-dark) {
+    --zuul-color-disabled: #444548; /* --pf-global--palette--black-500 */
+}
+
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body > #root > div {
+    height: 100vh;
+}
+
+/* Make the H2 header inline-block so that the refresh icon/button can
+   share space with it floating on the right. */
+h2 {
+    display: inline-block;
+}
+
+.pf-c-title {
+    padding-bottom: 10px;
+}
+
+a.refresh {
+  cursor: pointer;
+  border-bottom-style: none;
+  text-decoration: none;
+}
+
+.time {
+  white-space: nowrap;
+}
+
+/* Navigation bar */
+.zuul-page .pf-c-brand {
+    /* TODO (felix): If we can define a size in the logo.svg itself, this
+       shouldn't be necessary. */
+    height: 1.5em;
+}
+
+.zuul-page .pf-c-page__header {
+    min-height: 0;
+}
+
+.zuul-page .pf-c-page__main-nav {
+    background-color: var(--pf-global--BackgroundColor--dark-300);
+    padding-top: 0;
+}
+
+.pf-c-page__main-section.zuul-toolbar-section {
+    padding-bottom: 8px;
+}
+
+.pf-c-page__main-section.zuul-main-section {
+    padding-top: 0;
+}
+
+.zuul-select-tz {
+    /* Always use black because when using dark mode the theme will default
+       to another dark color which is hard to see on a white background */
+    color: #000;
+}
+
+.pf-theme-dark .zuul-select-tz .zuul-select-tz__option {
+    background: #222;
+    color: #fff;
+}
+
+.pf-theme-dark .zuul-select-tz .zuul-select-tz__option:hover {
+    background: #000;
+}
+
+/* Toolbar */
+
+.zuul-toolbar-section .pf-l-level {
+    /* Don't align items on center, as this would shift the reload button
+       and toolbar stats when a filter is applied and the chip group
+       shows up below the search input field. */
+    align-items: normal;
+}
+
+.zuul-toolbar-stats-item.pf-c-toolbar__item,
+.zuul-toolbar-stats-item-reverse.pf-c-toolbar__item {
+    margin-right: 0.5rem;
+}
+
+.zuul-toolbar-stats-item .pf-c-label__content,
+.zuul-toolbar-stats-item-reverse .pf-c-label__content {
+    font-size: var(--pf-global--FontSize--xs);
+}
+
+.zuul-toolbar-stats-item__value {
+    font-weight: bold;
+}
+
+.zuul-toolbar-stats-item .zuul-toolbar-stats-item__value {
+    margin-right: 4px;
+}
+
+.zuul-toolbar-stats-item-reverse .zuul-toolbar-stats-item__name {
+    margin-right: 4px;
+}
+
+.zuul-toolbar-stats-item__extended {
+    text-align: left;
+    font-size: var(--pf-global--FontSize--sm);
+}
+
+/* Config error modal */
+.zuul-config-errors-title {
+    font-size: var(--pf-global--FontSize--xl);
+}
+
+.zuul-config-errors-count {
+    margin-left: var(--pf-global--spacer--md);
+}
+
+.pf-theme-dark .zuul-config-errors-title, .pf-theme-dark .zuul-config-errors-count {
+    color: #fff !important;
+}
+
+.pf-theme-dark .pf-c-notification-drawer pre {
+    background: #000;
+    color: #fff;
+}
+
+/*
+ * Build Lists and Tables
+ */
+
+/* Improve the hover effect of selected lines in the selectable data list*/
+.pf-c-data-list__item.pf-m-selectable:hover:not(.pf-m-selected),
+.pf-c-data-list__item.pf-m-selectable:focus:not(.pf-m-selected) {
+    --pf-c-data-list__item--before--BackgroundColor: var(
+        --pf-c-data-list__item--m-selected--before--BackgroundColor
+    );
+    font-weight: bold;
+}
+
+.zuul-menu-dropdown-toggle {
+    background: transparent !important;
+}
+
+.zuul-menu-dropdown-toggle:before {
+    content: none !important;
+}
+
+.zuul-menu-dropdown-toggle:hover {
+    border-bottom: none;
+}
+
+.zuul-menu-dropdown-toggle-expanded:before {
+    border-left: none;
+    border-right: none;
+    border-top: none;
+    border-bottom: none;
+}
+
+/* Remove ugly outline when a Switch is selected */
+.pf-c-switch {
+    --pf-c-switch__input--focus__toggle--OutlineWidth: 0;
+}
+
+/* Keep the normal font-size for compact tables */
+.zuul-table td {
+    font-size: var(--pf-global--FontSize--md);
+}
+
+/* Align padding of compact expendable (child) rows. Without this there is
+   nearly no padding. */
+.zuul-build-table .pf-c-table__expandable-row.pf-m-expanded {
+    --pf-c-table--cell--PaddingTop: var(
+        --pf-c-table--m-compact--cell--PaddingTop
+    );
+    --pf-c-table--cell--PaddingBottom: var(
+        --pf-c-table--m-compact--cell--PaddingBottom
+    );
+}
+
+/* Use the same hover effect on table rows like for the selectable data list */
+.zuul-table tbody tr:hover {
+    box-shadow: var(--pf-global--BoxShadow--sm-top),
+      var(--pf-global--BoxShadow--sm-bottom);
+}
+
+@media screen and (max-width: 768px) {
+    /* For the small-screen table layout the before element is already used to
+       show the column names. Thus, we fall back to the border to show the hover
+       effect. The drawback with that is, that we can't show a nice transition.
+       */
+    .zuul-table tbody tr:hover {
+        border-left-color: var(--pf-global--active-color--100);
+        border-left-width: var(--pf-global--BorderWidth--lg);
+        border-left-style: solid;
+        /* Compensate the border width with a negative margin */
+        margin-left: -3px;
+    }
+}
+
+@media screen and (min-width: 769px) {
+    /* For the larger screens (normal table layout) we can use the before
+       element on the first table cell to show the same hover effect like for
+       the data list */
+    .zuul-table tbody tr td:first-child::before {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: 0;
+        width: var(--pf-global--BorderWidth--lg);
+        content: "";
+        background-color: transparent;
+        transition: var(--pf-global--Transition);
+    }
+
+    .zuul-table tbody tr:hover td:first-child::before {
+        background-color: var(--pf-global--active-color--100);
+    }
+
+    /* Hide the action column with the build link on larger screen. This is only
+       needed for the mobile version as we can't use the "magnifying-glass icon
+       on hover" effect there. */
+    .zuul-table .pf-c-table__action {
+        display: none;
+    }
+}
+
+/*
+ * Build/Buildset result page
+ */
+.zuul-build-attributes > .pf-l-flex > * {
+    padding-bottom: var(--pf-global--spacer--sm);
+    padding-left: var(--pf-global--spacer--sm);
+    padding-right: var(--pf-global--spacer--sm);
+}
+
+/* Status page */
+
+.zuul-show-all-switch {
+    padding-left: var(--pf-global--spacer--sm);
+}
+
+.zuul-remaining-time {
+    text-align: right;
+}
+
+.zuul-unknown-remaining-time {
+    text-align: right;
+    padding-right: 4px;
+}
+
+/* Use the same hover effect like for selectable cards, but without
+   actually selecting them */
+.zuul-queue-item:hover {
+    box-shadow: var(--pf-c-card--m-selectable--active--BoxShadow);
+    cursor: default;
+}
+
+.zuul-pipeline-summary .zuul-compact-card:nth-child(1) .pf-c-card__title {
+    padding-top: 0;
+}
+
+.zuul-expand-icon {
+    margin-left: 4px;
+    vertical-align: -0.2em;
+}
+
+.zuul-expand-icon:hover {
+    cursor: pointer;
+}
+
+.pf-c-popover.zuul-queue-item-popover .pf-c-popover__content h6 {
+    margin-bottom: 0;
+    margin-top: 5px;
+}
+
+.pf-c-popover.zuul-queue-item-popover .pf-c-popover__footer {
+    margin-top: 8px;
+}
+
+/* Override PF4 padding values on compact cards to make them even more
+   compact. */
+.pf-c-card.zuul-compact-card .pf-c-card__header {
+    padding: 8px 8px 4px 8px;
+}
+
+.pf-c-card.zuul-compact-card .pf-c-card__header .pf-c-card__title {
+    padding: 0;
+    overflow-wrap: anywhere;
+}
+
+.pf-c-card.zuul-compact-card .pf-c-card__body {
+    padding: 0 8px 8px 8px;
+}
+
+.pf-c-card.zuul-compact-card .pf-c-expandable-section__toggle {
+    padding-bottom: 0;
+}
+
+.pf-c-card.zuul-compact-card .pf-c-card__actions {
+    margin-right: 0;
+}
+
+.pf-c-card.zuul-compact-card .pf-c-card__actions > * + * {
+    margin-left: 0;
+}
+
+.pf-c-card.zuul-compact-card .pf-c-card__actions .zuul-change-filter-dropdown button {
+    padding: 6px;
+}
+
+.pf-c-card.zuul-compact-card .pf-c-card__actions .zuul-admin-dropdown {
+    margin-right: 4px;
+    width: 28px;
+}
+
+.pf-c-card.zuul-compact-card .pf-c-expandable-section__content {
+    margin-top: 8px;
+}
+
+.zuul-compact-grid {
+    grid-gap: 4px;
+}
+
+.zuul-compact-expendable-section .pf-c-expandable-section__toggle-text {
+    margin-left: 4px;
+}
+
+.zuul-pipeline-link {
+    color: #363636;
+    font-size: var(--pf-global--FontSize--xl);
+}
+
+.zuul-item-square {
+    cursor: pointer;
+    padding: 0 !important;
+}
+
+.zuul-item-square-success {
+    color: var(--zuul-color-success) !important;
+}
+.zuul-item-square-success svg:hover {
+    color: var(--pf-global--palette--green-600) !important;
+}
+.zuul-item-square-danger {
+    color: var(--zuul-color-danger) !important;
+}
+.zuul-item-square-danger svg:hover {
+    color: var(--pf-global--palette--red-300) !important;
+}
+.zuul-item-square-info {
+    color: var(--zuul-color-info) !important;
+}
+.zuul-item-square-info svg:hover {
+    color: var(--pf-global--palette--blue-500) !important;
+}
+.zuul-item-square-warning {
+    color: var(--zuul-color-warning) !important;
+}
+.zuul-item-square-warning svg:hover {
+    color: var(--pf-global--palette--orange-400) !important;
+}
+.zuul-item-square-pending {
+    color: var(--zuul-color-disabled) !important;
+}
+.zuul-item-square-pending svg:hover {
+    color: var(--pf-global--palette--black-800) !important;
+}
+
+.zuul-change-queue .pf-c-card__title.zuul-change-queue-name {
+    padding: 0 0 8px 0;
+}
+
+.pf-c-card.zuul-compact-card .pf-c-card__body.zuul-change-queue-body,
+.pf-c-card__body.zuul-change-queue-body {
+    padding-left: 0;
+    padding-right: 0;
+}
+
+.zuul-change-queue .pf-c-progress-stepper__step-main {
+    margin-bottom: 8px;
+    margin-top: 0;
+}
+
+.zuul-change-queue .pf-c-progress-stepper__step-icon {
+    font-size: 0.9rem;
+    --pf-c-progress-stepper__step-icon--Width: 1.5rem;
+    --pf-c-progress-stepper__step-icon--Height: 1.5rem;
+}
+
+.zuul-change-queue .pf-c-card.zuul-compact-card .zuul-change-link {
+    padding-right: 2px;
+    padding-bottom: 0;
+}
+
+.zuul-pipeline-summary .zuul-change-queue {
+    padding-top: 4px;
+    width: 100%;
+}
+
+.zuul-job-list.pf-c-data-list.pf-m-grid-md .pf-c-data-list__item-content {
+    --pf-c-data-list__item-content--md--PaddingBottom: 4px;
+}
+
+.zuul-job-list.pf-c-data-list.pf-m-grid-md .pf-c-data-list__item-content .pf-c-data-list__cell {
+    --pf-c-data-list__cell--PaddingTop: 4px;
+    --pf-c-data-list__cell--cell--PaddingTop: 4px;
+}
+
+.zuul-job-list .pf-c-data-list__item-row {
+    padding-left: 4px;
+    padding-right: 4px;
+}
+
+.zuul-job-list .pf-c-data-list__item:last-child {
+    border-bottom: none;
+}
+
+.zuul-job-list .pf-c-data-list__item:last-child .pf-c-data-list__item-content {
+    padding-bottom: 0;
+}
+
+.zuul-job-list .zuul-job-name {
+    font-size: small;
+}
+
+/* Skipped jobs toggle + list */
+
+.zuul-job-list .pf-c-data-list__item-control {
+    margin-right: 0;
+}
+
+.zuul-job-list .pf-c-data-list__item.pf-m-expanded {
+    --pf-c-data-list__item--before--BackgroundColor: none;
+}
+
+.zuul-job-list .pf-c-data-list__item-control button {
+    padding-left: 6px;
+    padding-right: 6px;
+}
+
+.zuul-job-list .zuul-skipped-job-row {
+    margin-left: 16px;
+}
+
+@media screen and (max-width: 768px) {
+    .pf-c-data-list.pf-m-compact.pf-m-grid-md.zuul-job-list {
+        border-top-width: 4px;
+    }
+    .zuul-job-list .pf-c-data-list__item {
+        border-bottom-width: 4px;
+    }
+}
+
+/* Use a fixed width for job result labels. Otherwise the width will
+   be different based on the length of the result string (e.g. SUCCESS,
+   POST_FAILURE, RETRY_LIMIT) */
+.zuul-job-result-label.pf-c-label {
+    border-radius: 3px;
+    width: 90px;
+    /* Align font and padding to match the "old" label design */
+    padding: .2em .6em .3em;
+    border: none;
+    /* Align height to match the height of a job's progress bar */
+    height: 24px;
+}
+
+.zuul-job-result-label.pf-c-label.pf-m-green {
+    background-color: var(--zuul-color-success);
+}
+
+.zuul-job-result-label.pf-c-label.pf-m-red {
+    background-color: var(--zuul-color-danger);
+}
+
+.zuul-job-result-label.pf-c-label.pf-m-orange {
+    background-color: var(--zuul-color-warning);
+}
+
+.zuul-job-result-label.pf-c-label.pf-m-blue {
+    background-color: var(--zuul-color-info);
+}
+
+.zuul-job-result-label.pf-c-label {
+    /* grey variant, without additional "pf-m-" class */
+    background-color: var(--zuul-color-disabled);
+}
+
+.zuul-job-result-label.pf-c-label .pf-c-label__content::before {
+    border-radius: 3px;
+    border: none;
+}
+
+.zuul-job-result-label.pf-c-label .pf-c-label__content {
+    width: 100%;
+    display: block;
+    text-align: center;
+    /* Align font color to match the "old" label design */
+    color: #fff;
+}
+
+/* Remove grid gap for job progress bars to align them with the
+   width of the result labels. */
+.pf-c-progress.zuul-progress,
+.pf-c-progress.zuul-progress-animated {
+    --pf-c-progress--GridGap: 0;
+}
+
+/* Make job progress bars the same width as the job result labels */
+.zuul-progress div.pf-c-progress__bar {
+    width: 90px;
+    height: 24px;
+}
+
+.zuul-progress .pf-c-progress__indicator,
+.zuul-progress-animated .pf-c-progress__indicator {
+    border-radius: 3px;
+    height: 24px;
+}
+
+.zuul-progress div.pf-c-progress__bar::before,
+.zuul-progress-animated div.pf-c-progress__bar::before {
+    border-radius: 3px;
+}
+
+.zuul-progress-animated div.pf-c-progress__bar {
+    width: 90px;
+    height: 24px;
+    background-color: var(--pf-global--palette--blue-50);
+}
+
+.zuul-progress-animated div.pf-c-progress__bar:after {
+    content: "";
+    position: absolute;
+    top: 0; left: 0; bottom: 0; right: 0;
+    background-image: linear-gradient(
+      -45deg,
+      rgba(255, 255, 255, .2) 25%,
+      transparent 25%,
+      transparent 50%,
+      rgba(255, 255, 255, .2) 50%,
+      rgba(255, 255, 255, .2) 75%,
+      transparent 75%,
+      transparent
+    );
+    z-index: 1;
+    background-size: 50px 50px;
+    animation: move 2s linear infinite;
+    overflow: hidden;
+}
+
+/* Keyframes are needed to make the progress bar animation work in Chrome */
+@keyframes move {
+    0% {
+      background-position: 0 0;
+    }
+    100% {
+      background-position: 50px 50px;
+    }
+}
+
+.pf-c-progress.zuul-item-progress {
+    --pf-c-progress--m-success__bar--BackgroundColor: var(--zuul-color-success);
+    --pf-c-progress--m-warning__bar--BackgroundColor: var(--zuul-color-warning);
+    --pf-c-progress--m-danger__bar--BackgroundColor: var(--zuul-color-danger);
+}
+
+/* Hide PF4 status indicator (red cross, green checkmark) next to a progress
+   bar */
+.pf-c-progress.zuul-item-progress .pf-c-progress__status,
+.pf-c-progress.zuul-progress .pf-c-progress__status {
+    display: none;
+}
+
+.pf-c-progress-stepper.zuul-queue-branch {
+    margin-top: 20px;
+}
+
+.zuul-branch-wrapper::before {
+    content: "";
+    position: absolute;
+    border-bottom: var(--pf-c-progress-stepper__step-connector--before--BorderRightWidth) solid var(--pf-c-progress-stepper__step-connector--before--BorderRightColor);
+    left: 15px;
+    height: 14px;
+    width: 40px;
+}
+
+.zuul-pipeline-header h3 {
+    font-weight: var(--pf-global--FontWeight--bold);
+}
+
+.zuul-change {
+    margin-bottom: 10px;
+}
+
+.zuul-change-dark {
+    margin-bottom: 10px;
+    border-color: #222;
+}
+
+.zuul-change-id {
+    float: right;
+}
+
+.zuul-job-result {
+    float: right;
+    width: 70px;
+    height: 20px;
+    margin: 2px 0 0 0;
+    padding: 4px;
+}
+
+/* Backwards-compatibility for progress bar on Change/Item panel */
+.zuul-status-content .zuul-change-total-result {
+    height: 10px;
+    width: 180px;
+}
+
+.zuul-change-total-result {
+    width: 100%;
+    margin: 0;
+    display: inline-block;
+    vertical-align: middle;
+}
+
+.zuul-spinner,
+.zuul-spinner:hover {
+    opacity: 0;
+    transition: opacity 0.5s ease-out;
+    cursor: default;
+    pointer-events: none;
+}
+
+.zuul-spinner-on,
+.zuul-spinner-on:hover {
+    opacity: 1;
+    transition-duration: 0.2s;
+    cursor: progress;
+}
+
+.zuul-change-cell {
+    padding-left: 5px;
+    overflow-wrap: anywhere;
+}
+
+.zuul-change-job {
+    padding: 2px 8px;
+}
+
+.zuul-change-job-dark {
+    padding: 2px 8px;
+    background: #000;
+    color: #ccc;
+    border: 1px solid #222;
+}
+
+/* Force_break_very_long_non_hyphenated_repo_names */
+.change_project {
+    word-break: break-all;
+}
+
+.zuul-skipped-jobs-button {
+    font-size: small;
+    padding: 0;
+}
+
+.zuul-non-voting-desc {
+    font-size: smaller;
+}
+
+.zuul-patchset-header {
+    font-size: small;
+    padding: 8px 12px;
+}
+
+.zuul-patchset-header-dark {
+    font-size: small;
+    padding: 8px 12px;
+    background: #000 !important;
+    color: #ccc !important;
+    border-color: #222 !important;
+}
+
+.zuul-patchset-body {
+}
+
+.zuul-patchset-body-dark {
+    border-top: 1px solid #000;
+}
+
+.zuul-log-output {
+    color: black;
+}
+
+.zuul-log-output a,
+.zuul-log-output a:hover {
+    color: inherit;
+    text-decoration: none;
+}
+
+.zuul-log-sev-0 {
+    color: black;
+}
+.zuul-log-sev-1 {
+    color: black;
+}
+.zuul-log-sev-2 {
+    color: #0000aa;
+}
+.zuul-log-sev-3 {
+    color: #883300;
+}
+.zuul-log-sev-4 {
+    color: #aa0000;
+}
+.zuul-log-sev-5 {
+    color: #aa0000;
+}
+.zuul-log-sev-6 {
+    color: #aa0000;
+}
+.zuul-log-sev-7 {
+    color: #aa0000;
+}
+
+.form-inline > .form-group {
+    padding-right: 5px;
+}
+
+.zuul-change-row {
+    height: 100%;
+    padding: 0 0 10px 0;
+    margin: 0;
+    width: 16px;
+    min-width: 16px;
+    overflow: hidden;
+    vertical-align: top;
+}
+
+.zuul-build-status {
+    background: transparent;
+    font-size: 16px;
+}
+
+.zuul-build-merge-conflict:before {
+    color: black;
+}
+
+.zuul-change-row-line {
+    background: linear-gradient(#000, #000) no-repeat center/2px 100%;
+}
+
+.zuul-change-row-line-dark {
+    background: linear-gradient(#fff, #fff) no-repeat center/2px 100%;
+}
+
+.progress-bar-animated {
+    animation: progress-bar-stripes 1s linear infinite;
+}
+
+.progress-dark {
+    background: #333 !important;
+}
+
+/* Job Tree View group gap */
+div.tree-view-container ul.list-group {
+  margin: 0px 0px;
+}
+
+/* OpenAPI page */
+pre.version {
+    background-color: lightgrey;
+    color: black;
+}
+.swagger-ui .servers {
+    padding-top: 5px
+}
+
+/* Console */
+/* NOTE(ianw) 2022-09-19 : The !important on a few items below is
+ * probably not required after CSS ordering fixes merge to
+ *  https://github.com/patternfly/patternfly-react/issues/7960
+ * We can probably pull these out after we upgrade past that.
+ */
+
+.zuul-console-task-failed {
+    background-color: var(--pf-global--palette--red-50) !important;
+}
+
+.pf-theme-dark .zuul-console-task-failed {
+    background-color: var(--pf-global--palette--red-300) !important;
+}
+
+.zuul-console .pf-c-data-list__expandable-content {
+    border: none;
+}
+
+.zuul-console .pf-c-data-list__expandable-content-body
+{
+    padding-top: calc(var(--pf-c-data-list__expandable-content-body--PaddingTop) * 0.25) !important;
+    padding-bottom: calc(var(--pf-c-data-list__expandable-content-body--PaddingTop) * 0.25) !important
+}
+
+.zuul-console .pf-c-data-list {
+    border: none
+}
+
+.zuul-console-plays .pf-c-data-list__item:nth-child(even) {
+    background: var(--pf-global--BackgroundColor--200);
+    border-radius: 5px;
+}
+
+.zuul-console-light .pf-c-data-list__item:hover
+{
+    background: var(--pf-global--palette--blue-50);
+}
+
+.zuul-console-dark .pf-c-data-list__item:hover
+{
+    background: var(--pf-global--BackgroundColor--200);
+}
+
+.zuul-console-dark pre {
+    background: #000;
+    color: #fff;
+}
+
+.zuul-console .pf-c-data-list__item:hover::before
+{
+    background: var(--pf-global--active-color--400);
+}
+
+.zuul-console .pf-c-data-list__item {
+    border: none;
+}
+
+.zuul-console .pf-c-data-list__item-content {
+    padding-bottom: 2px !important;
+    padding-top: 0px !important
+}
+
+.zuul-console .pf-c-data-list__cell {
+    padding-top: 4px !important;
+    padding-bottom: 0px !important
+}
+
+pre.zuul-log-output
+{
+    overflow-x: auto;
+    background-color: inherit;
+    border: none;
+}
+.zuul-log-output .line-number
+{
+  display: inline;
+  -webkit-touch-callout: none;
+  -khtml-user-select: none;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+  user-select: none;
+  text-align: right;
+  padding-right: 1em;
+  cursor: pointer;
+  color: #555;
+}
+
+.highlight {
+  background: rgb(255, 255, 204);
+}
+
+details.foldable pre {
+    white-space: pre-wrap;
+}
+
+details.stderr pre {
+    color: #9b0000;
+}
+
+pre.cmd {
+    font-weight: bold;
+}
+
+/* Used to make the "more/less" fold,  look like a normal hyperlink */
+details.foldable summary
+{
+    color: #0088ce;
+    text-decoration: none;
+    cursor: pointer;
+}
+
+details.foldable summary:hover
+{
+    text-decoration: underline;
+}
+
+details.foldable summary::before {
+    content: "more";
+}
+
+details.foldable[open] summary::before {
+    content: "less";
+}
+
+/* The box size calculation compared to the text size seems off, but
+   this looks better */
+.zuul-job-graph text {
+    font-size: 12px;
+}
+
+/* task summary */
+
+.zuul-task-summary .pf-c-data-list {
+    border: none
+}
+
+.zuul-task-summary .pf-c-data-list__item:hover
+{
+    background: var(--pf-global--BackgroundColor--light-200);
+}
+
+.zuul-task-summary .pf-c-data-list__item:hover::before
+{
+    background: var(--pf-global--active-color--400);
+}
+
+.zuul-task-summary-failed.pf-c-card {
+    background: var(--pf-global--palette--red-50);
+}
+
+/*
+ * Reload Button
+ */
+.zuul-reload-button {
+    cursor: pointer;
+    display: inline-block;
+    width: 120px;
+    height: 37px;
+}
+
+.zuul-reload-button-floating {
+    float: right;
+}
+
+.zuul-reload-button button {
+    padding-right: 4px;
+    padding-left: 8px;
+}
+
+.zuul-reload-spinner.pf-c-spinner {
+    --pf-c-spinner--Color: #FFFFFF;
+}
+
+/*
+ * Dark Mode overrides
+ */
+.pf-theme-dark .pf-c-nav__link {
+  color: #fff !important;
+}
+
+.pf-theme-dark .pf-c-modal-box__title-text, .pf-theme-dark .pf-c-modal-box__body {
+  color: #fff !important;
+}
+
+.pf-theme-dark .swagger-ui {
+  filter: invert(88%) hue-rotate(180deg);
+}
+
+.pf-theme-dark .swagger-ui .highlight-code {
+  filter: invert(100%) hue-rotate(180deg);
+}
+
+.zuul-table-dark .list-group-item {
+  background-color: #333 !important;
+}
+
+.zuul-build-output {
+}
+
+.zuul-build-output-dark {
+  background-color: #000 !important;
+  color: #fff;
+}
+
+.pf-theme-dark .zuul-log-sev-0 {
+    color: #ccc !important;
+}
+.pf-theme-dark .zuul-log-sev-1 {
+    color: #ccc !important;
+}
+
+.pf-theme-dark .pf-c-empty-state {
+    color: #fff !important;
+}
+
+.pf-theme-dark .zuul-queue-item-popover {
+    color: var(--pf-global--Color--100);
+}
+
+.pf-theme-dark .zuul-pipeline-link {
+    color: var(--pf-global--Color--100);
+}
+
+.pf-theme-dark .progress {
+    background-color: var(--pf-global--palette--black-500);
+}
+
+.pf-theme-dark .zuul-progress-animated {
+    --pf-c-progress__bar--before--BackgroundColor: unset;
+}
+
+.pf-theme-dark .zuul-progress-animated div.pf-c-progress__bar {
+    background-color: var(--pf-global--palette--black-500);
+}
+
+.pf-theme-dark .zuul-progress-animated div.pf-c-progress__bar:after {
+    background-image: linear-gradient(
+      -45deg,
+      rgba(255, 255, 255, .07) 25%,
+      transparent 25%,
+      transparent 50%,
+      rgba(255, 255, 255, .07) 50%,
+      rgba(255, 255, 255, .07) 75%,
+      transparent 75%,
+      transparent
+    );
+}
+
+.sort-toolbar {
+    padding: 0 !important;
+}

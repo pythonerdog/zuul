@@ -1,0 +1,68 @@
+- pipeline:
+    name: check
+    manager: independent
+    trigger:
+      gitlab:
+        - event: gl_merge_request
+          action: opened
+
+- pipeline:
+    name: gate
+    manager: dependent
+    require:
+      gitlab:
+        approved: true
+    trigger:
+      gitlab:
+        - event: gl_merge_request
+          action: opened
+    success:
+      gitlab:
+        merge: true
+
+- job:
+    name: base
+    parent: null
+    run: playbooks/base.yaml
+
+- job:
+    name: project1-test
+    run: playbooks/project1-test.yaml
+
+- job:
+    name: project2-test
+    run: playbooks/project2-test.yaml
+
+- job:
+    name: project3-test
+    run: playbooks/project3-test.yaml
+
+- job:
+    name: project4-test
+    run: playbooks/project4-test.yaml
+
+- project:
+    name: org/project1
+    check:
+      jobs:
+        - project1-test
+
+- project:
+    name: org/project2
+    check:
+      jobs:
+        - project2-test
+
+- project:
+    name: org/project3
+    queue: cogated
+    gate:
+      jobs:
+        - project3-test
+
+- project:
+    name: org/project4
+    queue: cogated
+    gate:
+      jobs:
+        - project4-test

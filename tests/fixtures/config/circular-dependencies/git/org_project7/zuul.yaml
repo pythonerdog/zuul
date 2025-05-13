@@ -1,0 +1,18 @@
+- job:
+    name: project7-parent-job
+    run: playbooks/run.yaml
+    deduplicate: true
+
+- job:
+    name: project7-child-job
+    deduplicate: true
+
+- project:
+    name: org/project7
+    queue: integrated
+    check:
+      jobs:
+        - project7-parent-job
+        - project7-child-job:
+            dependencies:
+              - project7-parent-job

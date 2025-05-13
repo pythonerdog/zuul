@@ -1,0 +1,7 @@
+---
+other:
+  - |
+    Zuul now checks the submitWholeTopic setting in Gerrit when it
+    starts.  If this setting is changed, or Gerrit is upgraded, all
+    running Zuul schedulers should be restarted in order to see the
+    change.

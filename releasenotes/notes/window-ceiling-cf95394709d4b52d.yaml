@@ -1,0 +1,6 @@
+---
+features:
+  - |
+    An upper limit on the dependent pipeline actionable window can now
+    be specified using the :attr:`pipeline.window-ceiling` setting.
+    The default of no upper limit remains.

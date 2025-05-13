@@ -1,0 +1,7 @@
+---
+features:
+  - |
+    The :var:`nodepool.slot` variable has been added to host vars.
+    This is supplied by the nodepool static and metastatic drivers
+    starting with version 8.0.0.  It may be used to avoid build
+    directory collisions on nodes that run more than one job.

@@ -1,0 +1,16 @@
+---
+features:
+  - |
+    Untrusted projects may now be allowed (via explicit configuration
+    in the tenant config file) to configure jobs that are run by
+    certain specified other untrusted projects.  This allows a
+    "super-project" to configure the jobs run by its "sub-projects".
+
+    See :attr:`tenant.untrusted-projects.<project>.configure-projects`
+    for details.
+  - |
+    Project stanzas may now include an explicit branch configuration
+    via the :attr:`project.branches` attribute.  This enables projects
+    that configure other projects (whether the configuring projects
+    are trusted or untrusted) to better control what jobs run on certain
+    branches.

@@ -1,0 +1,22 @@
+- pipeline:
+    name: check
+    manager: independent
+    trigger:
+      gitlab:
+        - event: gl_merge_request
+          action:
+            - opened
+            - changed
+    success:
+      gitlab:
+        comment: true
+    failure:
+      gitlab:
+        comment: true
+    start:
+      gitlab:
+        comment: true
+
+- job:
+    name: base
+    parent: null

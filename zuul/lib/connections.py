@@ -1,4 +1,5 @@
 # Copyright 2015 Rackspace Australia
+# Copyright 2024 Acme Gating, LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may
 # not use this file except in compliance with the License. You may obtain
@@ -27,8 +28,18 @@ import zuul.driver.sql
 import zuul.driver.bubblewrap
 import zuul.driver.nullwrap
 import zuul.driver.mqtt
+import zuul.driver.pagure
+import zuul.driver.gitlab
+import zuul.driver.elasticsearch
+import zuul.driver.aws
+import zuul.driver.openstack
 from zuul.connection import BaseConnection
-from zuul.driver import SourceInterface
+from zuul.driver import (
+    ProviderInterface,
+    ReporterInterface,
+    SourceInterface,
+    TriggerInterface,
+)
 
 
 class DefaultConnection(BaseConnection):
@@ -40,7 +51,7 @@ class ConnectionRegistry(object):
 
     log = logging.getLogger("zuul.ConnectionRegistry")
 
-    def __init__(self):
+    def __init__(self, check_bwrap=False):
         self.connections = OrderedDict()
         self.drivers = {}
 
@@ -51,23 +62,30 @@ class ConnectionRegistry(object):
         self.registerDriver(zuul.driver.smtp.SMTPDriver())
         self.registerDriver(zuul.driver.timer.TimerDriver())
         self.registerDriver(zuul.driver.sql.SQLDriver())
-        self.registerDriver(zuul.driver.bubblewrap.BubblewrapDriver())
+        self.registerDriver(
+            zuul.driver.bubblewrap.BubblewrapDriver(check_bwrap))
         self.registerDriver(zuul.driver.nullwrap.NullwrapDriver())
         self.registerDriver(zuul.driver.mqtt.MQTTDriver())
+        self.registerDriver(zuul.driver.pagure.PagureDriver())
+        self.registerDriver(zuul.driver.gitlab.GitlabDriver())
+        self.registerDriver(zuul.driver.elasticsearch.ElasticsearchDriver())
+        self.registerDriver(zuul.driver.aws.AwsDriver())
+        self.registerDriver(zuul.driver.openstack.OpenstackDriver())
 
     def registerDriver(self, driver):
         if driver.name in self.drivers:
             raise Exception("Driver %s already registered" % driver.name)
         self.drivers[driver.name] = driver
 
-    def registerScheduler(self, sched, load=True):
+    def registerScheduler(self, sched):
         for driver_name, driver in self.drivers.items():
-            if hasattr(driver, 'registerScheduler'):
-                driver.registerScheduler(sched)
+            driver.registerScheduler(sched)
         for connection_name, connection in self.connections.items():
             connection.registerScheduler(sched)
-            if load:
-                connection.onLoad()
+
+    def load(self, zk_client, component_registry):
+        for connection in self.connections.values():
+            connection.onLoad(zk_client, component_registry)
 
     def reconfigureDrivers(self, tenant):
         for driver in self.drivers.values():
@@ -80,9 +98,17 @@ class ConnectionRegistry(object):
         for driver in self.drivers.values():
             driver.stop()
 
-    def configure(self, config, source_only=False, include_drivers=None):
+    def configure(self, config, database=False, sources=False,
+                  triggers=False, reporters=False, providers=False):
         # Register connections from the config
         connections = OrderedDict()
+
+        if database and 'database' in config.sections():
+            driver = self.drivers['sql']
+            con_config = dict(config.items('database'))
+
+            connection = driver.getConnection('database', con_config)
+            connections['database'] = connection
 
         for section_name in config.sections():
             con_match = re.match(r'^connection ([\'\"]?)(.*)(\1)$',
@@ -97,30 +123,20 @@ class ConnectionRegistry(object):
                                 % con_name)
 
             con_driver = con_config['driver']
-            if con_driver not in self.drivers:
+            if (con_driver not in self.drivers) or con_driver == 'sql':
                 raise Exception("Unknown driver, %s, for connection %s"
                                 % (con_config['driver'], con_name))
 
             driver = self.drivers[con_driver]
 
-            # The merger and the reporter only needs source driver.
-            # This makes sure Reporter like the SQLDriver are only created by
-            # the scheduler process
-            if source_only and not isinstance(driver, SourceInterface):
-                continue
-
-            # Zuul web needs only the SQL driver, accomodate that here:
-            if include_drivers is not None:
-                found = False
-                for driver_class in include_drivers:
-                    if isinstance(driver, driver_class):
-                        found = True
-                        break
-                if not found:
-                    continue
-
-            connection = driver.getConnection(con_name, con_config)
-            connections[con_name] = connection
+            if (database and driver.name == 'sql' or
+                sources and isinstance(driver, SourceInterface) or
+                triggers and isinstance(driver, TriggerInterface) or
+                reporters and isinstance(driver, ReporterInterface) or
+                providers and isinstance(driver, ProviderInterface)):
+                # Only create connections for the requested drivers
+                connection = driver.getConnection(con_name, con_config)
+                connections[con_name] = connection
 
         # If the [gerrit] or [smtp] sections still exist, load them in as a
         # connection named 'gerrit' or 'smtp' respectfully
@@ -149,13 +165,47 @@ class ConnectionRegistry(object):
 
         # Create default connections for drivers which need no
         # connection information (e.g., 'timer' or 'zuul').
-        if not source_only:
-            for driver in self.drivers.values():
-                if not hasattr(driver, 'getConnection'):
+        for driver in self.drivers.values():
+            if not hasattr(driver, 'getConnection'):
+                if (database and driver.name == 'sql' or
+                    sources and isinstance(driver, SourceInterface) or
+                    triggers and isinstance(driver, TriggerInterface) or
+                    reporters and isinstance(driver, ReporterInterface) or
+                    providers and isinstance(driver, ProviderInterface)):
                     connections[driver.name] = DefaultConnection(
                         driver, driver.name, {})
 
+        if database:
+            if 'database' not in connections:
+                raise Exception("Database configuration is required")
+
         self.connections = connections
+
+    def getSqlConnection(self):
+        """
+        Gets the SQL connection. This is either the connection
+        described in the [database] section, or the first configured
+        connection.
+
+        :return: The SQL connection.
+
+        """
+        connection = self.connections.get('database')
+        if not connection:
+            raise Exception("No SQL connections")
+        return connection
+
+    def getSqlReporter(self, pipeline):
+        """
+        Gets the SQL reporter. Such reporter is based on
+        `getSqlConnection`.
+
+        :param pipeline: Pipeline
+        :return: The SQL reporter
+
+        """
+        connection = self.getSqlConnection()
+        return connection.driver.getReporter(connection, pipeline)
 
     def getSource(self, connection_name):
         connection = self.connections[connection_name]
@@ -168,13 +218,23 @@ class ConnectionRegistry(object):
                 sources.append(connection.driver.getSource(connection))
         return sources
 
-    def getReporter(self, connection_name, pipeline, config=None):
+    def getProviderConnections(self):
+        return [c for c in self.connections.values()
+                if isinstance(c.driver, ProviderInterface)]
+
+    def getReporter(self, connection_name, pipeline, config=None,
+                    parse_context=None):
         connection = self.connections[connection_name]
-        return connection.driver.getReporter(connection, pipeline, config)
+        return connection.driver.getReporter(
+            connection, pipeline, config, parse_context)
 
     def getTrigger(self, connection_name, config=None):
         connection = self.connections[connection_name]
         return connection.driver.getTrigger(connection, config)
+
+    def getTriggerEventClass(self, driver_name: str):
+        driver = self.drivers[driver_name]
+        return driver.getTriggerEventClass()
 
     def getSourceByHostname(self, hostname):
         for connection in self.connections.values():

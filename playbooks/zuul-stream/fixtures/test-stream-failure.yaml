@@ -4,18 +4,16 @@
 
     - block:
 
-      - name: Run a shell task with an ansible python exception
-        command: echo foo
-        args:
-          chdir: /failure-shelltask/somewhere/that/does/not/exist
+      - name: Run a task with an ansible python exception
+        zuul_fail:
+          key: fail-task
 
       always:
 
       - name: Loop with items on an ansible python exception
-        command: "echo {{ item }}"
+        zuul_fail:
+          key: fail-loop
         with_items:
           - item1
           - item2
           - item3
-        args:
-          chdir: /failure-itemloop/somewhere/that/does/not/exist

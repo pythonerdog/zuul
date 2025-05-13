@@ -1,0 +1,17 @@
+---
+features:
+  - |
+    An option to use the URL of the Zuul build page when reporting has
+    been added.  This feature requires that all the pipelines in the
+    tenant have a SQL reporter configured, and at
+    least one of :attr:`tenant.web-root` or :attr:`web.root` must be
+    defined.
+
+    See ``tenant.report-build-page``.
+upgrade:
+  - |
+    As further integration with the web interface is planned, the
+    :attr:`web.root` setting in ``zuul.conf`` is marked required and
+    future releases may error if it is missing.  Please add it to your
+    configuration now.  See :attr:`tenant.web-root` for additional
+    information about whitelabel tenants.

@@ -1,0 +1,7 @@
+- hosts: localhost
+  tasks:
+    - zuul_return:
+        data:
+          zuul:
+            retry: false
+      failed_when: true

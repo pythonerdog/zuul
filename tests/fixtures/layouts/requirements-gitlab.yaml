@@ -1,0 +1,94 @@
+- pipeline:
+    name: state-check
+    manager: independent
+    require:
+      gitlab:
+        open: true
+        merged: false
+    trigger:
+      gitlab:
+        - event: gl_merge_request
+          action: comment
+          comment: (?i)^\s*recheck\s*$
+        - event: gl_merge_request
+          action:
+            - opened
+            - changed
+    success:
+      gitlab:
+        comment: true
+
+- pipeline:
+    name: approval-check
+    manager: independent
+    require:
+      gitlab:
+        approved: true
+    trigger:
+      gitlab:
+        - event: gl_merge_request
+          action: comment
+          comment: (?i)^\s*recheck\s*$
+        - event: gl_merge_request
+          action:
+            - opened
+            - changed
+    success:
+      gitlab:
+        comment: true
+
+- pipeline:
+    name: label-check
+    manager: independent
+    require:
+      gitlab:
+        labels:
+          - gateit
+          - another_label
+    trigger:
+      gitlab:
+        - event: gl_merge_request
+          action: comment
+          comment: (?i)^\s*recheck\s*$
+        - event: gl_merge_request
+          action:
+            - opened
+            - changed
+    success:
+      gitlab:
+        comment: true
+
+- job:
+    name: base
+    parent: null
+    run: playbooks/base.yaml
+
+- job:
+    name: project1-test
+    run: playbooks/project-test.yaml
+
+- project:
+    name: org/project1
+    state-check:
+      jobs:
+        - project1-test
+
+- job:
+    name: project2-test
+    run: playbooks/project-test.yaml
+
+- project:
+    name: org/project2
+    approval-check:
+      jobs:
+        - project2-test
+
+- job:
+    name: project3-test
+    run: playbooks/project-test.yaml
+
+- project:
+    name: org/project3
+    label-check:
+      jobs:
+        - project3-test

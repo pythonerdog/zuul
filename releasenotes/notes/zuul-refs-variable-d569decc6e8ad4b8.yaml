@@ -1,0 +1,12 @@
+---
+features:
+  - |
+    Information about all of the changes (refs) associated with a
+    circular dependency queue item is now available in the
+    :var:`zuul.buildset_refs` variable.
+fixes:
+  - |
+    The value of :var:`zuul.items.project.src_dir` did not take into
+    account the job's workspace scheme and was always constructed
+    using the golang scheme.  That has been corrected so that it now
+    reflects the job's scheme.

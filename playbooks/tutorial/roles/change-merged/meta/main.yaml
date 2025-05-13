@@ -1,0 +1,4 @@
+dependencies:
+  - role: check-pipeline
+  - role: approve-change
+  - role: gate-pipeline

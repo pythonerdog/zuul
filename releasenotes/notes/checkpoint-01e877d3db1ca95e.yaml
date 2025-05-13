@@ -1,0 +1,11 @@
+---
+prelude: >
+  This is a checkpoint release. This release contains some bugfixes
+  and other user-invisible changes, but its main purpose is to serve
+  as a checkpoint as we move more of Zuul's functionality into
+  ZooKeeper. This version has seen production use in OpenDev and we
+  believe it to be stable and ready for wider use. Please do upgrade
+  to it and report any issues to zuul-discuss. You may downgrade to
+  the previous release if you do encounter any issues. Likewise,
+  operators running the latest development builds may downgrade to
+  this release in the case of issues.

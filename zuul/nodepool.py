@@ -11,129 +11,362 @@
 # under the License.
 
 import logging
+import threading
+import time
 
+from collections import defaultdict
 from zuul import model
+from zuul.lib import tracing
+from zuul.lib.logutil import get_annotated_logger
+from zuul.zk.event_queues import (
+    PipelineResultEventQueue,
+    NodepoolEventElection
+)
+from zuul.zk.exceptions import LockException
+from zuul.zk.nodepool import NodeRequestEvent, ZooKeeperNodepool
 
 
 class Nodepool(object):
     log = logging.getLogger('zuul.nodepool')
+    # The kind of resources we report stats on.  We need a complete
+    # list in order to report 0 level gauges.
+    resource_types = ('ram', 'cores', 'instances')
 
-    def __init__(self, scheduler):
-        self.requests = {}
-        self.sched = scheduler
+    def __init__(self, zk_client, system_id, statsd, scheduler=False):
+        self._stopped = False
+        self.system_id = system_id
+        self.statsd = statsd
+
+        self.election_won = False
+        if scheduler:
+            # Only enable the node request cache/callback for the scheduler.
+            self.stop_watcher_event = threading.Event()
+            self.zk_nodepool = ZooKeeperNodepool(
+                zk_client,
+                enable_node_request_cache=True,
+                node_request_event_callback=self._handleNodeRequestEvent,
+                connection_suspended_callback=self.stop_watcher_event.set,
+                enable_node_cache=True)
+            self.election = NodepoolEventElection(zk_client)
+            self.event_thread = threading.Thread(target=self.runEventElection)
+            self.event_thread.daemon = True
+            self.event_thread.start()
+        else:
+            self.stop_watcher_event = None
+            self.zk_nodepool = ZooKeeperNodepool(zk_client)
+            self.election = None
+            self.event_thread = None
+
+        self.pipeline_result_events = PipelineResultEventQueue.createRegistry(
+            zk_client
+        )
+
+    def addResources(self, target, source):
+        for key, value in source.items():
+            if key in self.resource_types:
+                target[key] += value
+
+    def runEventElection(self):
+        while not self._stopped:
+            try:
+                self.log.debug("Running nodepool watcher election")
+                self.election.run(self._electionWon)
+            except Exception:
+                self.log.exception("Error in nodepool watcher:")
+
+    def stop(self):
+        self.log.debug("Stopping")
+        self._stopped = True
+        if self.election:
+            self.election.cancel()
+            self.stop_watcher_event.set()
+            self.event_thread.join()
+            # Delete the election to avoid a FD leak in tests.
+            del self.election
+
+    def _sendNodesProvisionedEvent(self, request):
+        tracing.endSavedSpan(request.span_info, attributes={
+            "request_id": request.id,
+            "state": request.state,
+        })
+        tenant_name = request.tenant_name
+        pipeline_name = request.pipeline_name
+        event = model.NodesProvisionedEvent(request.id, request.build_set_uuid)
+        self.pipeline_result_events[tenant_name][pipeline_name].put(event)
+
+    def _electionWon(self):
+        self.log.info("Watching nodepool requests")
+        # Iterate over every completed request in case we are starting
+        # up or missed something in the transition.
+        self.election_won = True
+        try:
+            for rid in self.zk_nodepool.getNodeRequests():
+                request = self.zk_nodepool.getNodeRequest(rid, cached=True)
+                if request.requestor != self.system_id:
+                    continue
+                if (request.state in {model.STATE_FULFILLED,
+                                      model.STATE_FAILED}):
+                    self._sendNodesProvisionedEvent(request)
+            # Now resume normal event processing.
+            self.stop_watcher_event.wait()
+        finally:
+            self.stop_watcher_event.clear()
+            self.election_won = False
+
+    def _handleNodeRequestEvent(self, request, event):
+        log = get_annotated_logger(self.log, event=request.event_id)
+
+        if request.requestor != self.system_id:
+            return
+
+        log.debug("Node request %s %s", request, request.state)
+        if event == NodeRequestEvent.COMPLETED:
+            try:
+                if self.election_won:
+                    if self.election.is_still_valid():
+                        self.emitStats(request)
+                        self._sendNodesProvisionedEvent(request)
+                    else:
+                        self.stop_watcher_event.set()
+            except Exception:
+                # If there are any errors moving the event, re-run the
+                # election.
+                if self.stop_watcher_event is not None:
+                    self.stop_watcher_event.set()
+                raise
 
     def emitStats(self, request):
-        if not self.sched.statsd:
+        # Implements the following :
+        #  counter zuul.nodepool.requests.<state>.total
+        #  counter zuul.nodepool.requests.<state>.label.<label>
+        #  counter zuul.nodepool.requests.<state>.size.<size>
+        #  timer   zuul.nodepool.requests.(fulfilled|failed)
+        #  timer   zuul.nodepool.requests.(fulfilled|failed).<label>
+        #  timer   zuul.nodepool.requests.(fulfilled|failed).<size>
+        if not self.statsd:
             return
-        statsd = self.sched.statsd
-        # counter zuul.nodepool.requested
-        # counter zuul.nodepool.requested.label.<label>
-        # counter zuul.nodepool.requested.size.<size>
-        # gauge zuul.nodepool.current_requests
+        pipe = self.statsd.pipeline()
         state = request.state
+        dt = None
+
         if request.canceled:
             state = 'canceled'
-            dt = None
         elif request.state in (model.STATE_FULFILLED, model.STATE_FAILED):
-            dt = int((request.state_time - request.requested_time) * 1000)
-        else:
-            dt = None
-        key = 'zuul.nodepool.%s' % state
-        statsd.incr(key)
+            dt = (request.state_time - request.requested_time) * 1000
+
+        key = 'zuul.nodepool.requests.%s' % state
+        pipe.incr(key + ".total")
+
         if dt:
-            statsd.timing(key, dt)
-        for node in request.nodeset.getNodes():
-            statsd.incr(key + '.label.%s' % node.label)
+            pipe.timing(key, dt)
+        for label in request.labels:
+            pipe.incr(key + '.label.%s' % label)
             if dt:
-                statsd.timing(key + '.label.%s' % node.label, dt)
-        statsd.incr(key + '.size.%s' % len(request.nodeset.nodes))
+                pipe.timing(key + '.label.%s' % label, dt)
+        pipe.incr(key + '.size.%s' % len(request.labels))
         if dt:
-            statsd.timing(key + '.size.%s' % len(request.nodeset.nodes), dt)
-        statsd.gauge('zuul.nodepool.current_requests', len(self.requests))
+            pipe.timing(key + '.size.%s' % len(request.labels), dt)
+        pipe.send()
 
-    def requestNodes(self, build_set, job):
-        # Create a copy of the nodeset to represent the actual nodes
-        # returned by nodepool.
-        nodeset = job.nodeset.copy()
-        req = model.NodeRequest(self.sched.hostname, build_set, job, nodeset)
-        self.requests[req.uid] = req
+    def emitStatsResourceCounters(self, tenant, project, resources, duration):
+        if not self.statsd:
+            return
 
-        if nodeset.nodes:
-            self.sched.zk.submitNodeRequest(req, self._updateNodeRequest)
+        for resource, value in resources.items():
+            key = 'zuul.nodepool.resources.in_use.tenant.{tenant}.{resource}'
+            self.statsd.incr(
+                key, value * duration, tenant=tenant, resource=resource)
+        for resource, value in resources.items():
+            key = 'zuul.nodepool.resources.in_use.project.' \
+                  '{project}.{resource}'
+            self.statsd.incr(
+                key, value * duration, project=project, resource=resource)
+
+    def requestNodes(self, build_set_uuid, job, tenant_name, pipeline_name,
+                     provider, priority, relative_priority, event=None):
+        log = get_annotated_logger(self.log, event)
+        labels = [n.label for n in job.nodeset.getNodes()]
+        if event:
+            event_id = event.zuul_event_id
+        else:
+            event_id = None
+        req = model.NodeRequest(self.system_id, build_set_uuid, tenant_name,
+                                pipeline_name, job.uuid, job.name, labels,
+                                provider, relative_priority, event_id)
+
+        if job.nodeset.nodes:
+            self.zk_nodepool.submitNodeRequest(req, priority)
             # Logged after submission so that we have the request id
-            self.log.info("Submitted node request %s" % (req,))
+            log.info("Submitted node request %s", req)
             self.emitStats(req)
         else:
-            self.log.info("Fulfilling empty node request %s" % (req,))
+            # Directly fulfill the node request without submitting it to ZK,
+            # so nodepool doesn't have to deal with it.
+            log.info("Fulfilling empty node request %s", req)
             req.state = model.STATE_FULFILLED
-            self.sched.onNodesProvisioned(req)
-            del self.requests[req.uid]
         return req
 
     def cancelRequest(self, request):
-        self.log.info("Canceling node request %s" % (request,))
-        if request.uid in self.requests:
+        log = get_annotated_logger(self.log, request.event_id)
+        log.info("Canceling node request %s", request)
+        try:
             request.canceled = True
-            try:
-                self.sched.zk.deleteNodeRequest(request)
-            except Exception:
-                self.log.exception("Error deleting node request:")
+            if self.zk_nodepool.deleteNodeRequest(request.id):
+                self.emitStats(request)
+        except Exception:
+            log.exception("Error deleting node request:")
 
-    def holdNodeSet(self, nodeset, autohold_key):
+    def reviseRequest(self, request, relative_priority=None):
+        '''Attempt to update the node request, if it is not currently being
+        processed.
+
+        :param: NodeRequest request: The request to update.
+        :param relative_priority int: If supplied, the new relative
+            priority to set on the request.
+
+        '''
+        log = get_annotated_logger(self.log, request.event_id)
+        if relative_priority is None:
+            return
+        try:
+            self.zk_nodepool.lockNodeRequest(request, blocking=False)
+        except LockException:
+            # It may be locked by nodepool, which is fine.
+            log.debug("Unable to revise locked node request %s", request)
+            return False
+        try:
+            old_priority = request.relative_priority
+            request.relative_priority = relative_priority
+            self.zk_nodepool.storeNodeRequest(request)
+            log.debug("Revised relative priority of "
+                      "node request %s from %s to %s",
+                      request, old_priority, relative_priority)
+        except Exception:
+            log.exception("Unable to update node request %s", request)
+        finally:
+            try:
+                self.zk_nodepool.unlockNodeRequest(request)
+            except Exception:
+                log.exception("Unable to unlock node request %s", request)
+
+    def isNodeRequestID(self, request_id):
+        try:
+            # Node requests are of the form '100-0000000001' with the third
+            # character separating the request priority from the sequence
+            # number.
+            return request_id[3] == "-"
+        except Exception:
+            return False
+
+    def holdNodeSet(self, nodeset, request, build, duration,
+                    zuul_event_id=None):
         '''
         Perform a hold on the given set of nodes.
 
         :param NodeSet nodeset: The object containing the set of nodes to hold.
-        :param set autohold_key: A set with the tenant/project/job names
-            associated with the given NodeSet.
+        :param HoldRequest request: Hold request associated with the NodeSet
         '''
-        self.log.info("Holding nodeset %s" % (nodeset,))
-        (hold_iterations,
-         reason,
-         node_hold_expiration) = self.sched.autohold_requests[autohold_key]
+        log = get_annotated_logger(self.log, zuul_event_id)
+        log.info("Holding nodeset %s", nodeset)
+        resources = defaultdict(int)
         nodes = nodeset.getNodes()
+
+        log.info(
+            "Nodeset %s with %s nodes was in use for %s seconds for build %s "
+            "for project %s",
+            nodeset, len(nodeset.nodes), duration, build, request.project)
 
         for node in nodes:
             if node.lock is None:
-                raise Exception("Node %s is not locked" % (node,))
+                raise Exception(f"Node {node} is not locked")
+            if node.resources:
+                self.addResources(resources, node.resources)
             node.state = model.STATE_HOLD
-            node.hold_job = " ".join(autohold_key)
-            node.comment = reason
-            if node_hold_expiration:
-                node.hold_expiration = node_hold_expiration
-            self.sched.zk.storeNode(node)
+            node.hold_job = " ".join([request.tenant,
+                                      request.project,
+                                      request.job,
+                                      request.ref_filter])
+            node.comment = request.reason
+            if request.node_expiration:
+                node.hold_expiration = request.node_expiration
+            self.zk_nodepool.storeNode(node)
 
-        # We remove the autohold when the number of nodes in hold
-        # is equal to or greater than (run iteration count can be
-        # altered) the number of nodes used in a single job run
-        # times the number of run iterations requested.
-        nodes_in_hold = self.sched.zk.heldNodeCount(autohold_key)
-        if nodes_in_hold >= len(nodes) * hold_iterations:
-            self.log.debug("Removing autohold for %s", autohold_key)
-            del self.sched.autohold_requests[autohold_key]
+        request.nodes.append(dict(
+            build=build.uuid,
+            nodes=[node.id for node in nodes],
+        ))
+        request.current_count += 1
 
-    def useNodeSet(self, nodeset):
-        self.log.info("Setting nodeset %s in use" % (nodeset,))
+        # Request has been used at least the maximum number of times so set
+        # the expiration time so that it can be auto-deleted.
+        if request.current_count >= request.max_count and not request.expired:
+            request.expired = time.time()
+
+        # Give ourselves a few seconds to try to obtain the lock rather than
+        # immediately give up.
+        self.zk_nodepool.lockHoldRequest(request, timeout=5)
+
+        try:
+            self.zk_nodepool.storeHoldRequest(request)
+        except Exception:
+            # If we fail to update the request count, we won't consider it
+            # a real autohold error by passing the exception up. It will
+            # just get used more than the original count specified.
+            # It's possible to leak some held nodes, though, which would
+            # require manual node deletes.
+            log.exception("Unable to update hold request %s:", request)
+        finally:
+            # Although any exceptions thrown here are handled higher up in
+            # _doBuildCompletedEvent, we always want to try to unlock it.
+            self.zk_nodepool.unlockHoldRequest(request)
+
+        if resources and duration:
+            self.emitStatsResourceCounters(
+                request.tenant, request.project, resources, duration)
+
+    def useNodeSet(self, nodeset, tenant_name, project_name,
+                   zuul_event_id=None):
+        log = get_annotated_logger(self.log, zuul_event_id)
+        log.info("Setting nodeset %s in use", nodeset)
+        user_data = dict(
+            zuul_system=self.system_id,
+            project_name=project_name,
+        )
         for node in nodeset.getNodes():
             if node.lock is None:
-                raise Exception("Node %s is not locked" % (node,))
+                raise Exception("Node %s is not locked", node)
             node.state = model.STATE_IN_USE
-            self.sched.zk.storeNode(node)
+            node.user_data = user_data
+            self.zk_nodepool.storeNode(node)
 
-    def returnNodeSet(self, nodeset):
-        self.log.info("Returning nodeset %s" % (nodeset,))
+    def returnNodeSet(self, nodeset, build, tenant_name, project_name,
+                      duration, zuul_event_id=None):
+        log = get_annotated_logger(self.log, zuul_event_id)
+        log.info("Returning nodeset %s", nodeset)
+        resources = defaultdict(int)
+
         for node in nodeset.getNodes():
             if node.lock is None:
-                self.log.error("Node %s is not locked" % (node,))
+                log.error("Node %s is not locked", node)
             else:
                 try:
                     if node.state == model.STATE_IN_USE:
+                        if node.resources:
+                            self.addResources(resources, node.resources)
                         node.state = model.STATE_USED
-                        self.sched.zk.storeNode(node)
+                        self.zk_nodepool.storeNode(node)
                 except Exception:
-                    self.log.exception("Exception storing node %s "
-                                       "while unlocking:" % (node,))
-        self._unlockNodes(nodeset.getNodes())
+                    log.exception("Exception storing node %s "
+                                  "while unlocking:", node)
+        self.unlockNodeSet(nodeset)
+
+        log.info("Nodeset %s with %s nodes was in use "
+                 "for %s seconds for build %s for project %s",
+                 nodeset, len(nodeset.nodes), duration, build, project_name)
+
+        if resources and duration:
+            self.emitStatsResourceCounters(
+                tenant_name, project_name, resources, duration)
 
     def unlockNodeSet(self, nodeset):
         self._unlockNodes(nodeset.getNodes())
@@ -141,134 +374,217 @@ class Nodepool(object):
     def _unlockNodes(self, nodes):
         for node in nodes:
             try:
-                self.sched.zk.unlockNode(node)
+                self.zk_nodepool.unlockNode(node)
             except Exception:
                 self.log.exception("Error unlocking node:")
 
-    def lockNodeSet(self, nodeset, request_id):
-        self._lockNodes(nodeset.getNodes(), request_id)
-
-    def _lockNodes(self, nodes, request_id):
+    def lockNodes(self, request, nodeset):
+        log = get_annotated_logger(self.log, event=request.event_id)
         # Try to lock all of the supplied nodes.  If any lock fails,
         # try to unlock any which have already been locked before
         # re-raising the error.
         locked_nodes = []
         try:
-            for node in nodes:
-                if node.allocated_to != request_id:
+            for node_id, node in zip(request.nodes, nodeset.getNodes()):
+                self.zk_nodepool.updateNode(node, node_id)
+                if node.allocated_to != request.id:
                     raise Exception("Node %s allocated to %s, not %s" %
-                                    (node.id, node.allocated_to, request_id))
-                self.log.debug("Locking node %s" % (node,))
-                self.sched.zk.lockNode(node, timeout=30)
+                                    (node.id, node.allocated_to, request.id))
+                log.debug("Locking node %s", node)
+                self.zk_nodepool.lockNode(node, timeout=30)
+                # Check the allocated_to again to ensure that nodepool didn't
+                # re-allocate the nodes to a different node request while we
+                # were locking them.
+                if node.allocated_to != request.id:
+                    raise Exception(
+                        "Node %s was reallocated during locking %s, not %s" %
+                        (node.id, node.allocated_to, request.id))
                 locked_nodes.append(node)
         except Exception:
-            self.log.exception("Error locking nodes:")
+            log.exception("Error locking nodes:")
             self._unlockNodes(locked_nodes)
             raise
 
-    def _updateNodeRequest(self, request, deleted):
-        # Return False to indicate that we should stop watching the
-        # node.
-        self.log.debug("Updating node request %s" % (request,))
+    def getNodesetInfo(self, request, job_nodeset):
+        """
+        Get a NodesetInfo object with data about real nodes.
 
-        if request.uid not in self.requests:
-            self.log.debug("Request %s is unknown" % (request.uid,))
-            return False
+        :param NodeRequest request: The fulfilled NodeRequest
+        :param NodeSet job_nodeset: The NodeSet object attached to the job
 
-        if request.canceled:
-            del self.requests[request.uid]
-            self.emitStats(request)
-            return False
-
-        # TODOv3(jeblair): handle allocation failure
-        if deleted:
-            self.log.debug("Resubmitting lost node request %s" % (request,))
-            request.id = None
-            self.sched.zk.submitNodeRequest(request, self._updateNodeRequest)
-        elif request.state in (model.STATE_FULFILLED, model.STATE_FAILED):
-            self.log.info("Node request %s %s" % (request, request.state))
-
-            # Give our results to the scheduler.
-            self.sched.onNodesProvisioned(request)
-            del self.requests[request.uid]
-
-            self.emitStats(request)
-
-            # Stop watching this request node.
-            return False
-
-        return True
-
-    def acceptNodes(self, request, request_id):
-        # Called by the scheduler when it wants to accept and lock
-        # nodes for (potential) use.  Return False if there is a
-        # problem with the request (canceled or retrying), True if it
-        # is ready to be acted upon (success or failure).
-
-        self.log.info("Accepting node request %s" % (request,))
-
-        if request_id != request.id:
-            self.log.info("Skipping node accept for %s (resubmitted as %s)",
-                          request_id, request.id)
-            return False
-
-        if request.canceled:
-            self.log.info("Ignoring canceled node request %s" % (request,))
-            # The request was already deleted when it was canceled
-            return False
+        :returns: A new NodesetInfo object which contains information from
+            nodepool about the actual allocated nodes (if any).
+        """
+        # A copy of the nodeset with information about the real nodes
+        nodeset = job_nodeset.copy()
 
         # If we didn't request nodes and the request is fulfilled then just
-        # return. We don't have to do anything in this case. Further don't even
-        # ask ZK for the request as empty requests are not put into ZK.
-        if not request.nodeset.nodes and request.fulfilled:
-            return True
+        # return. We don't have to do anything in this case.
+        if not request.labels and request.fulfilled:
+            return model.NodesetInfo()
 
-        # Make sure the request still exists. It's possible it could have
-        # disappeared if we lost the ZK session between when the fulfillment
-        # response was added to our queue, and when we actually get around to
-        # processing it. Nodepool will automatically reallocate the assigned
-        # nodes in that situation.
-        try:
-            if not self.sched.zk.nodeRequestExists(request):
-                self.log.info("Request %s no longer exists, resubmitting",
-                              request.id)
-                request.id = None
-                request.state = model.STATE_REQUESTED
-                self.requests[request.uid] = request
-                self.sched.zk.submitNodeRequest(
-                    request, self._updateNodeRequest)
-                return False
-        except Exception:
-            # If we cannot retrieve the node request from ZK we probably lost
-            # the connection and thus the ZK session. Resubmitting the node
-            # request probably doesn't make sense at this point in time as it
-            # is likely to directly fail again. So just log the problem
-            # with zookeeper and fail here.
-            self.log.exception("Error getting node request %s:" % request_id)
-            request.failed = True
-            return True
+        # Load the node info from ZK.
+        for node_id, node in zip(request.nodes, nodeset.getNodes()):
+            self.zk_nodepool.updateNode(node, node_id)
 
+        info = {}
+        node = nodeset.getNodes()[0]
+        if node.attributes:
+            info['zone'] = node.attributes.get('executor-zone')
+        else:
+            info['zone'] = None
+        info['provider'] = node.provider
+        info['nodes'] = [n.id for n in nodeset.getNodes()]
+
+        return model.NodesetInfo(**info)
+
+    def acceptNodes(self, request, nodeset):
+        # Accept the nodes supplied by request, mutate nodeset with
+        # the real node information.
         locked = False
         if request.fulfilled:
-            # If the request suceeded, try to lock the nodes.
+            # If the request succeeded, try to lock the nodes.
             try:
-                self.lockNodeSet(request.nodeset, request.id)
+                nodes = self.lockNodes(request, nodeset)
                 locked = True
             except Exception:
-                self.log.exception("Error locking nodes:")
+                log = get_annotated_logger(self.log, request.event_id)
+                log.exception("Error locking nodes:")
                 request.failed = True
 
         # Regardless of whether locking (or even the request)
         # succeeded, delete the request.
-        self.log.debug("Deleting node request %s" % (request,))
-        try:
-            self.sched.zk.deleteNodeRequest(request)
-        except Exception:
-            self.log.exception("Error deleting node request:")
+        if not self.deleteNodeRequest(request.id, locked, request.event_id):
             request.failed = True
-            # If deleting the request failed, and we did lock the
-            # nodes, unlock the nodes since we're not going to use
-            # them.
-            if locked:
-                self.unlockNodeSet(request.nodeset)
+            self.unlockNodeSet(request.nodeset)
+
+        if request.failed:
+            raise Exception("Accepting nodes failed")
+        return nodes
+
+    def deleteNodeRequest(self, request_id, locked=False, event_id=None):
+        log = get_annotated_logger(self.log, event_id)
+        log.debug("Deleting node request %s", request_id)
+        try:
+            self.zk_nodepool.deleteNodeRequest(request_id)
+        except Exception:
+            log.exception("Error deleting node request:")
+            return False
         return True
+
+    def getNodeRequests(self):
+        """Get all node requests submitted by Zuul
+
+        Note this relies entirely on the internal cache.
+
+        :returns: An iterator of NodeRequest objects created by this Zuul
+            system.
+        """
+        for req_id in self.zk_nodepool.getNodeRequests(cached=True):
+            req = self.zk_nodepool.getNodeRequest(req_id, cached=True)
+            if req.requestor == self.system_id:
+                yield req
+
+    def getNodes(self):
+        """Get all nodes in use or held by Zuul
+
+        Note this relies entirely on the internal cache.
+
+        :returns: An iterator of Node objects in use (or held) by this Zuul
+            system.
+        """
+        for node_id in self.zk_nodepool.getNodes(cached=True):
+            node = self.zk_nodepool.getNode(node_id)
+            if (node.user_data and
+                isinstance(node.user_data, dict) and
+                node.user_data.get('zuul_system') == self.system_id):
+                yield node
+
+    def emitStatsTotals(self, abide):
+        if not self.statsd:
+            return
+
+        total_requests = 0
+        tenant_requests = defaultdict(int)
+        in_use_resources_by_project = {}
+        in_use_resources_by_tenant = {}
+        total_resources_by_tenant = {}
+        empty_resource_dict = dict([(k, 0) for k in self.resource_types])
+
+        # Initialize zero values for gauges
+        for tenant in abide.tenants.values():
+            tenant_requests[tenant.name] = 0
+            in_use_resources_by_tenant[tenant.name] =\
+                empty_resource_dict.copy()
+            total_resources_by_tenant[tenant.name] = empty_resource_dict.copy()
+            for project in tenant.all_projects:
+                in_use_resources_by_project[project.canonical_name] =\
+                    empty_resource_dict.copy()
+
+        # Count node requests
+        for req in self.getNodeRequests():
+            total_requests += 1
+            if not req.tenant_name:
+                continue
+            tenant_requests[req.tenant_name] += 1
+
+        self.statsd.gauge('zuul.nodepool.current_requests',
+                          total_requests)
+        for tenant, request_count in tenant_requests.items():
+            self.statsd.gauge(
+                "zuul.nodepool.tenant.{tenant}.current_requests",
+                request_count,
+                tenant=tenant)
+
+        # Count nodes
+        for node in self.zk_nodepool.nodeIterator(cached=True):
+            if not node.resources:
+                continue
+
+            tenant_name = node.tenant_name
+            if tenant_name in total_resources_by_tenant and \
+               node.requestor == self.system_id:
+                self.addResources(
+                    total_resources_by_tenant[tenant_name],
+                    node.resources)
+
+            # below here, we are only interested in nodes which are either
+            # in-use, used, or currently held by this zuul system
+            if node.state not in {model.STATE_IN_USE,
+                                  model.STATE_USED,
+                                  model.STATE_HOLD}:
+                continue
+            if not node.user_data:
+                continue
+            if not isinstance(node.user_data, dict):
+                continue
+            if node.user_data.get('zuul_system') != self.system_id:
+                continue
+
+            if tenant_name in in_use_resources_by_tenant:
+                self.addResources(
+                    in_use_resources_by_tenant[tenant_name],
+                    node.resources)
+
+            project_name = node.user_data.get('project_name')
+            if project_name in in_use_resources_by_project:
+                self.addResources(
+                    in_use_resources_by_project[project_name],
+                    node.resources)
+
+        for tenant, resources in total_resources_by_tenant.items():
+            for resource, value in resources.items():
+                key = 'zuul.nodepool.resources.total.tenant.' \
+                      '{tenant}.{resource}'
+                self.statsd.gauge(key, value, tenant=tenant, resource=resource)
+        for tenant, resources in in_use_resources_by_tenant.items():
+            for resource, value in resources.items():
+                key = 'zuul.nodepool.resources.in_use.tenant.' \
+                      '{tenant}.{resource}'
+                self.statsd.gauge(key, value, tenant=tenant, resource=resource)
+        for project, resources in in_use_resources_by_project.items():
+            for resource, value in resources.items():
+                key = 'zuul.nodepool.resources.in_use.project.' \
+                      '{project}.{resource}'
+                self.statsd.gauge(
+                    key, value, project=project, resource=resource)

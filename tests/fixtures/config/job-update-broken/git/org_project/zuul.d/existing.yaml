@@ -1,0 +1,7 @@
+# Every fake change in the unit tests modifies "README"
+
+- job:
+    name: existing-files
+    foo: broken
+    files:
+      - README.txt

@@ -1,0 +1,11 @@
+---
+upgrade:
+  - |
+    Zuul no longer uses gearman.  It is no longer required to run a
+    Gearman server, and the Zuul scheduler no longer does so.  All
+    gearman-related settings in zuul.conf files are now ignored and
+    may be removed.
+
+    Commands such as `zuul enqueue` which were previously executed via
+    Gearman may still be used by creating an authentication token and
+    adding a `webclient` section to zuul.conf.

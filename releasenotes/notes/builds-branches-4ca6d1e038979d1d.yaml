@@ -1,0 +1,5 @@
+---
+upgrade:
+  - |
+    If unprotected branches are excluded on a project they now also get
+    filtered out from jobs.

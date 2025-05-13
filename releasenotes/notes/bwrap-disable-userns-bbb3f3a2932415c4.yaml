@@ -1,0 +1,8 @@
+---
+security:
+  - |
+    Zuul will execute bwrap with --disable-userns set if two conditions
+    hold. 1) The version of bwrap is 0.8.0 or newer and 2) User namespaces
+    are enabled in the zuul-executor runtime context. Doing so will
+    prevent the zuul-executor bwrap runtimes from creating additional
+    user namespaces which fortifies Zuul's security position.

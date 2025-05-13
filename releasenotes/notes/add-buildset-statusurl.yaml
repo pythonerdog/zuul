@@ -1,0 +1,5 @@
+---
+features:
+  - |
+    Added build set url to Zuul comment.  This provide a quick way
+    for user to reach the build set page from Gerrit.

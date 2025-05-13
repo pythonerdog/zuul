@@ -1,0 +1,17 @@
+---
+features:
+  - |
+    A new job attribute, `ansible-split-streams` has been added to
+    instruct Zuul to keep stdout and stderr separate when running
+    Ansible command tasks.
+deprecations:
+  - |
+    Zuul is changing the behavior of its customized Ansible command
+    module to match the standard Ansible behavior.
+    
+    The previous behavior and current default is to combine stdout and
+    stderr streams.  In a later Zuul release, the
+    `ansible-split-streams` default value will change from `false` to
+    `true` in order to match the standard Ansible behavior and keep
+    the streams separate.  A further Zuul release will remove the
+    option altogether.

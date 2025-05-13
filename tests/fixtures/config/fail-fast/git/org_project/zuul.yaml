@@ -1,0 +1,5 @@
+# This tries to unset fail-fast which should not be possible because it's
+# already set to true in common-config.
+- project:
+    check:
+      fail-fast: false

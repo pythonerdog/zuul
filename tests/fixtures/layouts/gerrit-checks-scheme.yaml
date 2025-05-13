@@ -1,0 +1,48 @@
+- pipeline:
+    name: check
+    manager: independent
+    trigger:
+      gerrit:
+        - event: pending-check
+          scheme: 'zuul_check'
+    enqueue:
+      gerrit:
+        checks-api:
+          scheme: 'zuul_check'
+          state: SCHEDULED
+          message: 'Change has been enqueued in check'
+    start:
+      gerrit:
+        checks-api:
+          scheme: 'zuul_check'
+          state: RUNNING
+          message: 'Jobs have started running'
+    no-jobs:
+      gerrit:
+        checks-api:
+          scheme: 'zuul_check'
+          state: NOT_RELEVANT
+          message: 'Change has no jobs configured'
+    success:
+      gerrit:
+        checks-api:
+          scheme: 'zuul_check'
+          state: SUCCESSFUL
+          message: 'Change passed all voting jobs'
+    failure:
+      gerrit:
+        checks-api:
+          scheme: 'zuul_check'
+          state: FAILED
+          message: 'Change failed'
+
+- job:
+    name: test-job
+    parent: null
+    run: test-job.yaml
+
+- project:
+    name: org/project
+    check:
+      jobs:
+        - test-job

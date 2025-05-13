@@ -1,0 +1,7 @@
+---
+fixes:
+  - |
+    An issue introduced in Zuul version 5.2.0 which could cause jobs
+    running on Windows nodes to fail with the error `Could not find
+    imported module support code for 'Ansible.ModuleUtils.Legacy'"`
+    has been corrected.

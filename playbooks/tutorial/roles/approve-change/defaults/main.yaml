@@ -1,0 +1,2 @@
+change_id: "{{ changeinfo.id }}"
+change_revision: "{{changeinfo.current_revision}}"

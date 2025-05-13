@@ -15,9 +15,23 @@ import os
 
 def get_default(config, section, option, default=None, expand_user=False):
     if config.has_option(section, option):
-        value = config.get(section, option)
+        # Need to be ensured that we get suitable
+        # type from config file by default value
+        if isinstance(default, bool):
+            value = config.getboolean(section, option)
+        elif isinstance(default, int):
+            value = config.getint(section, option)
+        else:
+            value = config.get(section, option)
     else:
         value = default
     if expand_user and value:
         return os.path.expanduser(value)
     return value
+
+
+def any_to_bool(val):
+    val = str(val)
+    if val.lower() in ('1', 'on', 'yes', 'true'):
+        return True
+    return False

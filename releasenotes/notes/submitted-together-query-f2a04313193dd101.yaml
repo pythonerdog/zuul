@@ -1,0 +1,5 @@
+---
+fixes:
+  - |
+    Fixed an issue in the Gerrit driver introduced in 5.2.0 which
+    could cause infinite loops while querying changes.

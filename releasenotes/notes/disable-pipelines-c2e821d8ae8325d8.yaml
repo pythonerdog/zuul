@@ -1,0 +1,7 @@
+---
+features:
+  - |
+    The scheduler now accepts the argument ``--disable-pipelines``
+    which will instruct it to discard all pipeline events.  This
+    facilitaties the creation of a system with a running Zuul config
+    that does not start any jobs or make any reports.

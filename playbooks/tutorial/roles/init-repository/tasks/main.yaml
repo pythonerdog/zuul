@@ -1,0 +1,23 @@
+- name: "Clone {{ projectname }}"
+  git:
+    repo: "http://localhost:8080/{{ projectname }}"
+    dest: "{{ workspace }}/{{ projectname }}"
+
+# git-review doesn't support supplying a known_hosts file to scp, so we
+# fetch the commit hook ahead of time to avoid that.
+- name: Download commit-msg
+  get_url:
+    url: http://localhost:8080/tools/hooks/commit-msg
+    dest: "{{ workspace }}/{{ projectname }}/.git/hooks/commit-msg"
+    mode: a+x
+
+- name: "Setup repository {{ projectname }}"
+  shell:
+    chdir: "{{ workspace }}/{{ projectname }}/"
+    executable: /bin/bash
+    cmd: |
+      {{ ssh_agent.stdout }}
+      git config user.email 'user@example.com'
+      git config user.name 'Example User'
+      git config gitreview.username 'user'
+      git review -s

@@ -1,0 +1,11 @@
+---
+features:
+  - |
+    The new variable :var:`zuul.playbook_context` as well as new
+    variables under :var:`zuul.projects` have been added to help debug
+    or audit the playbooks and roles used by Ansible when running
+    jobs.
+
+    These variables describe the repo configuration used for the
+    playbooks and roles of each Ansible execution.  These repos may
+    have a different state than the workspace repos.

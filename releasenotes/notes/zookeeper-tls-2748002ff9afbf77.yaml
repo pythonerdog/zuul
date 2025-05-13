@@ -1,0 +1,10 @@
+---
+features:
+  - |
+    Zuul now supports a TLS secured connection to ZooKeeper.
+upgrade:
+  - |
+    Please configure your Zuul to use TLS secured connection. Running Zuul
+    with an unsecured connection to ZooKeeper is deprecated and will be
+    unsupported in a future release. See :attr:`zookeeper`
+    for details.

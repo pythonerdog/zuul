@@ -1,0 +1,16 @@
+- job:
+    name: other-job
+
+- job:
+    name: test-job-1
+
+- job:
+    name: test-job-2
+
+- project:
+    tag:
+      jobs:
+        - test-job-1:
+            branches: "^refs/tags/tag1-.*$"
+        - test-job-2:
+            branches: "^refs/tags/tag2-.*$"

@@ -1,0 +1,30 @@
+---
+upgrade:
+  - |
+    The buildset result ``MERGER_FAILURE`` has been renamed to
+    ``MERGE_CONFLICT``, and the pipeline reporter configuration
+    ``merge-failure`` has been renamed to ``merge-conflict``.
+
+    These are more descriptive of the most common errors actually
+    reported, and so are expected to be less confusing to users.  This
+    is also in service of a future change to support a new buildset
+    result ``MERGE_FAILURE`` which will indicate that the change was
+    unable to be merged in the upstream repository.
+
+    When upgrading, it is recommended to stop all schedulers briefly
+    (i.e, when the first scheduler of the new version starts, there
+    should be no schedulers running the old version).  The new
+    scheduler will perform a database migration when it starts and
+    update all existing ``MERGER_FAILURE`` buildset results to
+    ``MERGE_CONFLICT``.  If old schedulers are running, they may
+    continue to add ``MERGER_FAILURE`` entries which will need to be
+    manually updated in order to be visible in the web UI or rest API.
+
+deprecations:
+  - |
+    The ``merge-failure`` and ``merge-failure-message`` pipeline
+    configuration options have been renamed to ``merge-conflict`` and
+    ``merge-conflict-message`` respectively.  The old settings are
+    retained for backwards compatibility, but will be removed in a
+    later version.  Please update your usage of them as soon as
+    possible.

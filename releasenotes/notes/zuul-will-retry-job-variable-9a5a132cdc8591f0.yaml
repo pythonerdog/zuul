@@ -1,0 +1,5 @@
+---
+features:
+  - |
+    A new Zuul job variable :var:`zuul_will_retry` available in post and
+    cleanup playbooks, which indicates whether the current job will be retried.

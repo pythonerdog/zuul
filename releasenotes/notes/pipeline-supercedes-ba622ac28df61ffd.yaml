@@ -1,0 +1,11 @@
+---
+features:
+  - |
+    Pipelines may now indicate that they supercede other pipelines with the
+    :attr:`pipeline.supercedes` attribute.
+
+    When a change is enqueued in a pipeline which supercedes others,
+    it will be removed from the other pipelines.  For example, a
+    :term:`gate` pipeline may supercede a :term:`check` pipeline so
+    that test resources are not spent running near-duplicate jobs
+    simultaneously.

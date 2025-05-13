@@ -1,0 +1,7 @@
+---
+features:
+  - |
+    A new command ``zuul-scheduler tenant-reconfigure`` has been
+    added.  It allows an operator to perform a reconfiguration of a
+    single tenant.  This may be helpful in clearing up issues after
+    connection problems with the code hosting system.

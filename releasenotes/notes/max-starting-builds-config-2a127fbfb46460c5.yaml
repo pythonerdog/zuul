@@ -1,0 +1,5 @@
+---
+features:
+  - |
+    The maximum starting builds depending on cpu cores can be limited using
+    `executor.max_starting_builds` configuration.

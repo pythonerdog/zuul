@@ -1,0 +1,6 @@
+---
+upgrade:
+  - |
+    When using Zuul with a MariaDB database, configure the
+    :attr:`database.dburi` setting to use the ``mariadb`` dialect with
+    ``mariadb+pymysql://``.

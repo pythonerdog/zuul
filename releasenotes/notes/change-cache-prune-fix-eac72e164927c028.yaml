@@ -1,0 +1,6 @@
+---
+fixes:
+  - |
+    A bug with the change cache cleanup routine which could have
+    caused items to be stuck in pipelines without running jobs has
+    been corrected.

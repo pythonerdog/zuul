@@ -1,0 +1,15 @@
+---
+fixes:
+  - |
+    Monitoring stats for per-branch queues are now distinct from
+    shared-branch queues.  Shared branch queue stats are at:
+
+      :stat:`zuul.tenant.<tenant>.pipeline.<pipeline>.queue`.
+
+    Per-branch queue stats are now at:
+
+      :stat:`zuul.tenant.<tenant>.pipeline.<pipeline>.queue.<queue>.branch`.
+
+    Prior to this change, per-branch queue stats for one branch queue
+    may have overwritten the stats from another queue resulting in
+    incomplete or incorrect data.

@@ -1,11 +1,11 @@
 - tenant:
     name: tenant-one
+    default-ansible-version: SETME
     source:
       gerrit:
         config-projects:
           - common-config
         untrusted-projects:
           - org/project
-          - org/plugin-project
           - bare-role
           - org/ansible

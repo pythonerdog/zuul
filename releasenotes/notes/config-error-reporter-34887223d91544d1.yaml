@@ -1,0 +1,6 @@
+---
+features:
+  - |
+    A new :attr:`pipeline.config-error` pipeline reporter is available
+    for customizing reporter actions related to Zuul configuration
+    errors.

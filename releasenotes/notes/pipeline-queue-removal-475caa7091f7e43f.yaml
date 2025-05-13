@@ -1,0 +1,6 @@
+---
+upgrade:
+  - |
+    The deprecated syntax of specifying project change queues on
+    pipeline configurations has been removed.  Specify queues using
+    the project stanza now.  See :attr:`queue` for more information.

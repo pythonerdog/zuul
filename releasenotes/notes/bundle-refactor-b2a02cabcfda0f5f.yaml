@@ -1,0 +1,60 @@
+---
+prelude: >
+    This release includes a significant refactoring of the internal
+    handling of circular dependencies.  This requires some changes for
+    consumers of Zuul output (via some reporters or the REST API) and
+    requires special care during upgrades.  In the case of a
+    dependency cycle between changes, Zuul pipeline queue items will
+    now represent multiple changes rather than a single change.  This
+    allows for more intuitive behavior and information display as well
+    as better handling of job deduplication.
+upgrade:
+  - |
+    Zuul can not be upgraded to this version while running.  To upgrade:
+
+      * Stop all Zuul components running the previous version
+        (stopping Nodepool is optional).
+
+      * On a scheduler machine or image (with the scheduler stopped)
+        and the new version of Zuul, run the command:
+
+          zuul-admin delete-state --keep-config-cache
+
+        This will delete all of the pipeline state from ZooKeeper, but
+        it will retain the configuration cache (which contains all of
+        the project configuration from zuul.yaml files).  This will
+        speed up the startup process.
+
+      * Start all Zuul components on the new version.
+  - The MQTT reporter now includes a job_uuid field to correlate retry
+    builds with final builds.
+deprecations:
+  - |
+    The syntax of string substitution in pipeline reporter messages
+    has changed.  Since queue items may now represent more than one
+    change, the `{change}` substitution in messages is deprecated and
+    will be removed in a future version.  To maintain backwards
+    compatability, it currently refers to the arbitrary first change
+    in the list of changes for a queue item.  Please upgrade your
+    usage to use the new `{changes}` substitution which is a list.
+  - |
+    The syntax of string substitution in SMTP reporter messages
+    has changed.  Since queue items may now represent more than one
+    change, the `{change}` substitution in messages is deprecated and
+    will be removed in a future version.  To maintain backwards
+    compatability, it currently refers to the arbitrary first change
+    in the list of changes for a queue item.  Please upgrade your
+    usage to use the new `{changes}` substitution which is a list.
+  - |
+    The MQTT and Elasticsearch reporters now include a `changes` field
+    which is a list of dictionaries representing the changes included
+    in an item.  The correspending scalar fields describing what was
+    previously the only change associated with an item remain for
+    backwards compatability and refer to the arbitrary first change is
+    the list of changes for a queue item.  These scalar values will be
+    removed in a future version of Zuul.  Please upgrade yur usage to
+    use the new `changes` entries.
+  - |
+    The `zuul.bundle_id` variable is deprecated and will be removed in
+    a future version.  For backwards compatability, it currently
+    duplicates the item uuid.

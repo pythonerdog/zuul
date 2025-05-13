@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-
 # Copyright (c) 2016 IBM Corp.
 # Copyright 2017 Red Hat, Inc.
 #
@@ -50,6 +48,10 @@ class RequestHandler(streamer_utils.BaseFingerRequestHandler):
     def handle(self):
         try:
             build_uuid = self.getCommand()
+        except BrokenPipeError:
+            self.log.info("Broken pipe")
+            # The stream was disconnected
+            return
         except Exception:
             self.log.exception("Failure during getCommand:")
             msg = 'Internal streaming error'
@@ -77,6 +79,9 @@ class RequestHandler(streamer_utils.BaseFingerRequestHandler):
 
         try:
             self.stream_log(log_file)
+        except (ConnectionResetError, BrokenPipeError) as e:
+            self.log.error("Streaming failure for build UUID %s: %s",
+                           build_uuid, str(e))
         except Exception:
             self.log.exception("Streaming failure for build UUID %s:",
                                build_uuid)
@@ -100,6 +105,11 @@ class RequestHandler(streamer_utils.BaseFingerRequestHandler):
                 if self.follow_log(log):
                     break
                 else:
+                    if log is not None:
+                        try:
+                            log.file.close()
+                        except Exception:
+                            pass
                     return
 
     def chunk_log(self, log_file):
@@ -178,7 +188,7 @@ class LogStreamer(object):
             raise
 
     def stop(self):
-        if self.thd.isAlive():
+        if self.thd.is_alive():
             self.server.shutdown()
             self.server.server_close()
             self.thd.join()

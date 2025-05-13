@@ -1,0 +1,6 @@
+---
+features:
+  - |
+    If identical jobs are run for multiple changes in a dependency
+    cycle, Zuul may now deduplicate them under certain circumstances.
+    See :attr:`job.deduplicate` for details.

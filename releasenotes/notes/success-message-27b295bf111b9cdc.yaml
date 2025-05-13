@@ -1,0 +1,5 @@
+---
+fixes:
+  - |
+    Restored the job.success-message and job.failure-message
+    functionality which was inadvertently removed.

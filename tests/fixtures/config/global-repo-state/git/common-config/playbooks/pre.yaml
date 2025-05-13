@@ -1,0 +1,4 @@
+- hosts: localhost
+  roles:
+    - test-role
+    - implicit-role

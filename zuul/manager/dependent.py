@@ -1,3 +1,5 @@
+# Copyright 2024 Acme Gating, LLC
+#
 # Licensed under the Apache License, Version 2.0 (the "License"); you may
 # not use this file except in compliance with the License. You may obtain
 # a copy of the License at
@@ -11,11 +13,11 @@
 # under the License.
 
 from zuul import model
-from zuul.manager import PipelineManager, StaticChangeQueueContextManager
-from zuul.manager import DynamicChangeQueueContextManager
+from zuul.lib.logutil import get_annotated_logger
+from zuul.manager.shared import SharedQueuePipelineManager
 
 
-class DependentPipelineManager(PipelineManager):
+class DependentPipelineManager(SharedQueuePipelineManager):
     """PipelineManager for handling interrelated Changes.
 
     The DependentPipelineManager puts Changes that share a Pipeline
@@ -24,228 +26,256 @@ class DependentPipelineManager(PipelineManager):
     reparenting algorithm for handling errors.
     """
     changes_merge = True
+    type = 'dependent'
 
     def __init__(self, *args, **kwargs):
         super(DependentPipelineManager, self).__init__(*args, **kwargs)
 
-    def _postConfig(self, layout):
-        super(DependentPipelineManager, self)._postConfig(layout)
-        self.buildChangeQueues(layout)
+    def constructChangeQueue(self, queue_name):
+        p = self.pipeline
+        return model.ChangeQueue.new(
+            self.current_context,
+            manager=self,
+            window=p.window,
+            window_floor=p.window_floor,
+            window_ceiling=p.window_ceiling,
+            window_increase_type=p.window_increase_type,
+            window_increase_factor=p.window_increase_factor,
+            window_decrease_type=p.window_decrease_type,
+            window_decrease_factor=p.window_decrease_factor,
+            name=queue_name)
 
-    def buildChangeQueues(self, layout):
-        self.log.debug("Building shared change queues")
-        change_queues = {}
-        tenant = self.pipeline.tenant
-        layout_project_configs = layout.project_configs
+    def getNodePriority(self, item, change):
+        return item.queue.queue.index(item)
 
-        for project_name, project_configs in layout_project_configs.items():
-            (trusted, project) = tenant.getProject(project_name)
-            queue_name = None
-            project_in_pipeline = False
-            for project_config in layout.getAllProjectConfigs(project_name):
-                project_pipeline_config = project_config.pipelines.get(
-                    self.pipeline.name)
-                if project_pipeline_config is None:
-                    continue
-                project_in_pipeline = True
-                queue_name = project_pipeline_config.queue_name
-                if queue_name:
-                    break
-            if not project_in_pipeline:
-                continue
-            if queue_name and queue_name in change_queues:
-                change_queue = change_queues[queue_name]
-            else:
-                p = self.pipeline
-                change_queue = model.ChangeQueue(
-                    p,
-                    window=p.window,
-                    window_floor=p.window_floor,
-                    window_increase_type=p.window_increase_type,
-                    window_increase_factor=p.window_increase_factor,
-                    window_decrease_type=p.window_decrease_type,
-                    window_decrease_factor=p.window_decrease_factor,
-                    name=queue_name)
-                if queue_name:
-                    # If this is a named queue, keep track of it in
-                    # case it is referenced again.  Otherwise, it will
-                    # have a name automatically generated from its
-                    # constituent projects.
-                    change_queues[queue_name] = change_queue
-                self.pipeline.addQueue(change_queue)
-                self.log.debug("Created queue: %s" % change_queue)
-            change_queue.addProject(project)
-            self.log.debug("Added project %s to queue: %s" %
-                           (project, change_queue))
-
-    def getChangeQueue(self, change, existing=None):
-        if existing:
-            return StaticChangeQueueContextManager(existing)
-        queue = self.pipeline.getQueue(change.project)
-        if queue:
-            return StaticChangeQueueContextManager(queue)
-        else:
-            # There is no existing queue for this change. Create a
-            # dynamic one for this one change's use
-            change_queue = model.ChangeQueue(self.pipeline, dynamic=True)
-            change_queue.addProject(change.project)
-            self.pipeline.addQueue(change_queue)
-            self.log.debug("Dynamically created queue %s", change_queue)
-            return DynamicChangeQueueContextManager(change_queue)
-
-    def isChangeReadyToBeEnqueued(self, change):
-        source = change.project.source
-        if not source.canMerge(change, self.getSubmitAllowNeeds()):
-            self.log.debug("Change %s can not merge, ignoring" % change)
-            return False
+    def areChangesReadyToBeEnqueued(self, changes, event):
+        log = get_annotated_logger(self.log, event)
+        for change in changes:
+            source = change.project.source
+            if not source.canMerge(change, self.getSubmitAllowNeeds(),
+                                   event=event):
+                log.debug("Change %s can not merge", change)
+                return False
         return True
 
-    def enqueueChangesBehind(self, change, quiet, ignore_requirements,
-                             change_queue):
-        self.log.debug("Checking for changes needing %s:" % change)
-        if not hasattr(change, 'needed_by_changes'):
-            self.log.debug("  %s does not support dependencies" % type(change))
+    def getNonMergeableCycleChanges(self, item):
+        """Return changes in the cycle that do not fulfill
+        the pipeline's ready criteria."""
+        changes = []
+        for change in item.changes:
+            source = change.project.source
+            if not source.canMerge(
+                change,
+                self.getSubmitAllowNeeds(),
+                event=item.event,
+                allow_refresh=True,
+            ):
+                log = get_annotated_logger(self.log, item.event)
+                log.debug("Change %s can no longer be merged", change)
+                changes.append(change)
+        return changes
+
+    def enqueueChangesBehind(self, change, event, quiet, ignore_requirements,
+                             change_queue, history=None,
+                             dependency_graph=None):
+        log = get_annotated_logger(self.log, event)
+        history = history if history is not None else []
+
+        log.debug("Checking for changes needing %s:" % change)
+        if not isinstance(change, model.Change):
+            log.debug("  %s does not support dependencies" % type(change))
             return
 
         # for project in change_queue, project.source get changes, then dedup.
-        sources = set()
-        for project in change_queue.projects:
-            sources.add(project.source)
+        projects = [self.tenant.getProject(pcn)[1] for pcn, _ in
+                    change_queue.project_branches]
+        sources = {p.source for p in projects}
 
-        seen = set(change.needed_by_changes)
-        needed_by_changes = change.needed_by_changes[:]
+        needed_by_changes = self.resolveChangeReferences(
+            change.getNeededByChanges())
+        log.debug("  Previously known following changes: %s",
+                  needed_by_changes)
+        seen = set(needed_by_changes)
         for source in sources:
-            self.log.debug("  Checking source: %s", source)
+            log.debug("  Checking source: %s", source)
             for c in source.getChangesDependingOn(change,
-                                                  change_queue.projects,
-                                                  self.pipeline.tenant):
+                                                  projects,
+                                                  self.tenant):
                 if c not in seen:
                     seen.add(c)
                     needed_by_changes.append(c)
 
-        self.log.debug("  Following changes: %s", needed_by_changes)
+        log.debug("  Updated following changes: %s", needed_by_changes)
 
         to_enqueue = []
+        change_dependencies = dependency_graph.get(change, [])
         for other_change in needed_by_changes:
-            with self.getChangeQueue(other_change) as other_change_queue:
+            if other_change in change_dependencies:
+                # Only consider the change if it is not part of a cycle, as
+                # cycle changes will otherwise be partially enqueued without
+                # any error handling
+                self.log.debug(
+                    "    Skipping change %s due to dependency cycle",
+                    other_change
+                )
+                continue
+
+            with self.getChangeQueue(other_change,
+                                     event) as other_change_queue:
                 if other_change_queue != change_queue:
-                    self.log.debug("  Change %s in project %s can not be "
-                                   "enqueued in the target queue %s" %
-                                   (other_change, other_change.project,
-                                    change_queue))
+                    log.debug("  Change %s in project %s can not be "
+                              "enqueued in the target queue %s" %
+                              (other_change, other_change.project,
+                               change_queue))
                     continue
             source = other_change.project.source
-            if source.canMerge(other_change, self.getSubmitAllowNeeds()):
-                self.log.debug("  Change %s needs %s and is ready to merge" %
-                               (other_change, change))
+            if source.canMerge(other_change, self.getSubmitAllowNeeds(),
+                               event=event):
+                log.debug("  Change %s needs %s and is ready to merge",
+                          other_change, change)
                 to_enqueue.append(other_change)
 
         if not to_enqueue:
-            self.log.debug("  No changes need %s" % change)
+            log.debug("  No changes need %s" % change)
 
         for other_change in to_enqueue:
-            self.addChange(other_change, quiet=quiet,
+            self.addChange(other_change, event, quiet=quiet,
                            ignore_requirements=ignore_requirements,
-                           change_queue=change_queue)
+                           change_queue=change_queue, history=history,
+                           dependency_graph=dependency_graph)
 
-    def enqueueChangesAhead(self, change, quiet, ignore_requirements,
-                            change_queue, history=None):
-        if history and change in history:
-            # detected dependency cycle
-            self.log.warn("Dependency cycle detected")
+    def enqueueChangesAhead(self, changes, event, quiet, ignore_requirements,
+                            change_queue, history=None, dependency_graph=None,
+                            warnings=None):
+        log = get_annotated_logger(self.log, event)
+
+        history = history if history is not None else []
+        for change in changes:
+            if hasattr(change, 'number'):
+                history.append(change)
+            else:
+                # Don't enqueue dependencies ahead of a non-change ref.
+                return True
+
+        abort, needed_changes = self.getMissingNeededChanges(
+            changes, change_queue, event,
+            dependency_graph=dependency_graph,
+            warnings=warnings)
+        if abort:
             return False
-        if hasattr(change, 'number'):
-            history = history or []
-            history = history + [change]
-        else:
-            # Don't enqueue dependencies ahead of a non-change ref.
-            return True
 
-        ret = self.checkForChangesNeededBy(change, change_queue)
-        if ret in [True, False]:
-            return ret
-        self.log.debug("  Changes %s must be merged ahead of %s" %
-                       (ret, change))
-        for needed_change in ret:
-            r = self.addChange(needed_change, quiet=quiet,
-                               ignore_requirements=ignore_requirements,
-                               change_queue=change_queue, history=history)
-            if not r:
-                return False
+        if not needed_changes:
+            return True
+        log.debug("  Changes %s must be merged ahead of %s",
+                  needed_changes, change)
+        for needed_change in needed_changes:
+            # If the change is already in the history, but the change also has
+            # a git level dependency, we need to enqueue it before the current
+            # change.
+            if (needed_change not in history or
+                    needed_change.cache_key in change.git_needs_changes):
+                r = self.addChange(needed_change, event, quiet=quiet,
+                                   ignore_requirements=ignore_requirements,
+                                   change_queue=change_queue, history=history,
+                                   dependency_graph=dependency_graph,
+                                   warnings=warnings)
+                if not r:
+                    return False
         return True
 
-    def checkForChangesNeededBy(self, change, change_queue):
+    def getMissingNeededChanges(self, changes, change_queue, event,
+                                dependency_graph=None, warnings=None,
+                                item=None):
+        log = get_annotated_logger(self.log, event)
+        changes_needed = []
+        abort = False
+
         # Return true if okay to proceed enqueing this change,
         # false if the change should not be enqueued.
-        self.log.debug("Checking for changes needed by %s:" % change)
-        if (hasattr(change, 'commit_needs_changes') and
-            (change.refresh_deps or change.commit_needs_changes is None)):
-            self.updateCommitDependencies(change, change_queue)
-        if not hasattr(change, 'needs_changes'):
-            self.log.debug("  %s does not support dependencies" % type(change))
-            return True
-        if not change.needs_changes:
-            self.log.debug("  No changes needed")
-            return True
-        changes_needed = []
-        # Ignore supplied change_queue
-        with self.getChangeQueue(change) as change_queue:
-            for needed_change in change.needs_changes:
-                self.log.debug("  Change %s needs change %s:" % (
-                    change, needed_change))
-                if needed_change.is_merged:
-                    self.log.debug("  Needed change is merged")
-                    continue
-                with self.getChangeQueue(needed_change) as needed_change_queue:
-                    if needed_change_queue != change_queue:
-                        self.log.debug("  Change %s in project %s does not "
-                                       "share a change queue with %s "
-                                       "in project %s" %
-                                       (needed_change, needed_change.project,
-                                        change, change.project))
-                        return False
-                if not needed_change.is_current_patchset:
-                    self.log.debug("  Needed change is not the "
-                                   "current patchset")
-                    return False
-                if self.isChangeAlreadyInQueue(needed_change, change_queue):
-                    self.log.debug("  Needed change is already ahead "
-                                   "in the queue")
-                    continue
-                if needed_change.project.source.canMerge(
-                        needed_change, self.getSubmitAllowNeeds()):
-                    self.log.debug("  Change %s is needed" % needed_change)
-                    if needed_change not in changes_needed:
-                        changes_needed.append(needed_change)
+        for change in changes:
+            log.debug("Checking for changes needed by %s:" % change)
+            if not isinstance(change, model.Change):
+                log.debug("  %s does not support dependencies", type(change))
+                continue
+            needed_changes = dependency_graph.get(change)
+            if not needed_changes:
+                log.debug("  No changes needed")
+                continue
+            # Ignore supplied change_queue
+            with self.getChangeQueue(change, event) as change_queue:
+                for needed_change in needed_changes:
+                    log.debug("  Change %s needs change %s:" % (
+                        change, needed_change))
+                    if needed_change.is_merged:
+                        log.debug("  Needed change is merged")
                         continue
-                # The needed change can't be merged.
-                self.log.debug("  Change %s is needed but can not be merged" %
-                               needed_change)
-                return False
-        if changes_needed:
-            return changes_needed
-        return True
+                    with self.getChangeQueue(needed_change,
+                                             event) as needed_change_queue:
+                        if needed_change_queue != change_queue:
+                            msg = ("Change %s in project %s does not "
+                                   "share a change queue with %s "
+                                   "in project %s" %
+                                   (needed_change.number,
+                                    needed_change.project,
+                                    change.number,
+                                    change.project))
+                            log.debug("  " + msg)
+                            if warnings is not None:
+                                warnings.append(msg)
+                            changes_needed.append(needed_change)
+                            abort = True
+                    if not needed_change.is_current_patchset:
+                        log.debug("  Needed change is not "
+                                  "the current patchset")
+                        changes_needed.append(needed_change)
+                        abort = True
+                    if needed_change in changes:
+                        log.debug("  Needed change is in cycle")
+                        continue
+                    if self.isChangeAlreadyInQueue(
+                            needed_change, change_queue, item):
+                        log.debug("  Needed change is already "
+                                  "ahead in the queue")
+                        continue
+                    if needed_change.project.source.canMerge(
+                            needed_change, self.getSubmitAllowNeeds(),
+                            event=event):
+                        log.debug("  Change %s is needed", needed_change)
+                        if needed_change not in changes_needed:
+                            changes_needed.append(needed_change)
+                        continue
+                    else:
+                        # The needed change can't be merged.
+                        log.debug("  Change %s is needed "
+                                  "but can not be merged",
+                                  needed_change)
+                        changes_needed.append(needed_change)
+                        abort = True
+        return abort, changes_needed
 
     def getFailingDependentItems(self, item):
-        if not hasattr(item.change, 'needs_changes'):
-            return None
-        if not item.change.needs_changes:
-            return None
         failing_items = set()
-        for needed_change in item.change.needs_changes:
-            needed_item = self.getItemForChange(needed_change)
-            if not needed_item:
+        for change in item.changes:
+            if not isinstance(change, model.Change):
                 continue
-            if needed_item.current_build_set.failing_reasons:
-                failing_items.add(needed_item)
-        if failing_items:
-            return failing_items
-        return None
+            needs_changes = change.getNeedsChanges(
+                self.useDependenciesByTopic(change.project))
+            if not needs_changes:
+                continue
+            for needed_change in self.resolveChangeReferences(needs_changes):
+                needed_item = self.getItemForChange(needed_change)
+                if not needed_item:
+                    continue
+                if needed_item is item:
+                    continue
+                if needed_item.current_build_set.failing_reasons:
+                    failing_items.add(needed_item)
+        return failing_items
 
-    def dequeueItem(self, item):
-        super(DependentPipelineManager, self).dequeueItem(item)
+    def dequeueItem(self, item, quiet=False):
+        super(DependentPipelineManager, self).dequeueItem(item, quiet)
         # If this was a dynamic queue from a speculative change,
         # remove the queue (if empty)
         if item.queue.dynamic:
             if not item.queue.queue:
-                self.pipeline.removeQueue(item.queue)
+                self.state.removeQueue(item.queue)

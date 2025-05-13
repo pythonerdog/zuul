@@ -1,0 +1,13 @@
+- pipeline:
+    name: check
+    manager: independent
+    trigger:
+      github:
+        - event: push
+          ref: '(?!invalid)'
+    start:
+      github: {}
+    success:
+      github: {}
+    failure:
+      github: {}

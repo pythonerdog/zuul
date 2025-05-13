@@ -1,0 +1,10 @@
+---
+fixes:
+  - |
+    Ansible task failures in block/rescue stanzas could cause Zuul to
+    erroneously trigger early-failure behavior for the build, which
+    could result in inconsistent behavior in a dependent pipeline.
+    Task failures in Ansible blocks are no longer considered for early
+    failure detection, and if a build encounters an early failure, it
+    will cause the build result to be reported as a failure in all
+    cases.

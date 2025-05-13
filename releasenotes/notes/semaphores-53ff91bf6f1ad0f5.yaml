@@ -1,0 +1,23 @@
+---
+features:
+  - |
+    Jobs may now request multiple semaphores and they will not start until
+    all semaphores are acquired.
+
+    Use the new :attr:`job.semaphores` (plural) attribute to specify them.
+
+    Note that the new attribute is additive when considering
+    inheritance and job variants.  That is to say that a job
+    definition with a `semaphores` attribute will extend the list of
+    semaphores supplied by its parent rather than overriding it (which
+    is the behavior for the deprecated attribute).
+deprecations:
+  - |
+    The job attribute :attr:`job.semaphore` (note the singular rather
+    than plural form) job attribute is now deprecated.  Use the plural
+    form :attr:`job.semaphores` instead.  As with most list items in
+    Zuul configuration, it also accepts a single item without the
+    wrapping list, so to convert existing jobs, simply change the
+    spelling of the attribute, no change to the value is required.
+
+    The singular form will be removed in Zuul 5.0.

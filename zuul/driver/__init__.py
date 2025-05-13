@@ -161,6 +161,11 @@ class TriggerInterface(object, metaclass=abc.ABCMeta):
         """
         pass
 
+    @abc.abstractmethod
+    def getTriggerEventClass(self):
+        """Get the drivers's trigger event class."""
+        pass
+
 
 class SourceInterface(object, metaclass=abc.ABCMeta):
     """The source interface to be implemented by a driver.
@@ -219,7 +224,8 @@ class ReporterInterface(object, metaclass=abc.ABCMeta):
     """
 
     @abc.abstractmethod
-    def getReporter(self, connection, pipeline, config=None):
+    def getReporter(self, connection, pipeline, config=None,
+                    parse_context=None):
         """Create and return a new Reporter object.
 
         This method is required by the interface.
@@ -231,6 +237,8 @@ class ReporterInterface(object, metaclass=abc.ABCMeta):
             reporter.
         :arg dict config: The configuration information supplied along
             with the reporter in the layout.
+        :arg ParseContext parse_context: The parse context during config
+            loading.
 
         :returns: A new Reporter object.
         :rtype: Reporter
@@ -277,5 +285,86 @@ class WrapperInterface(object, metaclass=abc.ABCMeta):
         :returns: a new ExecutionContext object.
         :rtype: BaseExecutionContext
 
+        """
+        pass
+
+
+class AuthenticatorInterface(object, metaclass=abc.ABCMeta):
+    """The Authenticator interface to be implemented by a driver."""
+
+    @abc.abstractmethod
+    def authenticate(self, **kwargs):
+        """verify an Authentication Token and if correct, return the user id
+        and the authorization claim if present (or an empty dictionary).
+
+        This method is required by the interface
+
+        :arg string rawToken: the base64-encoded Auth Token as passed in the
+        "Authorization" header.
+
+        :returns: a string and a dictionary
+        :rtype: list
+        """
+        raise NotImplementedError
+
+
+class ProviderInterface(object, metaclass=abc.ABCMeta):
+    """The provider interface to be implemented by a driver.
+
+    A driver which is able to communicate with a cloud should provide
+    this interface.
+
+    """
+
+    @abc.abstractmethod
+    def getProvider(self, connection, tenant_name, canonical_name,
+                    config=None):
+        """Create and return a new Provider object.
+
+        This method is required by the interface.
+
+        The provider object returned should inherit from the
+        :py:class:`~zuul.provider.BaseProvider` class and also
+        :py:class:`~zuul.zk.zkobject.ZKObject`.
+
+        :arg Connection connection: The Connection object associated
+            with the provider (as previously returned by getConnection).
+        :arg str tenant_name: The name of the tenant
+        :arg str canonical_name: The canonical name of the ProviderConfig
+            object corresponding with this provider.
+        :arg dict config: The flattened provider configuration from the
+            layout.
+
+        :returns: A new provider object.
+        :rtype: :py:class:`~zuul.provider.BaseProvider`
+
+        """
+        pass
+
+    @abc.abstractmethod
+    def getProviderClass(self):
+        """Return the class used by getProvider().
+
+        This method is required by the interface.
+        """
+        pass
+
+    @abc.abstractmethod
+    def getProviderSchema(self):
+        """Get the schema for this driver's providers.
+
+        This method is required by the interface.
+
+        :returns: A voluptuous schema.
+        :rtype: dict or Schema
+
+        """
+        pass
+
+    @abc.abstractmethod
+    def getProviderNodeClass(self):
+        """Return the provider node class.
+
+        This method is required by the interface.
         """
         pass

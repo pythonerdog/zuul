@@ -14,7 +14,11 @@ Zuul, though advanced users may find it interesting.
    drivers
    triggers
    testing
+   metrics
    docs
    ansible
    javascript
+   specs/index
+   zookeeper
+   model-changelog
    releasenotes

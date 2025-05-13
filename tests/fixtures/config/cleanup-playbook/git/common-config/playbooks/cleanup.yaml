@@ -1,0 +1,5 @@
+- hosts: "!zuul_unreachable"
+  tasks:
+    - copy:
+        content: "{{ zuul_success }}"
+        dest: "{{ zuul._test.test_root }}/builds/{{ zuul.build }}.cleanup.flag"

@@ -1,0 +1,5 @@
+---
+fixes:
+  - |
+    An error which prevented results from appearing in the web UI on
+    the "Buildsets" tab has been corrected.

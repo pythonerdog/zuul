@@ -1,0 +1,33 @@
+# Every fake change in the unit tests modifies "README"
+
+- job:
+    name: existing-files
+    files:
+      - README.txt
+
+- job:
+    name: existing-irr
+    irrelevant-files:
+      - README
+      - ^zuul.d/.*$
+
+- job:
+    name: should-not-run
+    files:
+      - doesnotexist
+
+- job:
+    name: should-not-force-dependency
+    files:
+      - doesnotexist
+
+- project:
+    name: org/project
+    check:
+      jobs:
+        - existing-files
+        - existing-irr
+        - should-not-run
+        - should-not-force-dependency:
+            dependencies:
+              - should-not-run

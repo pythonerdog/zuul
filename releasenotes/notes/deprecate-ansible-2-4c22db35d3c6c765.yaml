@@ -1,0 +1,5 @@
+---
+upgrade:
+  - |
+    Ansible versions 2.8 and 2.9 are now deprecated in Zuul since they
+    are both unmaintaned.  Ansible 5 is now the default version in Zuul.

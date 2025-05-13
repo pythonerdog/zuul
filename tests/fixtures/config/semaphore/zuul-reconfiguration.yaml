@@ -1,16 +1,3 @@
-- pipeline:
-    name: check
-    manager: independent
-    trigger:
-      gerrit:
-        - event: patchset-created
-    success:
-      gerrit:
-        Verified: 1
-    failure:
-      gerrit:
-        Verified: -1
-
 - job:
     name: base
     parent: null
@@ -20,6 +7,3 @@
 
 - project:
     name: org/project
-    check:
-      jobs:
-        - project-test1

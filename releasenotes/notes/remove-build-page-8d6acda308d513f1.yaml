@@ -1,0 +1,24 @@
+---
+deprecations:
+  - |
+    The following attributes are now ignored:
+
+      * The ``report-build-page`` tenant configuration setting.
+      * The ``success-url`` job attribute.
+      * The ``failure-url`` job attribute.
+
+    The URL of the build page is now always reported for every build.
+    This is now also true for in-progress builds, which provides for a
+    more consistent user experience.
+
+    Since the build page is always reported as the URL, the success
+    and failure URL job attributes are no longer useful, so this
+    functionality has also been removed.
+
+    Zuul's configuration syntax checker will continue to allow these
+    settings for now (they are simply ignored) but this will be
+    removed in version 5.0 and using them will be considered an error.
+
+    To achieve a similar result, consider returning the URL as an
+    artifact from the job via `zuul_return`.  This will cause a link
+    to appear in the "Artifacts" section of the build page.

@@ -14,3 +14,13 @@
 - job:
     name: base
     parent: null
+
+- project:
+    name: org/project
+    check:
+      jobs: []
+
+- project:
+    name: org/project1
+    check:
+      jobs: []

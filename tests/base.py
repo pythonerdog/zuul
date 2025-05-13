@@ -1,7 +1,6 @@
-#!/usr/bin/env python
-
 # Copyright 2012 Hewlett-Packard Development Company, L.P.
 # Copyright 2016 Red Hat, Inc.
+# Copyright 2021-2024 Acme Gating, LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may
 # not use this file except in compliance with the License. You may obtain
@@ -16,20 +15,28 @@
 # under the License.
 
 import configparser
+from collections import OrderedDict
+from configparser import ConfigParser
 from contextlib import contextmanager
-import datetime
 import errno
 import gc
-import hashlib
 from io import StringIO
 import itertools
 import json
 import logging
 import os
-import queue
+import pickle
 import random
 import re
+from collections import defaultdict, namedtuple
+from queue import Queue
+from typing import Generator, List
+from unittest.case import skipIf
+import zlib
+
+import prometheus_client
 import requests
+import responses
 import select
 import shutil
 import socket
@@ -45,7 +52,6 @@ import socketserver
 import http.server
 
 import git
-import gear
 import fixtures
 import kazoo.client
 import kazoo.exceptions
@@ -58,32 +64,78 @@ import testtools.content_type
 from git.exc import NoSuchPathError
 import yaml
 import paramiko
+import sqlalchemy
 
-import tests.fakegithub
+from kazoo.exceptions import NoNodeError
+
+from zuul import model
+from zuul.model import (
+    BuildRequest, MergeRequest, WebInfo, HoldRequest
+)
+
+from zuul.driver.zuul import ZuulDriver
+from zuul.driver.git import GitDriver
+from zuul.driver.smtp import SMTPDriver
+from zuul.driver.github import GithubDriver
+from zuul.driver.timer import TimerDriver
+from zuul.driver.sql import SQLDriver
+from zuul.driver.bubblewrap import BubblewrapDriver
+from zuul.driver.nullwrap import NullwrapDriver
+from zuul.driver.mqtt import MQTTDriver
+from zuul.driver.pagure import PagureDriver
+from zuul.driver.gitlab import GitlabDriver
+from zuul.driver.gerrit import GerritDriver
+from zuul.driver.elasticsearch import ElasticsearchDriver
+from zuul.driver.aws import AwsDriver
+from zuul.driver.openstack import OpenstackDriver
+from zuul.lib.collections import DefaultKeyDict
+from zuul.lib.connections import ConnectionRegistry
+from zuul.zk import zkobject, ZooKeeperClient
+from zuul.zk.components import SchedulerComponent, COMPONENT_REGISTRY
+from zuul.zk.event_queues import ConnectionEventQueue, PipelineResultEventQueue
+from zuul.zk.executor import ExecutorApi
+from zuul.zk.locks import tenant_read_lock, pipeline_lock, SessionAwareLock
+from zuul.zk.merger import MergerApi
+from psutil import Popen
+
 import zuul.driver.gerrit.gerritsource as gerritsource
 import zuul.driver.gerrit.gerritconnection as gerritconnection
-import zuul.driver.github.githubconnection as githubconnection
 import zuul.driver.github
+import zuul.driver.elasticsearch.connection as elconnection
 import zuul.driver.sql
 import zuul.scheduler
 import zuul.executor.server
 import zuul.executor.client
+import zuul.launcher.server
+import zuul.launcher.client
+import zuul.lib.ansible
 import zuul.lib.connections
+import zuul.lib.auth
+import zuul.lib.keystorage
 import zuul.merger.client
 import zuul.merger.merger
 import zuul.merger.server
-import zuul.model
 import zuul.nodepool
-import zuul.rpcclient
-import zuul.zk
 import zuul.configloader
-from zuul.exceptions import MergeFailure
-from zuul.lib.config import get_default
+from zuul.lib.logutil import get_annotated_logger
 
-FIXTURE_DIR = os.path.join(os.path.dirname(__file__),
-                           'fixtures')
+from tests.util import FIXTURE_DIR
+import tests.fakegerrit
+import tests.fakegithub
+import tests.fakegitlab
+import tests.fakepagure
+from tests.otlp_fixture import OTLPFixture
+import opentelemetry.sdk.trace.export
 
 KEEP_TEMPDIRS = bool(os.environ.get('KEEP_TEMPDIRS', False))
+SCHEDULER_COUNT = int(os.environ.get('ZUUL_SCHEDULER_COUNT', 1))
+ZOOKEEPER_SESSION_TIMEOUT = 60
+
+
+def skipIfMultiScheduler(reason=None):
+    if not reason:
+        reason = "Test is failing with multiple schedulers"
+    return skipIf(SCHEDULER_COUNT > 1, reason)
 
 
 def repack_repo(path):
@@ -97,25 +149,38 @@ def repack_repo(path):
     return out
 
 
-def random_sha1():
-    return hashlib.sha1(str(random.random()).encode('ascii')).hexdigest()
-
-
 def iterate_timeout(max_seconds, purpose):
     start = time.time()
     count = 0
     while (time.time() < start + max_seconds):
         count += 1
         yield count
-        time.sleep(0)
+        time.sleep(0.01)
     raise Exception("Timeout waiting for %s" % purpose)
 
 
-def simple_layout(path, driver='gerrit'):
+def model_version(version):
+    """Specify a model version for a model upgrade test
+
+    This creates a dummy scheduler component with the specified model
+    API version.  The component is created before any other, so it
+    will appear to Zuul that it is joining an existing cluster with
+    data at the old version.
+    """
+
+    def decorator(test):
+        test.__model_version__ = version
+        return test
+    return decorator
+
+
+def simple_layout(path, driver='gerrit', enable_nodepool=False,
+                  replace=None):
     """Specify a layout file for use by a test method.
 
     :arg str path: The path to the layout file.
     :arg str driver: The source driver to use, defaults to gerrit.
+    :arg bool enable_nodepool: Enable additional nodepool objects.
 
     Some tests require only a very simple configuration.  For those,
     establishing a complete config directory hierachy is too much
@@ -128,10 +193,21 @@ def simple_layout(path, driver='gerrit'):
     config-project called "common-config" and each "project" instance
     referenced in the layout file will have a git repo automatically
     initialized.
+
+    The enable_nodepool argument is a temporary facility for
+    convenience during the initial stages of the nodepool-in-zuul
+    work.  It enables the additional nodepool config objects (which
+    are not otherwise enabled by default, but will be later).
+
+    The replace argument, if provided, is expected to be a callable
+    which returns a dict to use with python template replacement.  It
+    is called with the test as an argument.
+
     """
 
     def decorator(test):
-        test.__simple_layout__ = (path, driver)
+        test.__simple_layout__ = (path, driver, replace)
+        test.__enable_nodepool__ = enable_nodepool
         return test
     return decorator
 
@@ -152,1016 +228,281 @@ def never_capture():
     return decorator
 
 
-class GerritChangeReference(git.Reference):
-    _common_path_default = "refs/changes"
-    _points_to_commits_only = True
+def gerrit_config(submit_whole_topic=False):
+    """Configure the fake gerrit
 
-
-class FakeGerritChange(object):
-    categories = {'Approved': ('Approved', -1, 1),
-                  'Code-Review': ('Code-Review', -2, 2),
-                  'Verified': ('Verified', -2, 2)}
-
-    def __init__(self, gerrit, number, project, branch, subject,
-                 status='NEW', upstream_root=None, files={},
-                 parent=None):
-        self.gerrit = gerrit
-        self.source = gerrit
-        self.reported = 0
-        self.queried = 0
-        self.patchsets = []
-        self.number = number
-        self.project = project
-        self.branch = branch
-        self.subject = subject
-        self.latest_patchset = 0
-        self.depends_on_change = None
-        self.needed_by_changes = []
-        self.fail_merge = False
-        self.messages = []
-        self.data = {
-            'branch': branch,
-            'comments': [],
-            'commitMessage': subject,
-            'createdOn': time.time(),
-            'id': 'I' + random_sha1(),
-            'lastUpdated': time.time(),
-            'number': str(number),
-            'open': status == 'NEW',
-            'owner': {'email': 'user@example.com',
-                      'name': 'User Name',
-                      'username': 'username'},
-            'patchSets': self.patchsets,
-            'project': project,
-            'status': status,
-            'subject': subject,
-            'submitRecords': [],
-            'url': '%s/%s' % (self.gerrit.baseurl.rstrip('/'), number)}
-
-        self.upstream_root = upstream_root
-        self.addPatchset(files=files, parent=parent)
-        self.data['submitRecords'] = self.getSubmitRecords()
-        self.open = status == 'NEW'
-
-    def addFakeChangeToRepo(self, msg, files, large, parent):
-        path = os.path.join(self.upstream_root, self.project)
-        repo = git.Repo(path)
-        if parent is None:
-            parent = 'refs/tags/init'
-        ref = GerritChangeReference.create(
-            repo, '1/%s/%s' % (self.number, self.latest_patchset),
-            parent)
-        repo.head.reference = ref
-        zuul.merger.merger.reset_repo_to_head(repo)
-        repo.git.clean('-x', '-f', '-d')
-
-        path = os.path.join(self.upstream_root, self.project)
-        if not large:
-            for fn, content in files.items():
-                fn = os.path.join(path, fn)
-                if content is None:
-                    os.unlink(fn)
-                    repo.index.remove([fn])
-                else:
-                    d = os.path.dirname(fn)
-                    if not os.path.exists(d):
-                        os.makedirs(d)
-                    with open(fn, 'w') as f:
-                        f.write(content)
-                    repo.index.add([fn])
-        else:
-            for fni in range(100):
-                fn = os.path.join(path, str(fni))
-                f = open(fn, 'w')
-                for ci in range(4096):
-                    f.write(random.choice(string.printable))
-                f.close()
-                repo.index.add([fn])
-
-        r = repo.index.commit(msg)
-        repo.head.reference = 'master'
-        zuul.merger.merger.reset_repo_to_head(repo)
-        repo.git.clean('-x', '-f', '-d')
-        repo.heads['master'].checkout()
-        return r
-
-    def addPatchset(self, files=None, large=False, parent=None):
-        self.latest_patchset += 1
-        if not files:
-            fn = '%s-%s' % (self.branch.replace('/', '_'), self.number)
-            data = ("test %s %s %s\n" %
-                    (self.branch, self.number, self.latest_patchset))
-            files = {fn: data}
-        msg = self.subject + '-' + str(self.latest_patchset)
-        c = self.addFakeChangeToRepo(msg, files, large, parent)
-        ps_files = [{'file': '/COMMIT_MSG',
-                     'type': 'ADDED'},
-                    {'file': 'README',
-                     'type': 'MODIFIED'}]
-        for f in files.keys():
-            ps_files.append({'file': f, 'type': 'ADDED'})
-        d = {'approvals': [],
-             'createdOn': time.time(),
-             'files': ps_files,
-             'number': str(self.latest_patchset),
-             'ref': 'refs/changes/1/%s/%s' % (self.number,
-                                              self.latest_patchset),
-             'revision': c.hexsha,
-             'uploader': {'email': 'user@example.com',
-                          'name': 'User name',
-                          'username': 'user'}}
-        self.data['currentPatchSet'] = d
-        self.patchsets.append(d)
-        self.data['submitRecords'] = self.getSubmitRecords()
-
-    def getPatchsetCreatedEvent(self, patchset):
-        event = {"type": "patchset-created",
-                 "change": {"project": self.project,
-                            "branch": self.branch,
-                            "id": "I5459869c07352a31bfb1e7a8cac379cabfcb25af",
-                            "number": str(self.number),
-                            "subject": self.subject,
-                            "owner": {"name": "User Name"},
-                            "url": "https://hostname/3"},
-                 "patchSet": self.patchsets[patchset - 1],
-                 "uploader": {"name": "User Name"}}
-        return event
-
-    def getChangeRestoredEvent(self):
-        event = {"type": "change-restored",
-                 "change": {"project": self.project,
-                            "branch": self.branch,
-                            "id": "I5459869c07352a31bfb1e7a8cac379cabfcb25af",
-                            "number": str(self.number),
-                            "subject": self.subject,
-                            "owner": {"name": "User Name"},
-                            "url": "https://hostname/3"},
-                 "restorer": {"name": "User Name"},
-                 "patchSet": self.patchsets[-1],
-                 "reason": ""}
-        return event
-
-    def getChangeAbandonedEvent(self):
-        event = {"type": "change-abandoned",
-                 "change": {"project": self.project,
-                            "branch": self.branch,
-                            "id": "I5459869c07352a31bfb1e7a8cac379cabfcb25af",
-                            "number": str(self.number),
-                            "subject": self.subject,
-                            "owner": {"name": "User Name"},
-                            "url": "https://hostname/3"},
-                 "abandoner": {"name": "User Name"},
-                 "patchSet": self.patchsets[-1],
-                 "reason": ""}
-        return event
-
-    def getChangeCommentEvent(self, patchset):
-        event = {"type": "comment-added",
-                 "change": {"project": self.project,
-                            "branch": self.branch,
-                            "id": "I5459869c07352a31bfb1e7a8cac379cabfcb25af",
-                            "number": str(self.number),
-                            "subject": self.subject,
-                            "owner": {"name": "User Name"},
-                            "url": "https://hostname/3"},
-                 "patchSet": self.patchsets[patchset - 1],
-                 "author": {"name": "User Name"},
-                 "approvals": [{"type": "Code-Review",
-                                "description": "Code-Review",
-                                "value": "0"}],
-                 "comment": "This is a comment"}
-        return event
-
-    def getChangeMergedEvent(self):
-        event = {"submitter": {"name": "Jenkins",
-                               "username": "jenkins"},
-                 "newRev": "29ed3b5f8f750a225c5be70235230e3a6ccb04d9",
-                 "patchSet": self.patchsets[-1],
-                 "change": self.data,
-                 "type": "change-merged",
-                 "eventCreatedOn": 1487613810}
-        return event
-
-    def getRefUpdatedEvent(self):
-        path = os.path.join(self.upstream_root, self.project)
-        repo = git.Repo(path)
-        oldrev = repo.heads[self.branch].commit.hexsha
-
-        event = {
-            "type": "ref-updated",
-            "submitter": {
-                "name": "User Name",
-            },
-            "refUpdate": {
-                "oldRev": oldrev,
-                "newRev": self.patchsets[-1]['revision'],
-                "refName": self.branch,
-                "project": self.project,
-            }
-        }
-        return event
-
-    def addApproval(self, category, value, username='reviewer_john',
-                    granted_on=None, message=''):
-        if not granted_on:
-            granted_on = time.time()
-        approval = {
-            'description': self.categories[category][0],
-            'type': category,
-            'value': str(value),
-            'by': {
-                'username': username,
-                'email': username + '@example.com',
-            },
-            'grantedOn': int(granted_on)
-        }
-        for i, x in enumerate(self.patchsets[-1]['approvals'][:]):
-            if x['by']['username'] == username and x['type'] == category:
-                del self.patchsets[-1]['approvals'][i]
-        self.patchsets[-1]['approvals'].append(approval)
-        event = {'approvals': [approval],
-                 'author': {'email': 'author@example.com',
-                            'name': 'Patchset Author',
-                            'username': 'author_phil'},
-                 'change': {'branch': self.branch,
-                            'id': 'Iaa69c46accf97d0598111724a38250ae76a22c87',
-                            'number': str(self.number),
-                            'owner': {'email': 'owner@example.com',
-                                      'name': 'Change Owner',
-                                      'username': 'owner_jane'},
-                            'project': self.project,
-                            'subject': self.subject,
-                            'topic': 'master',
-                            'url': 'https://hostname/459'},
-                 'comment': message,
-                 'patchSet': self.patchsets[-1],
-                 'type': 'comment-added'}
-        self.data['submitRecords'] = self.getSubmitRecords()
-        return json.loads(json.dumps(event))
-
-    def getSubmitRecords(self):
-        status = {}
-        for cat in self.categories.keys():
-            status[cat] = 0
-
-        for a in self.patchsets[-1]['approvals']:
-            cur = status[a['type']]
-            cat_min, cat_max = self.categories[a['type']][1:]
-            new = int(a['value'])
-            if new == cat_min:
-                cur = new
-            elif abs(new) > abs(cur):
-                cur = new
-            status[a['type']] = cur
-
-        labels = []
-        ok = True
-        for typ, cat in self.categories.items():
-            cur = status[typ]
-            cat_min, cat_max = cat[1:]
-            if cur == cat_min:
-                value = 'REJECT'
-                ok = False
-            elif cur == cat_max:
-                value = 'OK'
-            else:
-                value = 'NEED'
-                ok = False
-            labels.append({'label': cat[0], 'status': value})
-        if ok:
-            return [{'status': 'OK'}]
-        return [{'status': 'NOT_READY',
-                 'labels': labels}]
-
-    def setDependsOn(self, other, patchset):
-        self.depends_on_change = other
-        d = {'id': other.data['id'],
-             'number': other.data['number'],
-             'ref': other.patchsets[patchset - 1]['ref']
-             }
-        self.data['dependsOn'] = [d]
-
-        other.needed_by_changes.append(self)
-        needed = other.data.get('neededBy', [])
-        d = {'id': self.data['id'],
-             'number': self.data['number'],
-             'ref': self.patchsets[-1]['ref'],
-             'revision': self.patchsets[-1]['revision']
-             }
-        needed.append(d)
-        other.data['neededBy'] = needed
-
-    def query(self):
-        self.queried += 1
-        d = self.data.get('dependsOn')
-        if d:
-            d = d[0]
-            if (self.depends_on_change.patchsets[-1]['ref'] == d['ref']):
-                d['isCurrentPatchSet'] = True
-            else:
-                d['isCurrentPatchSet'] = False
-        return json.loads(json.dumps(self.data))
-
-    def setMerged(self):
-        if (self.depends_on_change and
-                self.depends_on_change.data['status'] != 'MERGED'):
-            return
-        if self.fail_merge:
-            return
-        self.data['status'] = 'MERGED'
-        self.open = False
-
-        path = os.path.join(self.upstream_root, self.project)
-        repo = git.Repo(path)
-        repo.heads[self.branch].commit = \
-            repo.commit(self.patchsets[-1]['revision'])
-
-    def setReported(self):
-        self.reported += 1
-
-
-class FakeGerritConnection(gerritconnection.GerritConnection):
-    """A Fake Gerrit connection for use in tests.
-
-    This subclasses
-    :py:class:`~zuul.connection.gerrit.GerritConnection` to add the
-    ability for tests to add changes to the fake Gerrit it represents.
+    This allows us to configure the fake gerrit at startup.
     """
 
-    log = logging.getLogger("zuul.test.FakeGerritConnection")
-
-    def __init__(self, driver, connection_name, connection_config,
-                 changes_db=None, upstream_root=None):
-        super(FakeGerritConnection, self).__init__(driver, connection_name,
-                                                   connection_config)
-
-        self.event_queue = queue.Queue()
-        self.fixture_dir = os.path.join(FIXTURE_DIR, 'gerrit')
-        self.change_number = 0
-        self.changes = changes_db
-        self.queries = []
-        self.upstream_root = upstream_root
-
-    def addFakeChange(self, project, branch, subject, status='NEW',
-                      files=None, parent=None):
-        """Add a change to the fake Gerrit."""
-        self.change_number += 1
-        c = FakeGerritChange(self, self.change_number, project, branch,
-                             subject, upstream_root=self.upstream_root,
-                             status=status, files=files, parent=parent)
-        self.changes[self.change_number] = c
-        return c
-
-    def addFakeTag(self, project, branch, tag):
-        path = os.path.join(self.upstream_root, project)
-        repo = git.Repo(path)
-        commit = repo.heads[branch].commit
-        newrev = commit.hexsha
-        ref = 'refs/tags/' + tag
-
-        git.Tag.create(repo, tag, commit)
-
-        event = {
-            "type": "ref-updated",
-            "submitter": {
-                "name": "User Name",
-            },
-            "refUpdate": {
-                "oldRev": 40 * '0',
-                "newRev": newrev,
-                "refName": ref,
-                "project": project,
-            }
-        }
-        return event
-
-    def getFakeBranchCreatedEvent(self, project, branch):
-        path = os.path.join(self.upstream_root, project)
-        repo = git.Repo(path)
-        oldrev = 40 * '0'
-
-        event = {
-            "type": "ref-updated",
-            "submitter": {
-                "name": "User Name",
-            },
-            "refUpdate": {
-                "oldRev": oldrev,
-                "newRev": repo.heads[branch].commit.hexsha,
-                "refName": 'refs/heads/' + branch,
-                "project": project,
-            }
-        }
-        return event
-
-    def getFakeBranchDeletedEvent(self, project, branch):
-        oldrev = '4abd38457c2da2a72d4d030219ab180ecdb04bf0'
-        newrev = 40 * '0'
-
-        event = {
-            "type": "ref-updated",
-            "submitter": {
-                "name": "User Name",
-            },
-            "refUpdate": {
-                "oldRev": oldrev,
-                "newRev": newrev,
-                "refName": 'refs/heads/' + branch,
-                "project": project,
-            }
-        }
-        return event
-
-    def review(self, project, changeid, message, action):
-        number, ps = changeid.split(',')
-        change = self.changes[int(number)]
-
-        # Add the approval back onto the change (ie simulate what gerrit would
-        # do).
-        # Usually when zuul leaves a review it'll create a feedback loop where
-        # zuul's review enters another gerrit event (which is then picked up by
-        # zuul). However, we can't mimic this behaviour (by adding this
-        # approval event into the queue) as it stops jobs from checking what
-        # happens before this event is triggered. If a job needs to see what
-        # happens they can add their own verified event into the queue.
-        # Nevertheless, we can update change with the new review in gerrit.
-
-        for cat in action.keys():
-            if cat != 'submit':
-                change.addApproval(cat, action[cat], username=self.user)
-
-        change.messages.append(message)
-
-        if 'submit' in action:
-            change.setMerged()
-        if message:
-            change.setReported()
-
-    def query(self, number):
-        change = self.changes.get(int(number))
-        if change:
-            return change.query()
-        return {}
-
-    def _simpleQuery(self, query):
-        # the query can be in parenthesis so strip them if needed
-        if query.startswith('('):
-            query = query[1:-1]
-        if query.startswith('change:'):
-            # Query a specific changeid
-            changeid = query[len('change:'):]
-            l = [change.query() for change in self.changes.values()
-                 if (change.data['id'] == changeid or
-                     change.data['number'] == changeid)]
-        elif query.startswith('message:'):
-            # Query the content of a commit message
-            msg = query[len('message:'):].strip()
-            l = [change.query() for change in self.changes.values()
-                 if msg in change.data['commitMessage']]
-        else:
-            # Query all open changes
-            l = [change.query() for change in self.changes.values()]
-        return l
-
-    def simpleQuery(self, query):
-        self.log.debug("simpleQuery: %s" % query)
-        self.queries.append(query)
-        results = []
-        if query.startswith('(') and 'OR' in query:
-            query = query[1:-2]
-            for q in query.split(' OR '):
-                for r in self._simpleQuery(q):
-                    if r not in results:
-                        results.append(r)
-        else:
-            results = self._simpleQuery(query)
-        return results
-
-    def _start_watcher_thread(self, *args, **kw):
-        pass
-
-    def _uploadPack(self, project):
-        ret = ('00a31270149696713ba7e06f1beb760f20d359c4abed HEAD\x00'
-               'multi_ack thin-pack side-band side-band-64k ofs-delta '
-               'shallow no-progress include-tag multi_ack_detailed no-done\n')
-        path = os.path.join(self.upstream_root, project.name)
-        repo = git.Repo(path)
-        for ref in repo.refs:
-            if ref.path.endswith('.lock'):
-                # don't treat lockfiles as ref
-                continue
-            r = ref.object.hexsha + ' ' + ref.path + '\n'
-            ret += '%04x%s' % (len(r) + 4, r)
-        ret += '0000'
-        return ret
-
-    def getGitUrl(self, project):
-        return 'file://' + os.path.join(self.upstream_root, project.name)
-
-
-class GithubChangeReference(git.Reference):
-    _common_path_default = "refs/pull"
-    _points_to_commits_only = True
-
-
-class FakeGithubPullRequest(object):
-
-    def __init__(self, github, number, project, branch,
-                 subject, upstream_root, files=[], number_of_commits=1,
-                 writers=[], body=None):
-        """Creates a new PR with several commits.
-        Sends an event about opened PR."""
-        self.github = github
-        self.source = github
-        self.number = number
-        self.project = project
-        self.branch = branch
-        self.subject = subject
-        self.body = body
-        self.number_of_commits = 0
-        self.upstream_root = upstream_root
-        self.files = []
-        self.comments = []
-        self.labels = []
-        self.statuses = {}
-        self.reviews = []
-        self.writers = []
-        self.admins = []
-        self.updated_at = None
-        self.head_sha = None
-        self.is_merged = False
-        self.merge_message = None
-        self.state = 'open'
-        self.url = 'https://%s/%s/pull/%s' % (github.server, project, number)
-        self._createPRRef()
-        self._addCommitToRepo(files=files)
-        self._updateTimeStamp()
-
-    def addCommit(self, files=[]):
-        """Adds a commit on top of the actual PR head."""
-        self._addCommitToRepo(files=files)
-        self._updateTimeStamp()
-
-    def forcePush(self, files=[]):
-        """Clears actual commits and add a commit on top of the base."""
-        self._addCommitToRepo(files=files, reset=True)
-        self._updateTimeStamp()
-
-    def getPullRequestOpenedEvent(self):
-        return self._getPullRequestEvent('opened')
-
-    def getPullRequestSynchronizeEvent(self):
-        return self._getPullRequestEvent('synchronize')
-
-    def getPullRequestReopenedEvent(self):
-        return self._getPullRequestEvent('reopened')
-
-    def getPullRequestClosedEvent(self):
-        return self._getPullRequestEvent('closed')
-
-    def getPullRequestEditedEvent(self):
-        return self._getPullRequestEvent('edited')
-
-    def addComment(self, message):
-        self.comments.append(message)
-        self._updateTimeStamp()
-
-    def getIssueCommentAddedEvent(self, text):
-        name = 'issue_comment'
-        data = {
-            'action': 'created',
-            'issue': {
-                'number': self.number
-            },
-            'comment': {
-                'body': text
-            },
-            'repository': {
-                'full_name': self.project
-            },
-            'sender': {
-                'login': 'ghuser'
-            }
-        }
-        return (name, data)
-
-    def getCommentAddedEvent(self, text):
-        name, data = self.getIssueCommentAddedEvent(text)
-        # A PR comment has an additional 'pull_request' key in the issue data
-        data['issue']['pull_request'] = {
-            'url': 'http://%s/api/v3/repos/%s/pull/%s' % (
-                self.github.server, self.project, self.number)
-        }
-        return (name, data)
-
-    def getReviewAddedEvent(self, review):
-        name = 'pull_request_review'
-        data = {
-            'action': 'submitted',
-            'pull_request': {
-                'number': self.number,
-                'title': self.subject,
-                'updated_at': self.updated_at,
-                'base': {
-                    'ref': self.branch,
-                    'repo': {
-                        'full_name': self.project
-                    }
-                },
-                'head': {
-                    'sha': self.head_sha
-                }
-            },
-            'review': {
-                'state': review
-            },
-            'repository': {
-                'full_name': self.project
-            },
-            'sender': {
-                'login': 'ghuser'
-            }
-        }
-        return (name, data)
-
-    def addLabel(self, name):
-        if name not in self.labels:
-            self.labels.append(name)
-            self._updateTimeStamp()
-            return self._getLabelEvent(name)
-
-    def removeLabel(self, name):
-        if name in self.labels:
-            self.labels.remove(name)
-            self._updateTimeStamp()
-            return self._getUnlabelEvent(name)
-
-    def _getLabelEvent(self, label):
-        name = 'pull_request'
-        data = {
-            'action': 'labeled',
-            'pull_request': {
-                'number': self.number,
-                'updated_at': self.updated_at,
-                'base': {
-                    'ref': self.branch,
-                    'repo': {
-                        'full_name': self.project
-                    }
-                },
-                'head': {
-                    'sha': self.head_sha
-                }
-            },
-            'label': {
-                'name': label
-            },
-            'sender': {
-                'login': 'ghuser'
-            }
-        }
-        return (name, data)
-
-    def _getUnlabelEvent(self, label):
-        name = 'pull_request'
-        data = {
-            'action': 'unlabeled',
-            'pull_request': {
-                'number': self.number,
-                'title': self.subject,
-                'updated_at': self.updated_at,
-                'base': {
-                    'ref': self.branch,
-                    'repo': {
-                        'full_name': self.project
-                    }
-                },
-                'head': {
-                    'sha': self.head_sha,
-                    'repo': {
-                        'full_name': self.project
-                    }
-                }
-            },
-            'label': {
-                'name': label
-            },
-            'sender': {
-                'login': 'ghuser'
-            }
-        }
-        return (name, data)
-
-    def editBody(self, body):
-        self.body = body
-        self._updateTimeStamp()
-
-    def _getRepo(self):
-        repo_path = os.path.join(self.upstream_root, self.project)
-        return git.Repo(repo_path)
-
-    def _createPRRef(self):
-        repo = self._getRepo()
-        GithubChangeReference.create(
-            repo, self._getPRReference(), 'refs/tags/init')
-
-    def _addCommitToRepo(self, files=[], reset=False):
-        repo = self._getRepo()
-        ref = repo.references[self._getPRReference()]
-        if reset:
-            self.number_of_commits = 0
-            ref.set_object('refs/tags/init')
-        self.number_of_commits += 1
-        repo.head.reference = ref
-        zuul.merger.merger.reset_repo_to_head(repo)
-        repo.git.clean('-x', '-f', '-d')
-
-        if files:
-            self.files = files
-        else:
-            fn = '%s-%s' % (self.branch.replace('/', '_'), self.number)
-            self.files = {fn: "test %s %s\n" % (self.branch, self.number)}
-        msg = self.subject + '-' + str(self.number_of_commits)
-        for fn, content in self.files.items():
-            fn = os.path.join(repo.working_dir, fn)
-            f = open(fn, 'w')
-            with open(fn, 'w') as f:
-                f.write(content)
-            repo.index.add([fn])
-
-        self.head_sha = repo.index.commit(msg).hexsha
-        # Create an empty set of statuses for the given sha,
-        # each sha on a PR may have a status set on it
-        self.statuses[self.head_sha] = []
-        repo.head.reference = 'master'
-        zuul.merger.merger.reset_repo_to_head(repo)
-        repo.git.clean('-x', '-f', '-d')
-        repo.heads['master'].checkout()
-
-    def _updateTimeStamp(self):
-        self.updated_at = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.localtime())
-
-    def getPRHeadSha(self):
-        repo = self._getRepo()
-        return repo.references[self._getPRReference()].commit.hexsha
-
-    def addReview(self, user, state, granted_on=None):
-        gh_time_format = '%Y-%m-%dT%H:%M:%SZ'
-        # convert the timestamp to a str format that would be returned
-        # from github as 'submitted_at' in the API response
-
-        if granted_on:
-            granted_on = datetime.datetime.utcfromtimestamp(granted_on)
-            submitted_at = time.strftime(
-                gh_time_format, granted_on.timetuple())
-        else:
-            # github timestamps only down to the second, so we need to make
-            # sure reviews that tests add appear to be added over a period of
-            # time in the past and not all at once.
-            if not self.reviews:
-                # the first review happens 10 mins ago
-                offset = 600
-            else:
-                # subsequent reviews happen 1 minute closer to now
-                offset = 600 - (len(self.reviews) * 60)
-
-            granted_on = datetime.datetime.utcfromtimestamp(
-                time.time() - offset)
-            submitted_at = time.strftime(
-                gh_time_format, granted_on.timetuple())
-
-        self.reviews.append({
-            'state': state,
-            'user': {
-                'login': user,
-                'email': user + "@derp.com",
-            },
-            'submitted_at': submitted_at,
-        })
-
-    def _getPRReference(self):
-        return '%s/head' % self.number
-
-    def _getPullRequestEvent(self, action):
-        name = 'pull_request'
-        data = {
-            'action': action,
-            'number': self.number,
-            'pull_request': {
-                'number': self.number,
-                'title': self.subject,
-                'updated_at': self.updated_at,
-                'base': {
-                    'ref': self.branch,
-                    'repo': {
-                        'full_name': self.project
-                    }
-                },
-                'head': {
-                    'sha': self.head_sha,
-                    'repo': {
-                        'full_name': self.project
-                    }
-                },
-                'body': self.body
-            },
-            'sender': {
-                'login': 'ghuser'
-            }
-        }
-        return (name, data)
-
-    def getCommitStatusEvent(self, context, state='success', user='zuul'):
-        name = 'status'
-        data = {
-            'state': state,
-            'sha': self.head_sha,
-            'name': self.project,
-            'description': 'Test results for %s: %s' % (self.head_sha, state),
-            'target_url': 'http://zuul/%s' % self.head_sha,
-            'branches': [],
-            'context': context,
-            'sender': {
-                'login': user
-            }
-        }
-        return (name, data)
-
-    def setMerged(self, commit_message):
-        self.is_merged = True
-        self.merge_message = commit_message
-
-        repo = self._getRepo()
-        repo.heads[self.branch].commit = repo.commit(self.head_sha)
-
-
-class FakeGithubConnection(githubconnection.GithubConnection):
-    log = logging.getLogger("zuul.test.FakeGithubConnection")
-
-    def __init__(self, driver, connection_name, connection_config, rpcclient,
-                 changes_db=None, upstream_root=None, git_url_with_auth=False):
-        super(FakeGithubConnection, self).__init__(driver, connection_name,
-                                                   connection_config)
-        self.connection_name = connection_name
-        self.pr_number = 0
-        self.pull_requests = changes_db
-        self.statuses = {}
-        self.upstream_root = upstream_root
-        self.merge_failure = False
-        self.merge_not_allowed_count = 0
-        self.reports = []
-        self.github_data = tests.fakegithub.FakeGithubData(changes_db)
-        self.recorded_clients = []
-        self.git_url_with_auth = git_url_with_auth
-        self.rpcclient = rpcclient
-        self.record_clients = False
-
-    def getGithubClient(self,
-                        project=None,
-                        user_id=None):
-
-        if self.app_id:
-            inst_id = self.installation_map.get(project)
-            client = tests.fakegithub.FakeGithubClient(
-                self.github_data, inst_id=inst_id)
-        else:
-            client = tests.fakegithub.FakeGithubClient(self.github_data)
-
-        if self.record_clients:
-            self.recorded_clients.append(client)
-        return client
-
-    def _prime_installation_map(self):
-        if not self.app_id:
+    def decorator(test):
+        test.__gerrit_config__ = dict(
+            submit_whole_topic=submit_whole_topic,
+        )
+        return test
+    return decorator
+
+
+def driver_config(driver, **kw):
+    """A generic driver config.  Use this instead of making a new
+    decorator like gerrit_config.
+    """
+
+    def decorator(test):
+        driver_dict = getattr(test, '__driver_config__', None)
+        if driver_dict is None:
+            driver_dict = {}
+            test.__driver_config__ = driver_dict
+        driver_dict[driver] = kw
+        return test
+    return decorator
+
+
+def return_data(job, ref, data):
+    """Add return data for a job
+
+    This allows configuring job return data for jobs that start
+    immediately.
+
+    """
+
+    def decorator(test):
+        if not hasattr(test, '__return_data__'):
+            test.__return_data__ = []
+        test.__return_data__.append(dict(
+            job=job,
+            ref=ref,
+            data=data,
+        ))
+        return test
+    return decorator
+
+
+def okay_tracebacks(*args):
+    """A list of substrings that, if they appear in a traceback, indicate
+    that it's okay for that traceback to appear in logs."""
+
+    def decorator(test):
+        test.__okay_tracebacks__ = args
+        return test
+    return decorator
+
+
+def zuul_config(section, key, value):
+    """Set a zuul.conf value."""
+
+    def decorator(test):
+        config_dict = getattr(test, '__zuul_config__', None)
+        if config_dict is None:
+            config_dict = {}
+            test.__zuul_config__ = config_dict
+        section_dict = config_dict.setdefault(section, {})
+        section_dict[key] = value
+        return test
+    return decorator
+
+
+def registerProjects(source_name, client, config):
+    path = config.get('scheduler', 'tenant_config')
+    with open(os.path.join(FIXTURE_DIR, path)) as f:
+        tenant_config = yaml.safe_load(f.read())
+    for tenant in tenant_config:
+        sources = tenant['tenant']['source']
+        conf = sources.get(source_name)
+        if not conf:
             return
 
-        # simulate one installation per org
-        orgs = {}
-        latest_inst_id = 0
-        for repo in self.github_data.repos.keys():
-            inst_id = orgs.get(repo[0])
-            if not inst_id:
-                latest_inst_id += 1
-                inst_id = latest_inst_id
-                orgs[repo[0]] = inst_id
-            self.installation_map['/'.join(repo)] = inst_id
+        projects = conf.get('config-projects', [])
+        projects.extend(conf.get('untrusted-projects', []))
 
-    def setZuulWebPort(self, port):
-        self.zuul_web_port = port
+        for project in projects:
+            if isinstance(project, dict):
+                # This can be a dict with the project as the only key
+                client.addProjectByName(
+                    list(project.keys())[0])
+            else:
+                client.addProjectByName(project)
 
-    def openFakePullRequest(self, project, branch, subject, files=[],
-                            body=None):
-        self.pr_number += 1
-        pull_request = FakeGithubPullRequest(
-            self, self.pr_number, project, branch, subject, self.upstream_root,
-            files=files, body=body)
-        self.pull_requests[self.pr_number] = pull_request
-        return pull_request
 
-    def getPushEvent(self, project, ref, old_rev=None, new_rev=None,
-                     added_files=[], removed_files=[], modified_files=[]):
-        if not old_rev:
-            old_rev = '0' * 40
-        if not new_rev:
-            new_rev = random_sha1()
-        name = 'push'
-        data = {
-            'ref': ref,
-            'before': old_rev,
-            'after': new_rev,
-            'repository': {
-                'full_name': project
-            },
-            'commits': [
-                {
-                    'added': added_files,
-                    'removed': removed_files,
-                    'modified': modified_files
-                }
-            ]
-        }
-        return (name, data)
+class FakeChangeDB:
+    def __init__(self):
+        # A dictionary of server -> dict as below
+        self.servers = {}
 
-    def emitEvent(self, event, use_zuulweb=False):
-        """Emulates sending the GitHub webhook event to the connection."""
-        name, data = event
-        payload = json.dumps(data).encode('utf8')
-        secret = self.connection_config['webhook_token']
-        signature = githubconnection._sign_request(payload, secret)
-        headers = {'x-github-event': name,
-                   'x-hub-signature': signature,
-                   'x-github-delivery': str(uuid.uuid4())}
+    def getServerChangeDB(self, server):
+        """Returns a dictionary for the specified server; key -> Change.  The
+        key is driver dependent, but typically the change/PR/MR id.
 
-        if use_zuulweb:
-            return requests.post(
-                'http://127.0.0.1:%s/api/connection/%s/payload'
-                % (self.zuul_web_port, self.connection_name),
-                json=data, headers=headers)
-        else:
-            job = self.rpcclient.submitJob(
-                'github:%s:payload' % self.connection_name,
-                {'headers': headers, 'body': data})
-            return json.loads(job.data[0])
+        """
+        return self.servers.setdefault(server, {})
 
-    def addProject(self, project):
-        # use the original method here and additionally register it in the
-        # fake github
-        super(FakeGithubConnection, self).addProject(project)
-        self.getGithubClient(project).addProject(project)
+    def save(self, path):
+        with open(path, 'wb') as f:
+            pickle.dump(self.servers, f, pickle.HIGHEST_PROTOCOL)
 
-    def _getPullReviews(self, owner, project, number):
-        pr = self.pull_requests[number]
-        return pr.reviews
+    def load(self, path):
+        with open(path, 'rb') as f:
+            self.servers = pickle.load(f)
 
-    def getGitUrl(self, project):
-        if self.git_url_with_auth:
-            auth_token = ''.join(
-                random.choice(string.ascii_lowercase) for x in range(8))
-            prefix = 'file://x-access-token:%s@' % auth_token
-        else:
-            prefix = ''
-        return prefix + os.path.join(self.upstream_root, str(project))
 
-    def real_getGitUrl(self, project):
-        return super(FakeGithubConnection, self).getGitUrl(project)
+class StatException(Exception):
+    # Used by assertReportedStat
+    pass
 
-    def commentPull(self, project, pr_number, message):
-        # record that this got reported
-        self.reports.append((project, pr_number, 'comment'))
-        pull_request = self.pull_requests[pr_number]
-        pull_request.addComment(message)
 
-    def mergePull(self, project, pr_number, commit_message='', sha=None):
-        # record that this got reported
-        self.reports.append((project, pr_number, 'merge'))
-        pull_request = self.pull_requests[pr_number]
-        if self.merge_failure:
-            raise Exception('Pull request was not merged')
-        if self.merge_not_allowed_count > 0:
-            self.merge_not_allowed_count -= 1
-            raise MergeFailure('Merge was not successful due to mergeability'
-                               ' conflict')
-        pull_request.setMerged(commit_message)
+class GerritDriverMock(GerritDriver):
+    def __init__(self, registry, test_config, upstream_root,
+                 additional_event_queues, poller_events, add_cleanup):
+        super(GerritDriverMock, self).__init__()
+        self.registry = registry
+        self.test_config = test_config
+        self.changes = test_config.changes
+        self.upstream_root = upstream_root
+        self.additional_event_queues = additional_event_queues
+        self.poller_events = poller_events
+        self.add_cleanup = add_cleanup
 
-    def setCommitStatus(self, project, sha, state, url='', description='',
-                        context='default', user='zuul'):
-        # record that this got reported and call original method
-        self.reports.append((project, sha, 'status', (user, context, state)))
-        super(FakeGithubConnection, self).setCommitStatus(
-            project, sha, state,
-            url=url, description=description, context=context)
+    def getConnection(self, name, config):
+        server = config['server']
+        db = self.changes.getServerChangeDB(server)
+        poll_event = self.poller_events.setdefault(name, threading.Event())
+        ref_event = self.poller_events.setdefault(name + '-ref',
+                                                  threading.Event())
+        submit_whole_topic = self.test_config.gerrit_config.get(
+            'submit_whole_topic', False)
+        connection = tests.fakegerrit.FakeGerritConnection(
+            self, name, config,
+            changes_db=db,
+            upstream_root=self.upstream_root,
+            poller_event=poll_event,
+            ref_watcher_event=ref_event,
+            submit_whole_topic=submit_whole_topic)
+        if connection.web_server:
+            self.add_cleanup(connection.web_server.stop)
 
-    def labelPull(self, project, pr_number, label):
-        # record that this got reported
-        self.reports.append((project, pr_number, 'label', label))
-        pull_request = self.pull_requests[pr_number]
-        pull_request.addLabel(label)
+        setattr(self.registry, 'fake_' + name, connection)
+        return connection
 
-    def unlabelPull(self, project, pr_number, label):
-        # record that this got reported
-        self.reports.append((project, pr_number, 'unlabel', label))
-        pull_request = self.pull_requests[pr_number]
-        pull_request.removeLabel(label)
+
+class GithubDriverMock(GithubDriver):
+    def __init__(self, registry, test_config, config, upstream_root,
+                 additional_event_queues, git_url_with_auth):
+        super(GithubDriverMock, self).__init__()
+        self.registry = registry
+        self.test_config = test_config
+        self.changes = test_config.changes
+        self.config = config
+        self.upstream_root = upstream_root
+        self.additional_event_queues = additional_event_queues
+        self.git_url_with_auth = git_url_with_auth
+
+    def getConnection(self, name, config):
+        server = config.get('server', 'github.com')
+        db = self.changes.getServerChangeDB(server)
+        connection = tests.fakegithub.FakeGithubConnection(
+            self, name, config,
+            changes_db=db,
+            upstream_root=self.upstream_root,
+            git_url_with_auth=self.git_url_with_auth)
+        setattr(self.registry, 'fake_' + name, connection)
+        client = connection.getGithubClient(None)
+        registerProjects(connection.source.name, client, self.config)
+        return connection
+
+
+class PagureDriverMock(PagureDriver):
+    def __init__(self, registry, test_config, upstream_root,
+                 additional_event_queues):
+        super(PagureDriverMock, self).__init__()
+        self.registry = registry
+        self.changes = test_config.changes
+        self.upstream_root = upstream_root
+        self.additional_event_queues = additional_event_queues
+
+    def getConnection(self, name, config):
+        server = config.get('server', 'pagure.io')
+        db = self.changes.getServerChangeDB(server)
+        connection = tests.fakepagure.FakePagureConnection(
+            self, name, config,
+            changes_db=db,
+            upstream_root=self.upstream_root)
+        setattr(self.registry, 'fake_' + name, connection)
+        return connection
+
+
+class GitlabDriverMock(GitlabDriver):
+    def __init__(self, registry, test_config, config, upstream_root,
+                 additional_event_queues):
+        super(GitlabDriverMock, self).__init__()
+        self.registry = registry
+        self.changes = test_config.changes
+        self.config = config
+        self.upstream_root = upstream_root
+        self.additional_event_queues = additional_event_queues
+
+    def getConnection(self, name, config):
+        server = config.get('server', 'gitlab.com')
+        db = self.changes.getServerChangeDB(server)
+        connection = tests.fakegitlab.FakeGitlabConnection(
+            self, name, config,
+            changes_db=db,
+            upstream_root=self.upstream_root)
+        setattr(self.registry, 'fake_' + name, connection)
+        registerProjects(connection.source.name, connection,
+                         self.config)
+        return connection
+
+
+class TestConnectionRegistry(ConnectionRegistry):
+    def __init__(self, config, test_config,
+                 additional_event_queues, upstream_root,
+                 poller_events, git_url_with_auth, add_cleanup):
+        self.connections = OrderedDict()
+        self.drivers = {}
+
+        self.registerDriver(ZuulDriver())
+        self.registerDriver(GerritDriverMock(
+            self, test_config, upstream_root, additional_event_queues,
+            poller_events, add_cleanup))
+        self.registerDriver(GitDriver())
+        self.registerDriver(GithubDriverMock(
+            self, test_config, config, upstream_root, additional_event_queues,
+            git_url_with_auth))
+        self.registerDriver(SMTPDriver())
+        self.registerDriver(TimerDriver())
+        self.registerDriver(SQLDriver())
+        self.registerDriver(BubblewrapDriver(check_bwrap=True))
+        self.registerDriver(NullwrapDriver())
+        self.registerDriver(MQTTDriver())
+        self.registerDriver(PagureDriverMock(
+            self, test_config, upstream_root, additional_event_queues))
+        self.registerDriver(GitlabDriverMock(
+            self, test_config, config, upstream_root, additional_event_queues))
+        self.registerDriver(ElasticsearchDriver())
+        self.registerDriver(AwsDriver())
+        self.registerDriver(OpenstackDriver())
+
+
+class FakeAnsibleManager(zuul.lib.ansible.AnsibleManager):
+
+    def validate(self):
+        return True
+
+    def copyAnsibleFiles(self):
+        pass
+
+
+class FakeElasticsearchConnection(elconnection.ElasticsearchConnection):
+
+    log = logging.getLogger("zuul.test.FakeElasticsearchConnection")
+
+    def __init__(self, driver, connection_name, connection_config):
+        self.driver = driver
+        self.connection_name = connection_name
+        self.source_it = None
+
+    def add_docs(self, source_it, index):
+        self.source_it = source_it
+        self.index = index
 
 
 class BuildHistory(object):
@@ -1176,6 +517,8 @@ class BuildHistory(object):
 
 
 class FakeStatsd(threading.Thread):
+    log = logging.getLogger("zuul.test.FakeStatsd")
+
     def __init__(self):
         threading.Thread.__init__(self)
         self.daemon = True
@@ -1183,6 +526,9 @@ class FakeStatsd(threading.Thread):
         self.sock.bind(('', 0))
         self.port = self.sock.getsockname()[1]
         self.wake_read, self.wake_write = os.pipe()
+        self.stats = []
+
+    def clear(self):
         self.stats = []
 
     def run(self):
@@ -1196,45 +542,64 @@ class FakeStatsd(threading.Thread):
                     data = self.sock.recvfrom(1024)
                     if not data:
                         return
+                    # self.log.debug("Appending: %s" % data[0])
                     self.stats.append(data[0])
                 if fd == self.wake_read:
                     return
 
     def stop(self):
         os.write(self.wake_write, b'1\n')
+        self.join()
+        self.sock.close()
+
+    def __del__(self):
+        os.close(self.wake_read)
+        os.close(self.wake_write)
 
 
 class FakeBuild(object):
     log = logging.getLogger("zuul.test")
 
-    def __init__(self, executor_server, job):
+    def __init__(self, executor_server, build_request, params):
         self.daemon = True
         self.executor_server = executor_server
-        self.job = job
+        self.build_request = build_request
         self.jobdir = None
-        self.uuid = job.unique
-        self.parameters = json.loads(job.arguments)
+        self.uuid = build_request.uuid
+        self.parameters = params
+        self.job = model.FrozenJob.fromZK(executor_server.zk_context,
+                                          params["job_ref"])
+        self.parameters["zuul"].update(
+            zuul.executor.server.zuul_params_from_job(self.job))
         # TODOv3(jeblair): self.node is really "the label of the node
         # assigned".  We should rename it (self.node_label?) if we
         # keep using it like this, or we may end up exposing more of
         # the complexity around multi-node jobs here
         # (self.nodes[0].label?)
         self.node = None
-        if len(self.parameters.get('nodes')) == 1:
-            self.node = self.parameters['nodes'][0]['label']
+        if len(self.job.nodeset.nodes) == 1:
+            self.node = next(iter(self.job.nodeset.nodes.values())).label
         self.unique = self.parameters['zuul']['build']
         self.pipeline = self.parameters['zuul']['pipeline']
         self.project = self.parameters['zuul']['project']['name']
-        self.name = self.parameters['job']
+        self.name = self.job.name
         self.wait_condition = threading.Condition()
         self.waiting = False
+        self.paused = False
         self.aborted = False
         self.requeue = False
+        self.should_fail = False
+        self.should_retry = False
         self.created = time.time()
         self.changes = None
         items = self.parameters['zuul']['items']
         self.changes = ' '.join(['%s,%s' % (x['change'], x['patchset'])
-                                for x in items if 'change' in x])
+                                 for x in items if 'change' in x])
+        if 'change' in items[-1]:
+            self.change = ' '.join((items[-1]['change'],
+                                    items[-1]['patchset']))
+        else:
+            self.change = None
 
     def __repr__(self):
         waiting = ''
@@ -1281,9 +646,13 @@ class FakeBuild(object):
             self._wait()
         self.log.debug("Build %s continuing" % self.unique)
 
+        self.writeReturnData()
+
         result = (RecordingAnsibleJob.RESULT_NORMAL, 0)  # Success
         if self.shouldFail():
             result = (RecordingAnsibleJob.RESULT_NORMAL, 1)  # Failure
+        if self.shouldRetry():
+            result = (RecordingAnsibleJob.RESULT_NORMAL, None)
         if self.aborted:
             result = (RecordingAnsibleJob.RESULT_ABORTED, None)
         if self.requeue:
@@ -1292,11 +661,34 @@ class FakeBuild(object):
         return result
 
     def shouldFail(self):
+        if self.should_fail:
+            return True
         changes = self.executor_server.fail_tests.get(self.name, [])
         for change in changes:
             if self.hasChanges(change):
                 return True
         return False
+
+    def shouldRetry(self):
+        if self.should_retry:
+            return True
+        entries = self.executor_server.retry_tests.get(self.name, [])
+        for entry in entries:
+            if self.hasChanges(entry['change']):
+                if entry['retries'] is None:
+                    return True
+                if entry['retries']:
+                    entry['retries'] = entry['retries'] - 1
+                    return True
+        return False
+
+    def writeReturnData(self):
+        changes = self.executor_server.return_data.get(self.name, {})
+        data = changes.get(self.parameters['zuul']['ref'])
+        if data is None:
+            return
+        with open(self.jobdir.result_data_file, 'w') as f:
+            f.write(json.dumps({'data': data}))
 
     def hasChanges(self, *changes):
         """Return whether this build has certain changes in its git repos.
@@ -1310,7 +702,7 @@ class FakeBuild(object):
 
         """
         for change in changes:
-            hostname = change.source.canonical_hostname
+            hostname = change.source_hostname
             path = os.path.join(self.jobdir.src_root, hostname, change.project)
             try:
                 repo = git.Repo(path)
@@ -1349,63 +741,266 @@ class FakeBuild(object):
 
 
 class RecordingAnsibleJob(zuul.executor.server.AnsibleJob):
-    def doMergeChanges(self, merger, items, repo_state):
+    result = None
+    semaphore_sleep_time = 5
+
+    def _execute(self):
+        for _ in iterate_timeout(60, 'wait for merge'):
+            if not self.executor_server.hold_jobs_in_start:
+                break
+            time.sleep(1)
+
+        super()._execute()
+
+    def doMergeChanges(self, *args, **kw):
         # Get a merger in order to update the repos involved in this job.
         commit = super(RecordingAnsibleJob, self).doMergeChanges(
-            merger, items, repo_state)
-        if not commit:  # merge conflict
-            self.recordResult('MERGER_FAILURE')
+            *args, **kw)
+        if not commit:
+            self.recordResult('MERGE_CONFLICT')
+
         return commit
 
     def recordResult(self, result):
-        build = self.executor_server.job_builds[self.job.unique]
         self.executor_server.lock.acquire()
+        build = self.executor_server.job_builds.get(self.build_request.uuid)
+        if not build:
+            self.executor_server.lock.release()
+            # Already recorded
+            return
         self.executor_server.build_history.append(
             BuildHistory(name=build.name, result=result, changes=build.changes,
-                         node=build.node, uuid=build.unique,
+                         node=build.node, uuid=build.unique, job=build.job,
                          ref=build.parameters['zuul']['ref'],
                          newrev=build.parameters['zuul'].get('newrev'),
                          parameters=build.parameters, jobdir=build.jobdir,
-                         pipeline=build.parameters['zuul']['pipeline'])
+                         pipeline=build.parameters['zuul']['pipeline'],
+                         build_request_ref=build.build_request.path)
         )
         self.executor_server.running_builds.remove(build)
-        del self.executor_server.job_builds[self.job.unique]
+        del self.executor_server.job_builds[self.build_request.uuid]
         self.executor_server.lock.release()
 
     def runPlaybooks(self, args):
-        build = self.executor_server.job_builds[self.job.unique]
+        build = self.executor_server.job_builds[self.build_request.uuid]
         build.jobdir = self.jobdir
 
-        result = super(RecordingAnsibleJob, self).runPlaybooks(args)
-        self.recordResult(result)
-        return result
+        self.result, error_detail = super(
+            RecordingAnsibleJob, self).runPlaybooks(args)
+        self.recordResult(self.result)
+        return self.result, error_detail
 
-    def runAnsible(self, cmd, timeout, playbook, wrapped=True):
-        build = self.executor_server.job_builds[self.job.unique]
+    def runAnsible(self, cmd, timeout, playbook, ansible_version,
+                   allow_pre_fail, wrapped=True, cleanup=False):
+        build = self.executor_server.job_builds[self.build_request.uuid]
 
         if self.executor_server._run_ansible:
+            # Call run on the fake build omitting the result so we also can
+            # hold real ansible jobs.
+            if playbook not in [self.jobdir.setup_playbook,
+                                self.jobdir.freeze_playbook]:
+                build.run()
+
             result = super(RecordingAnsibleJob, self).runAnsible(
-                cmd, timeout, playbook, wrapped)
+                cmd, timeout, playbook, ansible_version, allow_pre_fail,
+                wrapped, cleanup)
         else:
-            if playbook.path:
+            if playbook not in [self.jobdir.setup_playbook,
+                                self.jobdir.freeze_playbook]:
                 result = build.run()
             else:
                 result = (self.RESULT_NORMAL, 0)
         return result
 
-    def getHostList(self, args):
-        self.log.debug("hostlist")
-        hosts = super(RecordingAnsibleJob, self).getHostList(args)
+    def getHostList(self, args, nodes):
+        self.log.debug("hostlist %s", nodes)
+        hosts = super(RecordingAnsibleJob, self).getHostList(args, nodes)
         for host in hosts:
             if not host['host_vars'].get('ansible_connection'):
                 host['host_vars']['ansible_connection'] = 'local'
-
-        if not hosts:
-            hosts.append(dict(
-                name='localhost',
-                host_vars=dict(ansible_connection='local'),
-                host_keys=[]))
         return hosts
+
+    def pause(self):
+        build = self.executor_server.job_builds[self.build_request.uuid]
+        build.paused = True
+        super().pause()
+
+    def resume(self):
+        build = self.executor_server.job_builds.get(self.build_request.uuid)
+        if build:
+            build.paused = False
+        super().resume()
+
+    def _send_aborted(self):
+        self.recordResult('ABORTED')
+        super()._send_aborted()
+
+
+FakeMergeRequest = namedtuple(
+    "FakeMergeRequest", ("uuid", "job_type", "payload")
+)
+
+
+class HoldableMergerApi(MergerApi):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.hold_in_queue = False
+        self.history = {}
+
+    def submit(self, request, params, needs_result=False):
+        self.log.debug("Appending merge job to history: %s", request.uuid)
+        self.history.setdefault(request.job_type, [])
+        self.history[request.job_type].append(
+            FakeMergeRequest(request.uuid, request.job_type, params)
+        )
+        return super().submit(request, params, needs_result)
+
+    @property
+    def initial_state(self):
+        if self.hold_in_queue:
+            return MergeRequest.HOLD
+        return MergeRequest.REQUESTED
+
+
+class TestingMergerApi(HoldableMergerApi):
+
+    log = logging.getLogger("zuul.test.TestingMergerApi")
+
+    def _test_getMergeJobsInState(self, *states):
+        # As this method is used for assertions in the tests, it should look up
+        # the merge requests directly from ZooKeeper and not from a cache
+        # layer.
+        all_merge_requests = []
+        for merge_uuid in self._getAllRequestIds():
+            merge_request = self._get("/".join(
+                [self.REQUEST_ROOT, merge_uuid]))
+            if merge_request and (not states or merge_request.state in states):
+                all_merge_requests.append(merge_request)
+
+        return sorted(all_merge_requests)
+
+    def release(self, merge_request=None):
+        """
+        Releases a merge request which was previously put on hold for testing.
+
+        If no merge_request is provided, all merge request that are currently
+        in state HOLD will be released.
+        """
+        # Either release all jobs in HOLD state or the one specified.
+        if merge_request is not None:
+            merge_request.state = MergeRequest.REQUESTED
+            self.update(merge_request)
+            return
+
+        for merge_request in self._test_getMergeJobsInState(MergeRequest.HOLD):
+            merge_request.state = MergeRequest.REQUESTED
+            self.update(merge_request)
+
+    def queued(self):
+        return self._test_getMergeJobsInState(
+            MergeRequest.REQUESTED, MergeRequest.HOLD
+        )
+
+    def all(self):
+        return self._test_getMergeJobsInState()
+
+
+class HoldableMergeClient(zuul.merger.client.MergeClient):
+
+    _merger_api_class = HoldableMergerApi
+
+
+class HoldableExecutorApi(ExecutorApi):
+    def __init__(self, *args, **kwargs):
+        self.hold_in_queue = False
+        super().__init__(*args, **kwargs)
+
+    def _getInitialState(self):
+        if self.hold_in_queue:
+            return BuildRequest.HOLD
+        return BuildRequest.REQUESTED
+
+
+class HoldableLauncherClient(zuul.launcher.client.LauncherClient):
+
+    hold_in_queue = False
+
+    def _getInitialRequestState(self, job):
+        if self.hold_in_queue:
+            return model.NodesetRequest.State.TEST_HOLD
+        return super()._getInitialRequestState(job)
+
+
+class TestingExecutorApi(HoldableExecutorApi):
+    log = logging.getLogger("zuul.test.TestingExecutorApi")
+
+    def _test_getBuildsInState(self, *states):
+        # As this method is used for assertions in the tests, it
+        # should look up the build requests directly from ZooKeeper
+        # and not from a cache layer.
+
+        all_builds = []
+        for zone in self._getAllZones():
+            queue = self.zone_queues[zone]
+            for build_uuid in queue._getAllRequestIds():
+                build = queue._get(f'{queue.REQUEST_ROOT}/{build_uuid}')
+                if build and (not states or build.state in states):
+                    all_builds.append(build)
+
+        all_builds.sort()
+        return all_builds
+
+    def _getJobForBuildRequest(self, build_request):
+        # The parameters for the build request are removed immediately
+        # after the job starts in order to reduce impact to ZK, so if
+        # we want to inspect them in the tests, we need to save them.
+        # This adds them to a private internal cache for that purpose.
+        if not hasattr(self, '_test_build_request_job_map'):
+            self._test_build_request_job_map = {}
+        if build_request.uuid in self._test_build_request_job_map:
+            return self._test_build_request_job_map[build_request.uuid]
+
+        params = self.getParams(build_request)
+        job_name = params['zuul']['job']
+        self._test_build_request_job_map[build_request.uuid] = job_name
+        return job_name
+
+    def release(self, what=None):
+        """
+        Releases a build request which was previously put on hold for testing.
+
+        The what parameter specifies what to release. This can be a concrete
+        build request or a regular expression matching a job name.
+        """
+        self.log.debug("Releasing builds matching %s", what)
+        if isinstance(what, BuildRequest):
+            self.log.debug("Releasing build %s", what)
+            what.state = BuildRequest.REQUESTED
+            self.update(what)
+            return
+
+        for build_request in self._test_getBuildsInState(
+                BuildRequest.HOLD):
+            # Either release all build requests in HOLD state or the ones
+            # matching the given job name pattern.
+            if what is None or (
+                    re.match(what,
+                             self._getJobForBuildRequest(build_request))):
+                self.log.debug("Releasing build %s", build_request)
+                build_request.state = BuildRequest.REQUESTED
+                self.update(build_request)
+
+    def queued(self):
+        return self._test_getBuildsInState(
+            BuildRequest.REQUESTED, BuildRequest.HOLD
+        )
+
+    def all(self):
+        return self._test_getBuildsInState()
+
+
+class HoldableExecutorClient(zuul.executor.client.ExecutorClient):
+    _executor_api_class = HoldableExecutorApi
 
 
 class RecordingExecutorServer(zuul.executor.server.ExecutorServer):
@@ -1425,12 +1020,19 @@ class RecordingExecutorServer(zuul.executor.server.ExecutorServer):
     def __init__(self, *args, **kw):
         self._run_ansible = kw.pop('_run_ansible', False)
         self._test_root = kw.pop('_test_root', False)
+        if self._run_ansible:
+            self._ansible_manager_class = zuul.lib.ansible.AnsibleManager
+        else:
+            self._ansible_manager_class = FakeAnsibleManager
         super(RecordingExecutorServer, self).__init__(*args, **kw)
         self.hold_jobs_in_build = False
+        self.hold_jobs_in_start = False
         self.lock = threading.Lock()
         self.running_builds = []
         self.build_history = []
         self.fail_tests = {}
+        self.retry_tests = {}
+        self.return_data = {}
         self.job_builds = {}
 
     def failJob(self, name, change):
@@ -1446,7 +1048,41 @@ class RecordingExecutorServer(zuul.executor.server.ExecutorServer):
         l.append(change)
         self.fail_tests[name] = l
 
-    def release(self, regex=None):
+    def retryJob(self, name, change, retries=None):
+        """Instruct the executor to report matching builds as retries.
+
+        :arg str name: The name of the job to fail.
+        :arg Change change: The :py:class:`~tests.base.FakeChange`
+            instance which should cause the job to fail.  This job
+            will also fail for changes depending on this change.
+
+        """
+        self.retry_tests.setdefault(name, []).append(
+            dict(change=change,
+                 retries=retries))
+
+    def returnData(self, name, change, data):
+        """Instruct the executor to return data for this build.
+
+        :arg str name: The name of the job to return data.
+        :arg Change change: The :py:class:`~tests.base.FakeChange`
+            instance which should cause the job to return data.
+            Or pass a ref as a string.
+        :arg dict data: The data to return
+
+        """
+        changes = self.return_data.setdefault(name, {})
+        if hasattr(change, 'number'):
+            cid = change.data['currentPatchSet']['ref']
+        elif isinstance(change, str):
+            cid = change
+        else:
+            # Not actually a change, but a ref update event for tags/etc
+            # In this case a key of None is used by writeReturnData
+            cid = None
+        changes[cid] = data
+
+    def release(self, regex=None, change=None):
         """Release a held build.
 
         :arg str regex: A regular expression which, if supplied, will
@@ -1454,130 +1090,65 @@ class RecordingExecutorServer(zuul.executor.server.ExecutorServer):
             not supplied, all builds will be released.
 
         """
+        released = []
         builds = self.running_builds[:]
-        self.log.debug("Releasing build %s (%s)" % (regex,
-                                                    len(self.running_builds)))
+        if len(builds) == 0:
+            self.log.debug('No running builds to release')
+            return []
+
+        self.log.debug("Releasing build %s %s (%s)" % (
+            regex, change, len(builds)))
         for build in builds:
-            if not regex or re.match(regex, build.name):
+            if ((not regex or re.match(regex, build.name)) and
+                (not change or build.change == change)):
                 self.log.debug("Releasing build %s" %
                                (build.parameters['zuul']['build']))
+                released.append(build)
                 build.release()
             else:
                 self.log.debug("Not releasing build %s" %
                                (build.parameters['zuul']['build']))
         self.log.debug("Done releasing builds %s (%s)" %
-                       (regex, len(self.running_builds)))
+                       (regex, len(builds)))
+        return released
 
-    def executeJob(self, job):
-        build = FakeBuild(self, job)
-        job.build = build
+    def executeJob(self, build_request, params):
+        build = FakeBuild(self, build_request, params)
         self.running_builds.append(build)
-        self.job_builds[job.unique] = build
-        args = json.loads(job.arguments)
-        args['zuul']['_test'] = dict(test_root=self._test_root)
-        job.arguments = json.dumps(args)
-        super(RecordingExecutorServer, self).executeJob(job)
+        self.job_builds[build_request.uuid] = build
+        params['zuul']['_test'] = dict(test_root=self._test_root)
+        super(RecordingExecutorServer, self).executeJob(build_request, params)
 
-    def stopJob(self, job):
+    def stopJob(self, build_request: BuildRequest):
         self.log.debug("handle stop")
-        parameters = json.loads(job.arguments)
-        uuid = parameters['uuid']
+        uuid = build_request.uuid
         for build in self.running_builds:
             if build.unique == uuid:
                 build.aborted = True
                 build.release()
-        super(RecordingExecutorServer, self).stopJob(job)
+        super(RecordingExecutorServer, self).stopJob(build_request)
 
     def stop(self):
         for build in self.running_builds:
+            build.aborted = True
             build.release()
         super(RecordingExecutorServer, self).stop()
 
 
-class FakeGearmanServer(gear.Server):
-    """A Gearman server for use in tests.
+class TestScheduler(zuul.scheduler.Scheduler):
+    _merger_client_class = HoldableMergeClient
+    _executor_client_class = HoldableExecutorClient
+    _launcher_client_class = HoldableLauncherClient
 
-    :ivar bool hold_jobs_in_queue: If true, submitted jobs will be
-        added to the queue but will not be distributed to workers
-        until released.  This attribute may be changed at any time and
-        will take effect for subsequently enqueued jobs, but
-        previously held jobs will still need to be explicitly
-        released.
 
-    """
+class TestLauncher(zuul.launcher.server.Launcher):
+    def __init__(self, *args, **kw):
+        super().__init__(*args, **kw)
+        self._test_lock = threading.Lock()
 
-    def __init__(self, use_ssl=False):
-        self.hold_jobs_in_queue = False
-        self.hold_merge_jobs_in_queue = False
-        self.jobs_history = []
-        if use_ssl:
-            ssl_ca = os.path.join(FIXTURE_DIR, 'gearman/root-ca.pem')
-            ssl_cert = os.path.join(FIXTURE_DIR, 'gearman/server.pem')
-            ssl_key = os.path.join(FIXTURE_DIR, 'gearman/server.key')
-        else:
-            ssl_ca = None
-            ssl_cert = None
-            ssl_key = None
-
-        super(FakeGearmanServer, self).__init__(0, ssl_key=ssl_key,
-                                                ssl_cert=ssl_cert,
-                                                ssl_ca=ssl_ca)
-
-    def getJobForConnection(self, connection, peek=False):
-        for job_queue in [self.high_queue, self.normal_queue, self.low_queue]:
-            for job in job_queue:
-                self.jobs_history.append(job)
-                if not hasattr(job, 'waiting'):
-                    if job.name.startswith(b'executor:execute'):
-                        job.waiting = self.hold_jobs_in_queue
-                    elif job.name.startswith(b'merger:'):
-                        job.waiting = self.hold_merge_jobs_in_queue
-                    else:
-                        job.waiting = False
-                if job.waiting:
-                    continue
-                if job.name in connection.functions:
-                    if not peek:
-                        job_queue.remove(job)
-                        connection.related_jobs[job.handle] = job
-                        job.worker_connection = connection
-                    job.running = True
-                    return job
-        return None
-
-    def release(self, regex=None):
-        """Release a held job.
-
-        :arg str regex: A regular expression which, if supplied, will
-            cause only jobs with matching names to be released.  If
-            not supplied, all jobs will be released.
-        """
-        released = False
-        qlen = (len(self.high_queue) + len(self.normal_queue) +
-                len(self.low_queue))
-        self.log.debug("releasing queued job %s (%s)" % (regex, qlen))
-        for job in self.getQueue():
-            match = False
-            if job.name == b'executor:execute':
-                parameters = json.loads(job.arguments.decode('utf8'))
-                if not regex or re.match(regex, parameters.get('job')):
-                    match = True
-            if job.name.startswith(b'merger:'):
-                if not regex:
-                    match = True
-            if match:
-                self.log.debug("releasing queued job %s" %
-                               job.unique)
-                job.waiting = False
-                released = True
-            else:
-                self.log.debug("not releasing queued job %s" %
-                               job.unique)
-        if released:
-            self.wakeConnections()
-        qlen = (len(self.high_queue) + len(self.normal_queue) +
-                len(self.low_queue))
-        self.log.debug("done releasing queued jobs %s (%s)" % (regex, qlen))
+    def _run(self):
+        with self._test_lock:
+            return super()._run()
 
 
 class FakeSMTP(object):
@@ -1612,14 +1183,27 @@ class FakeSMTP(object):
 class FakeNodepool(object):
     REQUEST_ROOT = '/nodepool/requests'
     NODE_ROOT = '/nodepool/nodes'
+    COMPONENT_ROOT = '/nodepool/components'
 
     log = logging.getLogger("zuul.test.FakeNodepool")
 
-    def __init__(self, host, port, chroot):
+    def __init__(self, zk_chroot_fixture):
+        self.complete_event = threading.Event()
         self.host_keys = None
+
         self.client = kazoo.client.KazooClient(
-            hosts='%s:%s%s' % (host, port, chroot))
+            hosts='%s:%s%s' % (
+                zk_chroot_fixture.zookeeper_host,
+                zk_chroot_fixture.zookeeper_port,
+                zk_chroot_fixture.zookeeper_chroot),
+            use_ssl=True,
+            keyfile=zk_chroot_fixture.zookeeper_key,
+            certfile=zk_chroot_fixture.zookeeper_cert,
+            ca=zk_chroot_fixture.zookeeper_ca,
+            timeout=ZOOKEEPER_SESSION_TIMEOUT,
+        )
         self.client.start()
+        self.registerLauncher()
         self._running = True
         self.paused = False
         self.thread = threading.Thread(target=self.run)
@@ -1627,6 +1211,12 @@ class FakeNodepool(object):
         self.thread.start()
         self.fail_requests = set()
         self.remote_ansible = False
+        self.attributes = None
+        self.resources = None
+        self.python_path = 'auto'
+        self.shell_type = None
+        self.connection_port = None
+        self.history = []
 
     def stop(self):
         self._running = False
@@ -1634,12 +1224,21 @@ class FakeNodepool(object):
         self.client.stop()
         self.client.close()
 
+    def pause(self):
+        self.complete_event.wait()
+        self.paused = True
+
+    def unpause(self):
+        self.paused = False
+
     def run(self):
         while self._running:
+            self.complete_event.clear()
             try:
                 self._run()
             except Exception:
                 self.log.exception("Error in fake nodepool:")
+            self.complete_event.set()
             time.sleep(0.1)
 
     def _run(self):
@@ -1648,13 +1247,20 @@ class FakeNodepool(object):
         for req in self.getNodeRequests():
             self.fulfillRequest(req)
 
+    def registerLauncher(self, labels=["label1"], id="FakeLauncher"):
+        path = os.path.join(self.COMPONENT_ROOT, 'pool', id)
+        data = {'id': id, 'supported_labels': labels}
+        self.client.create(
+            path, json.dumps(data).encode('utf8'),
+            ephemeral=True, makepath=True, sequence=True)
+
     def getNodeRequests(self):
         try:
             reqids = self.client.get_children(self.REQUEST_ROOT)
         except kazoo.exceptions.NoNodeError:
             return []
         reqs = []
-        for oid in sorted(reqids):
+        for oid in reqids:
             path = self.REQUEST_ROOT + '/' + oid
             try:
                 data, stat = self.client.get(path)
@@ -1663,6 +1269,9 @@ class FakeNodepool(object):
                 reqs.append(data)
             except kazoo.exceptions.NoNodeError:
                 pass
+        reqs.sort(key=lambda r: (r['_oid'].split('-')[0],
+                                 r['relative_priority'],
+                                 r['_oid'].split('-')[1]))
         return reqs
 
     def getNodes(self):
@@ -1687,22 +1296,30 @@ class FakeNodepool(object):
             nodes.append(data)
         return nodes
 
-    def makeNode(self, request_id, node_type):
+    def makeNode(self, request_id, node_type, request):
         now = time.time()
         path = '/nodepool/nodes/'
         remote_ip = os.environ.get('ZUUL_REMOTE_IPV4', '127.0.0.1')
         if self.remote_ansible and not self.host_keys:
             self.host_keys = self.keyscan(remote_ip)
-        host_keys = self.host_keys or ["fake-key1", "fake-key2"]
+        if self.host_keys is None:
+            host_keys = ["fake-key1", "fake-key2"]
+        else:
+            host_keys = self.host_keys
         data = dict(type=node_type,
                     cloud='test-cloud',
                     provider='test-provider',
                     region='test-region',
                     az='test-az',
+                    attributes=self.attributes,
+                    host_id='test-host-id',
                     interface_ip=remote_ip,
                     public_ipv4=remote_ip,
                     private_ipv4=None,
                     public_ipv6=None,
+                    private_ipv6=None,
+                    python_path=self.python_path,
+                    shell_type=self.shell_type,
                     allocated_to=request_id,
                     state='ready',
                     state_time=now,
@@ -1711,15 +1328,53 @@ class FakeNodepool(object):
                     image_id=None,
                     host_keys=host_keys,
                     executor='fake-nodepool',
-                    hold_expiration=None)
+                    hold_expiration=None,
+                    node_properties={"spot": False})
+        if self.resources:
+            data['resources'] = self.resources
         if self.remote_ansible:
             data['connection_type'] = 'ssh'
+        if os.environ.get("ZUUL_REMOTE_USER"):
+            data['username'] = os.environ.get("ZUUL_REMOTE_USER")
         if 'fakeuser' in node_type:
             data['username'] = 'fakeuser'
         if 'windows' in node_type:
             data['connection_type'] = 'winrm'
         if 'network' in node_type:
             data['connection_type'] = 'network_cli'
+        if self.connection_port:
+            data['connection_port'] = self.connection_port
+        if 'kubernetes-namespace' in node_type or 'fedora-pod' in node_type:
+            data['connection_type'] = 'namespace'
+            data['connection_port'] = {
+                'name': 'zuul-ci',
+                'namespace': 'zuul-ci-abcdefg',
+                'host': 'localhost',
+                'skiptls': True,
+                'token': 'FakeToken',
+                'ca_crt': 'FakeCA',
+                'user': 'zuul-worker',
+            }
+            if 'fedora-pod' in node_type:
+                data['connection_type'] = 'kubectl'
+                data['connection_port']['pod'] = 'fedora-abcdefg'
+        if 'remote-pod' in node_type:
+            data['connection_type'] = 'kubectl'
+            data['connection_port'] = {
+                'name': os.environ['ZUUL_POD_REMOTE_NAME'],
+                'namespace': os.environ.get(
+                    'ZUUL_POD_REMOTE_NAMESPACE', 'default'),
+                'host': os.environ['ZUUL_POD_REMOTE_SERVER'],
+                'skiptls': False,
+                'token': os.environ['ZUUL_POD_REMOTE_TOKEN'],
+                'ca_crt': os.environ['ZUUL_POD_REMOTE_CA'],
+                'user': os.environ['ZUUL_POD_REMOTE_USER'],
+                'pod': os.environ['ZUUL_POD_REMOTE_NAME'],
+            }
+            data['interface_ip'] = data['connection_port']['pod']
+            data['public_ipv4'] = None
+        data['tenant_name'] = request['tenant_name']
+        data['requestor'] = request['requestor']
 
         data = json.dumps(data).encode('utf8')
         path = self.client.create(path, data,
@@ -1739,6 +1394,7 @@ class FakeNodepool(object):
         if request['state'] != 'requested':
             return
         request = request.copy()
+        self.history.append(request)
         oid = request['_oid']
         del request['_oid']
 
@@ -1746,9 +1402,9 @@ class FakeNodepool(object):
             request['state'] = 'failed'
         else:
             request['state'] = 'fulfilled'
-            nodes = []
+            nodes = request.get('nodes', [])
             for node in request['node_types']:
-                nodeid = self.makeNode(oid, node)
+                nodeid = self.makeNode(oid, node, request)
                 nodes.append(nodeid)
             request['nodes'] = nodes
 
@@ -1811,44 +1467,101 @@ class FakeNodepool(object):
         return keys
 
 
+class ResponsesFixture(fixtures.Fixture):
+    def __init__(self):
+        super().__init__()
+        self.requests_mock = responses.RequestsMock(
+            assert_all_requests_are_fired=False)
+
+    def _setUp(self):
+        self.requests_mock.start()
+        self.addCleanup(self.requests_mock.stop)
+
+
 class ChrootedKazooFixture(fixtures.Fixture):
-    def __init__(self, test_id):
+    def __init__(self, test_id, random_databases, delete_databases):
         super(ChrootedKazooFixture, self).__init__()
 
-        zk_host = os.environ.get('NODEPOOL_ZK_HOST', 'localhost')
+        if 'ZOOKEEPER_2181_TCP' in os.environ:
+            # prevent any nasty hobbits^H^H^H suprises
+            if 'ZUUL_ZK_HOST' in os.environ:
+                raise Exception(
+                    'Looks like tox-docker is being used but you have also '
+                    'configured ZUUL_ZK_HOST. Either avoid using the '
+                    'docker environment or unset ZUUL_ZK_HOST.')
+
+            zk_host = 'localhost:' + os.environ['ZUUL_2181_TCP']
+        elif 'ZUUL_ZK_HOST' in os.environ:
+            zk_host = os.environ['ZUUL_ZK_HOST']
+        else:
+            zk_host = 'localhost'
+
         if ':' in zk_host:
             host, port = zk_host.split(':')
         else:
             host = zk_host
             port = None
 
+        zk_ca = os.environ.get('ZUUL_ZK_CA', None)
+        if not zk_ca:
+            zk_ca = os.path.join(os.path.dirname(__file__),
+                                 '../tools/ca/certs/cacert.pem')
+        self.zookeeper_ca = zk_ca
+        zk_cert = os.environ.get('ZUUL_ZK_CERT', None)
+        if not zk_cert:
+            zk_cert = os.path.join(os.path.dirname(__file__),
+                                   '../tools/ca/certs/client.pem')
+        self.zookeeper_cert = zk_cert
+        zk_key = os.environ.get('ZUUL_ZK_KEY', None)
+        if not zk_key:
+            zk_key = os.path.join(os.path.dirname(__file__),
+                                  '../tools/ca/keys/clientkey.pem')
+        self.zookeeper_key = zk_key
         self.zookeeper_host = host
 
         if not port:
-            self.zookeeper_port = 2181
+            self.zookeeper_port = 2281
         else:
             self.zookeeper_port = int(port)
 
         self.test_id = test_id
+        self.random_databases = random_databases
+        self.delete_databases = delete_databases
 
     def _setUp(self):
-        # Make sure the test chroot paths do not conflict
-        random_bits = ''.join(random.choice(string.ascii_lowercase +
-                                            string.ascii_uppercase)
-                              for x in range(8))
+        if self.random_databases:
+            # Make sure the test chroot paths do not conflict
+            random_bits = ''.join(random.choice(string.ascii_lowercase +
+                                                string.ascii_uppercase)
+                                  for x in range(8))
 
-        rand_test_path = '%s_%s_%s' % (random_bits, os.getpid(), self.test_id)
-        self.zookeeper_chroot = "/nodepool_test/%s" % rand_test_path
+            test_path = '%s_%s_%s' % (random_bits, os.getpid(), self.test_id)
+        else:
+            test_path = self.test_id.split('.')[-1]
+        self.zookeeper_chroot = f"/test/{test_path}"
 
-        self.addCleanup(self._cleanup)
+        self.zk_hosts = '%s:%s%s' % (
+            self.zookeeper_host,
+            self.zookeeper_port,
+            self.zookeeper_chroot)
+
+        if self.delete_databases:
+            self.addCleanup(self._cleanup)
 
         # Ensure the chroot path exists and clean up any pre-existing znodes.
         _tmp_client = kazoo.client.KazooClient(
-            hosts='%s:%s' % (self.zookeeper_host, self.zookeeper_port))
+            hosts=f'{self.zookeeper_host}:{self.zookeeper_port}',
+            use_ssl=True,
+            keyfile=self.zookeeper_key,
+            certfile=self.zookeeper_cert,
+            ca=self.zookeeper_ca,
+            timeout=ZOOKEEPER_SESSION_TIMEOUT,
+        )
         _tmp_client.start()
 
-        if _tmp_client.exists(self.zookeeper_chroot):
-            _tmp_client.delete(self.zookeeper_chroot, recursive=True)
+        if self.random_databases:
+            if _tmp_client.exists(self.zookeeper_chroot):
+                _tmp_client.delete(self.zookeeper_chroot, recursive=True)
 
         _tmp_client.ensure_path(self.zookeeper_chroot)
         _tmp_client.stop()
@@ -1858,7 +1571,13 @@ class ChrootedKazooFixture(fixtures.Fixture):
         '''Remove the chroot path.'''
         # Need a non-chroot'ed client to remove the chroot path
         _tmp_client = kazoo.client.KazooClient(
-            hosts='%s:%s' % (self.zookeeper_host, self.zookeeper_port))
+            hosts='%s:%s' % (self.zookeeper_host, self.zookeeper_port),
+            use_ssl=True,
+            keyfile=self.zookeeper_key,
+            certfile=self.zookeeper_cert,
+            ca=self.zookeeper_ca,
+            timeout=ZOOKEEPER_SESSION_TIMEOUT,
+        )
         _tmp_client.start()
         _tmp_client.delete(self.zookeeper_chroot, recursive=True)
         _tmp_client.stop()
@@ -1874,6 +1593,8 @@ class WebProxyFixture(fixtures.Fixture):
         rules = self.rules
 
         class Proxy(http.server.SimpleHTTPRequestHandler):
+            log = logging.getLogger('zuul.WebProxyFixture.Proxy')
+
             def do_GET(self):
                 path = self.path
                 for (pattern, replace) in rules:
@@ -1888,6 +1609,9 @@ class WebProxyFixture(fixtures.Fixture):
                 self.end_headers()
                 self.wfile.write(resp.content)
 
+            def log_message(self, fmt, *args):
+                self.log.debug(fmt, *args)
+
         self.httpd = socketserver.ThreadingTCPServer(('', 0), Proxy)
         self.port = self.httpd.socket.getsockname()[1]
         self.thread = threading.Thread(target=self.httpd.serve_forever)
@@ -1897,29 +1621,40 @@ class WebProxyFixture(fixtures.Fixture):
     def _cleanup(self):
         self.httpd.shutdown()
         self.thread.join()
+        self.httpd.server_close()
 
 
 class ZuulWebFixture(fixtures.Fixture):
-    def __init__(self, gearman_server_port, config, info=None):
+    def __init__(self, config, test_config,
+                 additional_event_queues, upstream_root,
+                 poller_events, git_url_with_auth, add_cleanup,
+                 test_root, info=None):
         super(ZuulWebFixture, self).__init__()
-        self.gearman_server_port = gearman_server_port
-        self.connections = zuul.lib.connections.ConnectionRegistry()
-        self.connections.configure(
-            config,
-            include_drivers=[zuul.driver.sql.SQLDriver,
-                             zuul.driver.github.GithubDriver])
+        self.config = config
+        self.connections = TestConnectionRegistry(
+            config, test_config,
+            additional_event_queues, upstream_root,
+            poller_events, git_url_with_auth, add_cleanup)
+        self.connections.configure(config, database=True, sources=True,
+                                   triggers=True, reporters=True,
+                                   providers=True)
+
+        self.authenticators = zuul.lib.auth.AuthenticatorRegistry()
+        self.authenticators.configure(config)
         if info is None:
-            self.info = zuul.model.WebInfo()
+            self.info = WebInfo.fromConfig(config)
         else:
             self.info = info
+        self.test_root = test_root
 
     def _setUp(self):
         # Start the web server
         self.web = zuul.web.ZuulWeb(
-            listen_address='::', listen_port=0,
-            gear_server='127.0.0.1', gear_port=self.gearman_server_port,
+            config=self.config,
             info=self.info,
-            connections=self.connections)
+            connections=self.connections,
+            authenticators=self.authenticators)
+        self.connections.load(self.web.zk_client, self.web.component_registry)
         self.web.start()
         self.addCleanup(self.stop)
 
@@ -1939,52 +1674,120 @@ class ZuulWebFixture(fixtures.Fixture):
 
 
 class MySQLSchemaFixture(fixtures.Fixture):
+    log = logging.getLogger('zuul.test.MySQLSchemaFixture')
+
+    def __init__(self, test_id, random_databases, delete_databases):
+        super().__init__()
+        self.test_id = test_id
+        self.random_databases = random_databases
+        self.delete_databases = delete_databases
+
     def setUp(self):
-        super(MySQLSchemaFixture, self).setUp()
+        super().setUp()
 
-        random_bits = ''.join(random.choice(string.ascii_lowercase +
-                                            string.ascii_uppercase)
-                              for x in range(8))
-        self.name = '%s_%s' % (random_bits, os.getpid())
-        self.passwd = uuid.uuid4().hex
+        if self.random_databases:
+            random_bits = ''.join(random.choice(string.ascii_lowercase +
+                                                string.ascii_uppercase)
+                                  for x in range(8))
+            self.name = '%s_%s' % (random_bits, os.getpid())
+            self.passwd = uuid.uuid4().hex
+        else:
+            self.name = self.test_id.split('.')[-1]
+            self.passwd = self.name
         self.host = os.environ.get('ZUUL_MYSQL_HOST', '127.0.0.1')
-        db = pymysql.connect(host=self.host,
-                             user="openstack_citest",
-                             passwd="openstack_citest",
-                             db="openstack_citest")
-        cur = db.cursor()
-        cur.execute("create database %s" % self.name)
-        cur.execute("create user '{user}'@'' identified by '{passwd}'".format(
-            user=self.name, passwd=self.passwd))
-        cur.execute("grant all on {name}.* to '{name}'@''".format(
-            name=self.name))
-        cur.execute("flush privileges")
+        self.port = int(os.environ.get('ZUUL_MYSQL_PORT', 3306))
+        self.log.debug("Creating database %s:%s:%s",
+                       self.host, self.port, self.name)
+        connected = False
+        # Set this to True to enable pymyql connection debugging. It is very
+        # verbose so we leave it off by default.
+        pymysql.connections.DEBUG = False
+        try:
+            db = pymysql.connect(host=self.host,
+                                 port=self.port,
+                                 user="openstack_citest",
+                                 passwd="openstack_citest",
+                                 db="openstack_citest")
+            pymysql.connections.DEBUG = False
+            connected = True
+            with db.cursor() as cur:
+                cur.execute("create database %s" % self.name)
+                cur.execute(
+                    "create user '{user}'@'' identified by '{passwd}'".format(
+                        user=self.name, passwd=self.passwd))
+                cur.execute("grant all on {name}.* to '{name}'@''".format(
+                    name=self.name))
+                # Do not flush privileges here. It is only necessary when
+                # modifying the db tables directly (INSERT, UPDATE, DELETE)
+                # not when using CREATE USER, DROP USER, and/or GRANT.
+        except pymysql.err.ProgrammingError as e:
+            if e.args[0] == 1007:
+                # Database exists
+                pass
+            else:
+                raise
+        finally:
+            pymysql.connections.DEBUG = False
+            if connected:
+                db.close()
 
-        self.dburi = 'mysql+pymysql://{name}:{passwd}@{host}/{name}'.format(
-            name=self.name, passwd=self.passwd, host=self.host)
+        self.dburi = 'mariadb+pymysql://{name}:{passwd}@{host}:{port}/{name}'\
+            .format(
+                name=self.name,
+                passwd=self.passwd,
+                host=self.host,
+                port=self.port
+            )
         self.addDetail('dburi', testtools.content.text_content(self.dburi))
-        self.addCleanup(self.cleanup)
+        if self.delete_databases:
+            self.addCleanup(self.cleanup)
 
     def cleanup(self):
-        db = pymysql.connect(host=self.host,
-                             user="openstack_citest",
-                             passwd="openstack_citest",
-                             db="openstack_citest")
-        cur = db.cursor()
-        cur.execute("drop database %s" % self.name)
-        cur.execute("drop user '%s'@''" % self.name)
-        cur.execute("flush privileges")
+        self.log.debug("Deleting database %s:%s:%s",
+                       self.host, self.port, self.name)
+        connected = False
+        # Set this to True to enable pymyql connection debugging. It is very
+        # verbose so we leave it off by default.
+        pymysql.connections.DEBUG = False
+        try:
+            db = pymysql.connect(host=self.host,
+                                 port=self.port,
+                                 user="openstack_citest",
+                                 passwd="openstack_citest",
+                                 db="openstack_citest",
+                                 read_timeout=90)
+            connected = True
+            pymysql.connections.DEBUG = False
+            with db.cursor() as cur:
+                cur.execute("drop database %s" % self.name)
+                cur.execute("drop user '%s'@''" % self.name)
+                # Do not flush privileges here. It is only necessary when
+                # modifying the db tables directly (INSERT, UPDATE, DELETE)
+                # not when using CREATE USER, DROP USER, and/or GRANT.
+        finally:
+            pymysql.connections.DEBUG = False
+            if connected:
+                db.close()
 
 
 class PostgresqlSchemaFixture(fixtures.Fixture):
-    def setUp(self):
-        super(PostgresqlSchemaFixture, self).setUp()
+    def __init__(self, test_id, random_databases, delete_databases):
+        super().__init__()
+        self.test_id = test_id
+        self.random_databases = random_databases
+        self.delete_databases = delete_databases
 
-        # Postgres lowercases user and table names during creation but not
-        # during authentication. Thus only use lowercase chars.
-        random_bits = ''.join(random.choice(string.ascii_lowercase)
-                              for x in range(8))
-        self.name = '%s_%s' % (random_bits, os.getpid())
+    def setUp(self):
+        super().setUp()
+
+        if self.random_databases:
+            # Postgres lowercases user and table names during creation but not
+            # during authentication. Thus only use lowercase chars.
+            random_bits = ''.join(random.choice(string.ascii_lowercase)
+                                  for x in range(8))
+            self.name = '%s_%s' % (random_bits, os.getpid())
+        else:
+            self.name = self.test_id.split('.')[-1]
         self.passwd = uuid.uuid4().hex
         self.host = os.environ.get('ZUUL_POSTGRES_HOST', '127.0.0.1')
         db = psycopg2.connect(host=self.host,
@@ -2002,7 +1805,8 @@ class PostgresqlSchemaFixture(fixtures.Fixture):
             name=self.name, passwd=self.passwd, host=self.host)
 
         self.addDetail('dburi', testtools.content.text_content(self.dburi))
-        self.addCleanup(self.cleanup)
+        if self.delete_databases:
+            self.addCleanup(self.cleanup)
 
     def cleanup(self):
         db = psycopg2.connect(host=self.host,
@@ -2015,9 +1819,75 @@ class PostgresqlSchemaFixture(fixtures.Fixture):
         cur.execute("drop user %s" % self.name)
 
 
+class PrometheusFixture(fixtures.Fixture):
+    def _setUp(self):
+        # Save a list of collectors which exist at the start of the
+        # test (ie, the standard prometheus_client collectors)
+        self.collectors = list(
+            prometheus_client.registry.REGISTRY._collector_to_names.keys())
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self):
+        # Avoid the "Duplicated timeseries in CollectorRegistry" error
+        # by removing any collectors added during the test.
+        collectors = list(
+            prometheus_client.registry.REGISTRY._collector_to_names.keys())
+        for collector in collectors:
+            if collector not in self.collectors:
+                prometheus_client.registry.REGISTRY.unregister(collector)
+
+
+class GlobalRegistryFixture(fixtures.Fixture):
+    def _setUp(self):
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self):
+        # Remove our component registry from the global
+        COMPONENT_REGISTRY.clearRegistry()
+
+
+class FakeCPUTimes:
+    def __init__(self):
+        self.user = 0
+        self.system = 0
+        self.children_user = 0
+        self.children_system = 0
+
+
+def cpu_times(self):
+    return FakeCPUTimes()
+
+
+class LogExceptionHandler(logging.Handler):
+    def __init__(self, loglist):
+        super().__init__()
+        self.__loglist = loglist
+
+    def emit(self, record):
+        if record.exc_info:
+            self.__loglist.append(record)
+
+
 class BaseTestCase(testtools.TestCase):
     log = logging.getLogger("zuul.test")
-    wait_timeout = 30
+    wait_timeout = 90
+    # These can be unset to use predictable database fixtures that
+    # persist across an upgrade functional test run.
+    random_databases = True
+    delete_databases = True
+    use_tmpdir = True
+    always_attach_logs = False
+
+    def checkLogs(self, *args):
+        for record in self._exception_logs:
+            okay = False
+            for substr in self.test_config.okay_tracebacks:
+                if substr in record.exc_text:
+                    okay = True
+                    break
+            if okay:
+                continue
+            self.fail(f"Traceback found in logs: {record.msg}")
 
     def attachLogs(self, *args):
         def reader():
@@ -2033,15 +1903,18 @@ class BaseTestCase(testtools.TestCase):
             False)
         self.addDetail('logging', content)
 
-    def shouldNeverCapture(self):
-        test_name = self.id().split('.')[-1]
-        test = getattr(self, test_name)
-        if hasattr(test, '__never_capture__'):
-            return getattr(test, '__never_capture__')
-        return False
+    def initTestConfig(self):
+        # Some tests may need to do this before we setUp
+        if not hasattr(self, 'test_config'):
+            self.test_config = TestConfig(self)
 
     def setUp(self):
         super(BaseTestCase, self).setUp()
+
+        self.initTestConfig()
+
+        self.useFixture(PrometheusFixture())
+        self.useFixture(GlobalRegistryFixture())
         test_timeout = os.environ.get('OS_TEST_TIMEOUT', 0)
         try:
             test_timeout = int(test_timeout)
@@ -2049,9 +1922,12 @@ class BaseTestCase(testtools.TestCase):
             # If timeout value is invalid do not set a timeout.
             test_timeout = 0
         if test_timeout > 0:
-            self.useFixture(fixtures.Timeout(test_timeout, gentle=False))
+            # Try a gentle timeout first and as a safety net a hard timeout
+            # later.
+            self.useFixture(fixtures.Timeout(test_timeout, gentle=True))
+            self.useFixture(fixtures.Timeout(test_timeout + 20, gentle=False))
 
-        if not self.shouldNeverCapture():
+        if not self.test_config.never_capture:
             if (os.environ.get('OS_STDOUT_CAPTURE') == 'True' or
                 os.environ.get('OS_STDOUT_CAPTURE') == '1'):
                 stdout = self.useFixture(
@@ -2065,7 +1941,10 @@ class BaseTestCase(testtools.TestCase):
             if (os.environ.get('OS_LOG_CAPTURE') == 'True' or
                 os.environ.get('OS_LOG_CAPTURE') == '1'):
                 self._log_stream = StringIO()
-                self.addOnException(self.attachLogs)
+                if self.always_attach_logs:
+                    self.addCleanup(self.attachLogs)
+                else:
+                    self.addOnException(self.attachLogs)
             else:
                 self._log_stream = sys.stdout
         else:
@@ -2077,22 +1956,34 @@ class BaseTestCase(testtools.TestCase):
         handler.setFormatter(formatter)
 
         logger = logging.getLogger()
+        # It is possible that a stderr log handler is inserted before our
+        # addHandler below. If that happens we will emit all logs to stderr
+        # even when we don't want to. Error here to make it clear there is
+        # a problem as early as possible as it is easy to overlook.
+        self.assertEqual(logger.handlers, [])
         logger.setLevel(logging.DEBUG)
         logger.addHandler(handler)
 
         # Make sure we don't carry old handlers around in process state
         # which slows down test runs
         self.addCleanup(logger.removeHandler, handler)
-        self.addCleanup(handler.close)
-        self.addCleanup(handler.flush)
+
+        self._exception_logs = []
+        log_exc_handler = LogExceptionHandler(self._exception_logs)
+        logger.addHandler(log_exc_handler)
+        self.addCleanup(self.checkLogs)
+        self.addCleanup(logger.removeHandler, log_exc_handler)
 
         # NOTE(notmorgan): Extract logging overrides for specific
         # libraries from the OS_LOG_DEFAULTS env and create loggers
         # for each. This is used to limit the output during test runs
-        # from libraries that zuul depends on such as gear.
+        # from libraries that zuul depends on.
         log_defaults_from_env = os.environ.get(
             'OS_LOG_DEFAULTS',
-            'git.cmd=INFO,kazoo.client=WARNING,gear=INFO')
+            'git.cmd=INFO,'
+            'kazoo.client=WARNING,kazoo.recipe=WARNING,'
+            'botocore=WARNING'
+        )
 
         if log_defaults_from_env:
             for default in log_defaults_from_env.split(','):
@@ -2102,17 +1993,294 @@ class BaseTestCase(testtools.TestCase):
                     logger = logging.getLogger(name)
                     logger.setLevel(level)
                     logger.addHandler(handler)
+                    self.addCleanup(logger.removeHandler, handler)
                     logger.propagate = False
                 except ValueError:
                     # NOTE(notmorgan): Invalid format of the log default,
                     # skip and don't try and apply a logger for the
                     # specified module
                     pass
+        self.addCleanup(handler.close)
+        self.addCleanup(handler.flush)
+
+        if sys.platform == 'darwin':
+            # Popen.cpu_times() is broken on darwin so patch it with a fake.
+            Popen.cpu_times = cpu_times
+
+    def setupZK(self):
+        self.zk_chroot_fixture = self.useFixture(
+            ChrootedKazooFixture(self.id(),
+                                 self.random_databases,
+                                 self.delete_databases,
+                                 ))
+
+    def getZKWatches(self):
+        # TODO: The client.command method used here returns only the
+        # first 8k of data.  That means this method can return {} when
+        # there actually are watches (and this happens in practice in
+        # heavily loaded test environments).  We should replace that
+        # method with something more robust.
+        chroot = self.zk_chroot_fixture.zookeeper_chroot
+        data = self.zk_client.client.command(b'wchp')
+        ret = {}
+        sessions = None
+        for line in data.split('\n'):
+            if line.startswith('\t'):
+                if sessions is not None:
+                    sessions.append(line.strip())
+            else:
+                line = line.strip()
+                if not line:
+                    continue
+                if line.startswith(chroot):
+                    line = line[len(chroot):]
+                    sessions = []
+                    ret[line] = sessions
+                else:
+                    sessions = None
+        return ret
+
+    def getZKTree(self, path, ret=None):
+        """Return the contents of a ZK tree as a dictionary"""
+        if ret is None:
+            ret = {}
+        for key in self.zk_client.client.get_children(path):
+            subpath = os.path.join(path, key)
+            ret[subpath] = self.zk_client.client.get(
+                os.path.join(path, key))[0]
+            self.getZKTree(subpath, ret)
+        return ret
+
+    def getZKPaths(self, path):
+        return list(self.getZKTree(path).keys())
+
+    def getZKObject(self, path):
+        compressed_data, zstat = self.zk_client.client.get(path)
+        try:
+            data = zlib.decompress(compressed_data)
+        except zlib.error:
+            # Fallback for old, uncompressed data
+            data = compressed_data
+        return data
+
+    def setupModelPin(self):
+        # Add a fake scheduler to the system that is on the old model
+        # version.
+        test_name = self.id().split('.')[-1]
+        test = getattr(self, test_name)
+        if hasattr(test, '__model_version__'):
+            version = getattr(test, '__model_version__')
+            self.model_test_component_info = SchedulerComponent(
+                self.zk_client, 'test_component')
+            self.model_test_component_info.register(version)
 
 
 class SymLink(object):
     def __init__(self, target):
         self.target = target
+
+
+class SchedulerTestApp:
+    def __init__(self, log, config, test_config,
+                 additional_event_queues,
+                 upstream_root, poller_events,
+                 git_url_with_auth, add_cleanup, validate_tenants,
+                 wait_for_init, disable_pipelines, instance_id):
+        self.log = log
+        self.config = config
+        self.test_config = test_config
+        self.validate_tenants = validate_tenants
+        self.wait_for_init = wait_for_init
+        self.disable_pipelines = disable_pipelines
+
+        # Register connections from the config using fakes
+        self.connections = TestConnectionRegistry(
+            self.config,
+            self.test_config,
+            additional_event_queues,
+            upstream_root,
+            poller_events,
+            git_url_with_auth,
+            add_cleanup,
+        )
+        self.connections.configure(self.config, database=True,
+                                   sources=True, triggers=True,
+                                   reporters=True, providers=True)
+
+        self.sched = TestScheduler(self.config, self.connections, self,
+                                   wait_for_init, disable_pipelines)
+        self.sched.log = logging.getLogger(f"zuul.Scheduler-{instance_id}")
+        self.sched._stats_interval = 1
+
+        if validate_tenants is None:
+            self.connections.registerScheduler(self.sched)
+            self.connections.load(self.sched.zk_client,
+                                  self.sched.component_registry)
+
+        # TODO (swestphahl): Can be removed when we no longer use global
+        # management events.
+        self.event_queues = [
+            self.sched.reconfigure_event_queue,
+        ]
+
+    def start(self, validate_tenants=None):
+        if validate_tenants is None:
+            self.sched.start()
+            self.sched.prime(self.config)
+        else:
+            self.sched.validateTenants(self.config, validate_tenants)
+
+    def fullReconfigure(self, command_socket=False):
+        try:
+            if command_socket:
+                command_socket = self.sched.config.get(
+                    'scheduler', 'command_socket')
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                    s.connect(command_socket)
+                    s.sendall('full-reconfigure\n'.encode('utf8'))
+            else:
+                self.sched.reconfigure(self.config)
+        except Exception:
+            self.log.exception("Reconfiguration failed:")
+
+    def smartReconfigure(self, command_socket=False):
+        try:
+            if command_socket:
+                command_socket = self.sched.config.get(
+                    'scheduler', 'command_socket')
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                    s.connect(command_socket)
+                    s.sendall('smart-reconfigure\n'.encode('utf8'))
+            else:
+                self.sched.reconfigure(self.config, smart=True)
+        except Exception:
+            self.log.exception("Reconfiguration failed:")
+
+    def tenantReconfigure(self, tenants, command_socket=False):
+        try:
+            if command_socket:
+                command_socket = self.sched.config.get(
+                    'scheduler', 'command_socket')
+                args = json.dumps(tenants)
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                    s.connect(command_socket)
+                    s.sendall(f'tenant-reconfigure {args}\n'.
+                              encode('utf8'))
+            else:
+                self.sched.reconfigure(
+                    self.config, smart=False, tenants=tenants)
+        except Exception:
+            self.log.exception("Reconfiguration failed:")
+
+
+class SchedulerTestManager:
+    def __init__(self, validate_tenants, wait_for_init, disable_pipelines):
+        self.instances = []
+
+    def create(self, log, config, test_config, additional_event_queues,
+               upstream_root, poller_events, git_url_with_auth,
+               add_cleanup, validate_tenants, wait_for_init,
+               disable_pipelines):
+        # Since the config contains a regex we cannot use copy.deepcopy()
+        # as this will raise an exception with Python <3.7
+        config_data = StringIO()
+        config.write(config_data)
+        config_data.seek(0)
+        scheduler_config = ConfigParser()
+        scheduler_config.read_file(config_data)
+
+        instance_id = len(self.instances)
+        # Ensure a unique command socket per scheduler instance
+        command_socket = os.path.join(
+            os.path.dirname(config.get("scheduler", "command_socket")),
+            f"scheduler-{instance_id}.socket"
+        )
+        scheduler_config.set("scheduler", "command_socket", command_socket)
+
+        app = SchedulerTestApp(log, scheduler_config, test_config,
+                               additional_event_queues, upstream_root,
+                               poller_events, git_url_with_auth,
+                               add_cleanup, validate_tenants,
+                               wait_for_init, disable_pipelines,
+                               instance_id)
+        self.instances.append(app)
+        return app
+
+    def __len__(self):
+        return len(self.instances)
+
+    def __getitem__(self, item):
+        return self.instances[item]
+
+    def __setitem__(self, key, value):
+        raise Exception("Not implemented, use create method!")
+
+    def __delitem__(self, key):
+        del self.instances[key]
+
+    def __iter__(self):
+        return iter(self.instances)
+
+    @property
+    def first(self):
+        if len(self.instances) == 0:
+            raise Exception("No scheduler!")
+        return self.instances[0]
+
+    def filter(self, matcher=None):
+        thefcn = None
+        if type(matcher) is list:
+            def fcn(_, app):
+                return app in matcher
+            thefcn = fcn
+        elif type(matcher).__name__ == 'function':
+            thefcn = matcher
+        return [e[1] for e in enumerate(self.instances)
+                if thefcn is None or thefcn(e[0], e[1])]
+
+    def execute(self, function, matcher=None):
+        for instance in self.filter(matcher):
+            function(instance)
+
+
+class DriverTestConfig:
+    def __init__(self, test_config):
+        self.test_config = test_config
+
+    def __getattr__(self, name):
+        if name in self.test_config.driver_config:
+            return self.test_config.driver_config[name]
+        return {}
+
+
+class TestConfig:
+    def __init__(self, testobj):
+        test_name = testobj.id().split('.')[-1]
+        test = getattr(testobj, test_name)
+        default_okay_tracebacks = [
+            # We log git merge errors at debug level with tracebacks;
+            # these are typically safe to ignore
+            'ERROR: content conflict',
+            'mapLines',
+            # These errors occasionally show up on legitimate tests
+            # due to race conditions and timing.  They are recoverable
+            # errors.  It would be nice if they didn't happen, but
+            # until we understand them more, we can't fail on them.
+            'RolledBackError',
+            'manager.change_list.refresh',
+            'kazoo.exceptions.ConnectionClosedError',
+        ]
+        self.simple_layout = getattr(test, '__simple_layout__', None)
+        self.gerrit_config = getattr(test, '__gerrit_config__', {})
+        self.never_capture = getattr(test, '__never_capture__', None)
+        self.okay_tracebacks = getattr(test, '__okay_tracebacks__',
+                                       default_okay_tracebacks)
+        self.enable_nodepool = getattr(test, '__enable_nodepool__', False)
+        self.return_data = getattr(test, '__return_data__', [])
+        self.driver_config = getattr(test, '__driver_config__', {})
+        self.zuul_config = getattr(test, '__zuul_config__', {})
+        self.driver = DriverTestConfig(self)
+        self.changes = FakeChangeDB()
 
 
 class ZuulTestCase(BaseTestCase):
@@ -2145,6 +2313,8 @@ class ZuulTestCase(BaseTestCase):
         infrastructure should insert dummy keys to save time during
         startup.  Defaults to False.
 
+    :cvar int log_console_port: The zuul_stream/zuul_console port.
+
     The following are instance variables that are useful within test
     methods:
 
@@ -2153,11 +2323,6 @@ class ZuulTestCase(BaseTestCase):
         instantiated for each connection present in the config file
         and stored here.  For instance, `fake_gerrit` will hold the
         FakeGerritConnection object for a connection named `gerrit`.
-
-    :ivar FakeGearmanServer gearman_server: An instance of
-        :py:class:`~tests.base.FakeGearmanServer` which is the Gearman
-        server that all of the Zuul components in this test use to
-        communicate with each other.
 
     :ivar RecordingExecutorServer executor_server: An instance of
         :py:class:`~tests.base.RecordingExecutorServer` which is the
@@ -2174,29 +2339,55 @@ class ZuulTestCase(BaseTestCase):
 
     """
 
-    config_file = 'zuul.conf'
-    run_ansible = False
-    create_project_keys = False
-    use_ssl = False
-    git_url_with_auth = False
+    config_file: str = 'zuul.conf'
+    run_ansible: bool = False
+    create_project_keys: bool = False
+    use_ssl: bool = False
+    git_url_with_auth: bool = False
+    log_console_port: int = 19885
+    validate_tenants = None
+    wait_for_init = None
+    disable_pipelines = False
+    scheduler_count = SCHEDULER_COUNT
+    init_repos = True
+    load_change_db = False
+
+    def __getattr__(self, name):
+        """Allows to access fake connections the old way, e.g., using
+        `fake_gerrit` for FakeGerritConnection.
+
+        This will access the connection of the first (default) scheduler
+        (`self.scheds.first`). To access connections of a different
+        scheduler use `self.scheds[{X}].connections.fake_{NAME}`.
+        """
+        if name.startswith('fake_') and\
+                hasattr(self.scheds.first.connections, name):
+            return getattr(self.scheds.first.connections, name)
+        raise AttributeError("'ZuulTestCase' object has no attribute '%s'"
+                             % name)
 
     def _startMerger(self):
-        self.merge_server = zuul.merger.server.MergeServer(self.config,
-                                                           self.connections)
+        self.merge_server = zuul.merger.server.MergeServer(
+            self.config, self.scheds.first.connections
+        )
         self.merge_server.start()
 
     def setUp(self):
         super(ZuulTestCase, self).setUp()
 
         self.setupZK()
+        self.fake_nodepool = FakeNodepool(self.zk_chroot_fixture)
 
-        if not KEEP_TEMPDIRS:
-            tmp_root = self.useFixture(fixtures.TempDir(
-                rootdir=os.environ.get("ZUUL_TEST_ROOT"))
-            ).path
+        if self.use_tmpdir:
+            if not KEEP_TEMPDIRS:
+                tmp_root = self.useFixture(fixtures.TempDir(
+                    rootdir=os.environ.get("ZUUL_TEST_ROOT")
+                )).path
+            else:
+                tmp_root = tempfile.mkdtemp(
+                    dir=os.environ.get("ZUUL_TEST_ROOT", None))
         else:
-            tmp_root = tempfile.mkdtemp(
-                dir=os.environ.get("ZUUL_TEST_ROOT", None))
+            tmp_root = os.environ.get("ZUUL_TEST_ROOT", '/tmp')
         self.test_root = os.path.join(tmp_root, "zuul-test")
         self.upstream_root = os.path.join(self.test_root, "upstream")
         self.merger_src_root = os.path.join(self.test_root, "merger-git")
@@ -2204,17 +2395,19 @@ class ZuulTestCase(BaseTestCase):
         self.state_root = os.path.join(self.test_root, "lib")
         self.merger_state_root = os.path.join(self.test_root, "merger-lib")
         self.executor_state_root = os.path.join(self.test_root, "executor-lib")
+        self.jobdir_root = os.path.join(self.test_root, "builds")
 
-        if os.path.exists(self.test_root):
+        if os.path.exists(self.test_root) and self.init_repos:
             shutil.rmtree(self.test_root)
-        os.makedirs(self.test_root)
-        os.makedirs(self.upstream_root)
-        os.makedirs(self.state_root)
-        os.makedirs(self.merger_state_root)
-        os.makedirs(self.executor_state_root)
+        os.makedirs(self.test_root, exist_ok=True)
+        os.makedirs(self.upstream_root, exist_ok=True)
+        os.makedirs(self.state_root, exist_ok=True)
+        os.makedirs(self.merger_state_root, exist_ok=True)
+        os.makedirs(self.executor_state_root, exist_ok=True)
+        os.makedirs(self.jobdir_root, exist_ok=True)
 
         # Make per test copy of Configuration.
-        self.setup_config()
+        self.config = self.setup_config(self.config_file)
         self.private_key_file = os.path.join(self.test_root, 'test_id_rsa')
         if not os.path.exists(self.private_key_file):
             src_private_key_file = os.environ.get(
@@ -2235,6 +2428,8 @@ class ZuulTestCase(BaseTestCase):
         self.config.set(
             'scheduler', 'command_socket',
             os.path.join(self.test_root, 'scheduler.socket'))
+        if not self.config.has_option("keystore", "password"):
+            self.config.set("keystore", "password", 'keystorepassword')
         self.config.set('merger', 'git_dir', self.merger_src_root)
         self.config.set('executor', 'git_dir', self.executor_src_root)
         self.config.set('executor', 'private_key_file', self.private_key_file)
@@ -2245,151 +2440,141 @@ class ZuulTestCase(BaseTestCase):
         self.config.set(
             'merger', 'command_socket',
             os.path.join(self.test_root, 'merger.socket'))
+        self.config.set('web', 'listen_address', '::')
+        self.config.set('web', 'port', '0')
+        self.config.set(
+            'web', 'command_socket',
+            os.path.join(self.test_root, 'web.socket'))
+        self.config.set(
+            'launcher', 'command_socket',
+            os.path.join(self.test_root, 'launcher.socket'))
 
         self.statsd = FakeStatsd()
         if self.config.has_section('statsd'):
             self.config.set('statsd', 'port', str(self.statsd.port))
         self.statsd.start()
 
-        self.gearman_server = FakeGearmanServer(self.use_ssl)
-
-        self.config.set('gearman', 'port', str(self.gearman_server.port))
-        self.log.info("Gearman server on port %s" %
-                      (self.gearman_server.port,))
-        if self.use_ssl:
-            self.log.info('SSL enabled for gearman')
-            self.config.set(
-                'gearman', 'ssl_ca',
-                os.path.join(FIXTURE_DIR, 'gearman/root-ca.pem'))
-            self.config.set(
-                'gearman', 'ssl_cert',
-                os.path.join(FIXTURE_DIR, 'gearman/client.pem'))
-            self.config.set(
-                'gearman', 'ssl_key',
-                os.path.join(FIXTURE_DIR, 'gearman/client.key'))
-
-        self.rpcclient = zuul.rpcclient.RPCClient(
-            self.config.get('gearman', 'server'),
-            self.gearman_server.port,
-            get_default(self.config, 'gearman', 'ssl_key'),
-            get_default(self.config, 'gearman', 'ssl_cert'),
-            get_default(self.config, 'gearman', 'ssl_ca'))
+        self.config.set('zookeeper', 'hosts', self.zk_chroot_fixture.zk_hosts)
+        self.config.set('zookeeper', 'session_timeout',
+                        str(ZOOKEEPER_SESSION_TIMEOUT))
+        self.config.set('zookeeper', 'tls_cert',
+                        self.zk_chroot_fixture.zookeeper_cert)
+        self.config.set('zookeeper', 'tls_key',
+                        self.zk_chroot_fixture.zookeeper_key)
+        self.config.set('zookeeper', 'tls_ca',
+                        self.zk_chroot_fixture.zookeeper_ca)
 
         gerritsource.GerritSource.replication_timeout = 1.5
         gerritsource.GerritSource.replication_retry_interval = 0.5
-        gerritconnection.GerritEventConnector.delay = 0.0
+        gerritconnection.GerritEventProcessor.delay = 0.0
 
-        self.sched = zuul.scheduler.Scheduler(self.config)
-        self.sched._stats_interval = 1
+        if self.load_change_db:
+            self.loadChangeDB()
 
-        self.event_queues = [
-            self.sched.result_event_queue,
-            self.sched.trigger_event_queue,
-            self.sched.management_event_queue
-        ]
+        self.additional_event_queues = []
+        self.zk_client = ZooKeeperClient.fromConfig(self.config)
+        self.zk_client.connect()
 
-        self.configure_connections()
-        self.sched.registerConnections(self.connections)
+        self.setupModelPin()
 
+        self._context_lock = SessionAwareLock(
+            self.zk_client.client, f"/test/{uuid.uuid4().hex}")
+
+        self.connection_event_queues = DefaultKeyDict(
+            lambda cn: ConnectionEventQueue(self.zk_client, cn)
+        )
+        # requires zk client
+        self.setupAllProjectKeys(self.config)
+
+        self.poller_events = {}
+        self._configureSmtp()
+        self._configureMqtt()
+        self._configureElasticsearch()
+
+        executor_connections = TestConnectionRegistry(
+            self.config, self.test_config,
+            self.additional_event_queues,
+            self.upstream_root, self.poller_events,
+            self.git_url_with_auth, self.addCleanup)
+        executor_connections.configure(self.config, sources=True)
+        self.executor_api = TestingExecutorApi(self.zk_client)
+        self.merger_api = TestingMergerApi(self.zk_client)
         self.executor_server = RecordingExecutorServer(
-            self.config, self.connections,
-            jobdir_root=self.test_root,
+            self.config,
+            executor_connections,
+            jobdir_root=self.jobdir_root,
             _run_ansible=self.run_ansible,
             _test_root=self.test_root,
-            keep_jobdir=KEEP_TEMPDIRS)
+            keep_jobdir=KEEP_TEMPDIRS,
+            log_console_port=self.log_console_port)
+        for return_data in self.test_config.return_data:
+            self.executor_server.returnData(
+                return_data['job'],
+                return_data['ref'],
+                return_data['data'],
+            )
         self.executor_server.start()
         self.history = self.executor_server.build_history
         self.builds = self.executor_server.running_builds
 
-        self.executor_client = zuul.executor.client.ExecutorClient(
-            self.config, self.sched)
-        self.merge_client = zuul.merger.client.MergeClient(
-            self.config, self.sched)
+        self.launcher = self.createLauncher()
+
+        self.scheds = SchedulerTestManager(self.validate_tenants,
+                                           self.wait_for_init,
+                                           self.disable_pipelines)
+        for _ in range(self.scheduler_count):
+            self.createScheduler()
+
         self.merge_server = None
-        self.nodepool = zuul.nodepool.Nodepool(self.sched)
-        self.zk = zuul.zk.ZooKeeper()
-        self.zk.connect(self.zk_config)
 
-        self.fake_nodepool = FakeNodepool(
-            self.zk_chroot_fixture.zookeeper_host,
-            self.zk_chroot_fixture.zookeeper_port,
-            self.zk_chroot_fixture.zookeeper_chroot)
-
-        self.sched.setExecutor(self.executor_client)
-        self.sched.setMerger(self.merge_client)
-        self.sched.setNodepool(self.nodepool)
-        self.sched.setZooKeeper(self.zk)
-
-        self.sched.start()
-        self.executor_client.gearman.waitForServer()
         # Cleanups are run in reverse order
         self.addCleanup(self.assertCleanShutdown)
         self.addCleanup(self.shutdown)
         self.addCleanup(self.assertFinalState)
 
-        self.sched.reconfigure(self.config)
-        self.sched.resume()
+        self.scheds.execute(
+            lambda app: app.start(self.validate_tenants))
 
-    def configure_connections(self, source_only=False):
-        # Set up gerrit related fakes
-        # Set a changes database so multiple FakeGerrit's can report back to
-        # a virtual canonical database given by the configured hostname
-        self.gerrit_changes_dbs = {}
-        self.github_changes_dbs = {}
+    def createScheduler(self):
+        return self.scheds.create(
+            self.log, self.config, self.test_config,
+            self.additional_event_queues, self.upstream_root,
+            self.poller_events, self.git_url_with_auth,
+            self.addCleanup, self.validate_tenants, self.wait_for_init,
+            self.disable_pipelines)
 
-        def getGerritConnection(driver, name, config):
-            db = self.gerrit_changes_dbs.setdefault(config['server'], {})
-            con = FakeGerritConnection(driver, name, config,
-                                       changes_db=db,
-                                       upstream_root=self.upstream_root)
-            self.event_queues.append(con.event_queue)
-            setattr(self, 'fake_' + name, con)
-            return con
+    def createLauncher(self):
+        launcher_connections = TestConnectionRegistry(
+            self.config, self.test_config,
+            self.additional_event_queues,
+            self.upstream_root, self.poller_events,
+            self.git_url_with_auth, self.addCleanup)
+        launcher_connections.configure(self.config, providers=True)
+        launcher = TestLauncher(
+            self.config,
+            launcher_connections)
+        launcher._start_cleanup = False
+        launcher._stats_interval = 1
+        launcher.start()
+        return launcher
 
-        self.useFixture(fixtures.MonkeyPatch(
-            'zuul.driver.gerrit.GerritDriver.getConnection',
-            getGerritConnection))
+    def createZKContext(self, lock=None):
+        if lock is None:
+            # Just make sure the lock is acquired
+            self._context_lock.acquire(blocking=False)
+            lock = self._context_lock
+        return zkobject.ZKContext(self.zk_client, lock,
+                                  None, self.log)
 
-        def registerGithubProjects(con):
-            path = self.config.get('scheduler', 'tenant_config')
-            with open(os.path.join(FIXTURE_DIR, path)) as f:
-                tenant_config = yaml.safe_load(f.read())
-            for tenant in tenant_config:
-                sources = tenant['tenant']['source']
-                conf = sources.get(con.source.name)
-                if not conf:
-                    return
+    def __event_queues(self, matcher) -> List[Queue]:
+        # TODO (swestphahl): Can be removed when we no longer use global
+        # management events.
+        sched_queues = map(lambda app: app.event_queues,
+                           self.scheds.filter(matcher))
+        return [item for sublist in sched_queues for item in sublist] + \
+            self.additional_event_queues
 
-                projects = conf.get('config-projects', [])
-                projects.extend(conf.get('untrusted-projects', []))
-
-                client = con.getGithubClient(None)
-                for project in projects:
-                    if isinstance(project, dict):
-                        # This can be a dict with the project as the only key
-                        client.addProjectByName(
-                            list(project.keys())[0])
-                    else:
-                        client.addProjectByName(project)
-
-        def getGithubConnection(driver, name, config):
-            server = config.get('server', 'github.com')
-            db = self.github_changes_dbs.setdefault(server, {})
-            con = FakeGithubConnection(
-                driver, name, config,
-                self.rpcclient,
-                changes_db=db,
-                upstream_root=self.upstream_root,
-                git_url_with_auth=self.git_url_with_auth)
-            self.event_queues.append(con.event_queue)
-            setattr(self, 'fake_' + name, con)
-            registerGithubProjects(con)
-            return con
-
-        self.useFixture(fixtures.MonkeyPatch(
-            'zuul.driver.github.GithubDriver.getConnection',
-            getGithubConnection))
-
+    def _configureSmtp(self):
         # Set up smtp related fakes
         # TODO(jhesketh): This should come from lib.connections for better
         # coverage
@@ -2402,10 +2587,11 @@ class ZuulTestCase(BaseTestCase):
 
         self.useFixture(fixtures.MonkeyPatch('smtplib.SMTP', FakeSMTPFactory))
 
+    def _configureMqtt(self):
         # Set up mqtt related fakes
         self.mqtt_messages = []
 
-        def fakeMQTTPublish(_, topic, msg, qos):
+        def fakeMQTTPublish(_, topic, msg, qos, zuul_event_id):
             log = logging.getLogger('zuul.FakeMQTTPubish')
             log.info('Publishing message via mqtt')
             self.mqtt_messages.append({'topic': topic, 'msg': msg, 'qos': qos})
@@ -2413,77 +2599,149 @@ class ZuulTestCase(BaseTestCase):
             'zuul.driver.mqtt.mqttconnection.MQTTConnection.publish',
             fakeMQTTPublish))
 
-        # Register connections from the config using fakes
-        self.connections = zuul.lib.connections.ConnectionRegistry()
-        self.connections.configure(self.config, source_only=source_only)
+    def _configureElasticsearch(self):
+        # Set up Elasticsearch related fakes
+        def getElasticsearchConnection(driver, name, config):
+            con = FakeElasticsearchConnection(
+                driver, name, config)
+            return con
 
-    def setup_config(self):
+        self.useFixture(fixtures.MonkeyPatch(
+            'zuul.driver.elasticsearch.ElasticsearchDriver.getConnection',
+            getElasticsearchConnection))
+
+    def setup_config(self, config_file: str):
         # This creates the per-test configuration object.  It can be
         # overridden by subclasses, but should not need to be since it
         # obeys the config_file and tenant_config_file attributes.
-        self.config = configparser.ConfigParser()
-        self.config.read(os.path.join(FIXTURE_DIR, self.config_file))
+        config = configparser.ConfigParser()
+        config.read(os.path.join(FIXTURE_DIR, config_file))
 
-        sections = ['zuul', 'scheduler', 'executor', 'merger']
+        sections = [
+            'zuul', 'scheduler', 'executor', 'merger', 'web', 'launcher',
+            'zookeeper', 'keystore', 'database',
+        ]
         for section in sections:
-            if not self.config.has_section(section):
-                self.config.add_section(section)
+            if not config.has_section(section):
+                config.add_section(section)
 
-        if not self.setupSimpleLayout():
+        def _setup_fixture(config, section_name):
+            if (config.get(section_name, 'dburi') ==
+                    '$MYSQL_FIXTURE_DBURI$'):
+                f = MySQLSchemaFixture(self.id(), self.random_databases,
+                                       self.delete_databases)
+                self.useFixture(f)
+                config.set(section_name, 'dburi', f.dburi)
+            elif (config.get(section_name, 'dburi') ==
+                  '$POSTGRESQL_FIXTURE_DBURI$'):
+                f = PostgresqlSchemaFixture(self.id(), self.random_databases,
+                                            self.delete_databases)
+                self.useFixture(f)
+                config.set(section_name, 'dburi', f.dburi)
+
+        for section_name in config.sections():
+            con_match = re.match(r'^connection ([\'\"]?)(.*)(\1)$',
+                                 section_name, re.I)
+            if not con_match:
+                continue
+
+            if config.get(section_name, 'driver') == 'sql':
+                _setup_fixture(config, section_name)
+
+        if 'database' in config.sections():
+            _setup_fixture(config, 'database')
+
+        if 'tracing' in config.sections():
+            self.otlp = OTLPFixture()
+            self.useFixture(self.otlp)
+            self.useFixture(fixtures.MonkeyPatch(
+                'zuul.lib.tracing.Tracing.processor_class',
+                opentelemetry.sdk.trace.export.SimpleSpanProcessor))
+            config.set('tracing', 'endpoint',
+                       f'http://localhost:{self.otlp.port}')
+
+        if not self.setupSimpleLayout(config):
             tenant_config = None
             for cfg_attr in ('tenant_config', 'tenant_config_script'):
                 if hasattr(self, cfg_attr + '_file'):
                     if getattr(self, cfg_attr + '_file'):
                         value = getattr(self, cfg_attr + '_file')
-                        self.config.set('scheduler', cfg_attr, value)
+                        config.set('scheduler', cfg_attr, value)
                         tenant_config = value
                     else:
-                        self.config.remove_option('scheduler', cfg_attr)
+                        config.remove_option('scheduler', cfg_attr)
 
             if tenant_config:
-                git_path = os.path.join(
-                    os.path.dirname(
-                        os.path.join(FIXTURE_DIR, tenant_config)),
-                    'git')
-                if os.path.exists(git_path):
-                    for reponame in os.listdir(git_path):
-                        project = reponame.replace('_', '/')
-                        self.copyDirToRepo(project,
-                                           os.path.join(git_path, reponame))
+                if self.init_repos:
+                    git_path = os.path.join(
+                        os.path.dirname(
+                            os.path.join(FIXTURE_DIR, tenant_config)),
+                        'git')
+                    if os.path.exists(git_path):
+                        for reponame in os.listdir(git_path):
+                            project = reponame.replace('_', '/')
+                            self.copyDirToRepo(
+                                project,
+                                os.path.join(git_path, reponame))
         # Make test_root persist after ansible run for .flag test
-        self.config.set('executor', 'trusted_rw_paths', self.test_root)
-        self.setupAllProjectKeys()
+        config.set('executor', 'trusted_rw_paths', self.test_root)
+        for section, section_dict in self.test_config.zuul_config.items():
+            for k, v in section_dict.items():
+                config.set(section, k, v)
+        return config
 
-    def setupSimpleLayout(self):
+    def setupSimpleLayout(self, config):
         # If the test method has been decorated with a simple_layout,
         # use that instead of the class tenant_config_file.  Set up a
         # single config-project with the specified layout, and
         # initialize repos for all of the 'project' entries which
         # appear in the layout.
-        test_name = self.id().split('.')[-1]
-        test = getattr(self, test_name)
-        if hasattr(test, '__simple_layout__'):
-            path, driver = getattr(test, '__simple_layout__')
-        else:
+        if not self.test_config.simple_layout:
             return False
+        path, driver, replace = self.test_config.simple_layout
 
         files = {}
         path = os.path.join(FIXTURE_DIR, path)
         with open(path) as f:
             data = f.read()
+            if replace:
+                kw = replace(self)
+                data = data.format(**kw)
             layout = yaml.safe_load(data)
             files['zuul.yaml'] = data
+        config_projects = []
+        types = list(zuul.configloader.ZuulSafeLoader.zuul_node_types)
+        types.remove('pragma')
+        if self.test_config.enable_nodepool:
+            config_projects.append({
+                'org/common-config': {
+                    'include': types,
+                }
+            })
+        else:
+            config_projects.append('org/common-config')
+
         untrusted_projects = []
         for item in layout:
             if 'project' in item:
                 name = item['project']['name']
                 if name.startswith('^'):
                     continue
-                untrusted_projects.append(name)
-                self.init_repo(name)
-                self.addCommitToRepo(name, 'initial commit',
-                                     files={'README': ''},
-                                     branch='master', tag='init')
+                if name == 'org/common-config':
+                    continue
+                if self.test_config.enable_nodepool:
+                    untrusted_projects.append({
+                        name: {
+                            'include': types,
+                        }
+                    })
+                else:
+                    untrusted_projects.append(name)
+                if self.init_repos:
+                    self.init_repo(name)
+                    self.addCommitToRepo(name, 'initial commit',
+                                         files={'README': ''},
+                                         branch='master', tag='init')
             if 'job' in item:
                 if 'run' in item['job']:
                     files['%s' % item['job']['run']] = ''
@@ -2498,30 +2756,36 @@ class ZuulTestCase(BaseTestCase):
         if not os.path.exists(root):
             os.makedirs(root)
         f = tempfile.NamedTemporaryFile(dir=root, delete=False)
-        config = [{'tenant':
-                   {'name': 'tenant-one',
-                    'source': {driver:
-                               {'config-projects': ['org/common-config'],
-                                'untrusted-projects': untrusted_projects}}}}]
-        f.write(yaml.dump(config).encode('utf8'))
+        temp_config = [{
+            'tenant': {
+                'name': 'tenant-one',
+                'source': {
+                    driver: {
+                        'config-projects': config_projects,
+                        'untrusted-projects': untrusted_projects}}}}]
+        f.write(yaml.dump(temp_config).encode('utf8'))
         f.close()
-        self.config.set('scheduler', 'tenant_config',
-                        os.path.join(FIXTURE_DIR, f.name))
+        config.set('scheduler', 'tenant_config',
+                   os.path.join(FIXTURE_DIR, f.name))
 
-        self.init_repo('org/common-config')
-        self.addCommitToRepo('org/common-config', 'add content from fixture',
-                             files, branch='master', tag='init')
+        if self.init_repos:
+            self.init_repo('org/common-config')
+            self.addCommitToRepo('org/common-config',
+                                 'add content from fixture',
+                                 files, branch='master', tag='init')
 
         return True
 
-    def setupAllProjectKeys(self):
+    def setupAllProjectKeys(self, config: ConfigParser):
         if self.create_project_keys:
             return
 
-        path = self.config.get('scheduler', 'tenant_config')
+        path = config.get('scheduler', 'tenant_config')
         with open(os.path.join(FIXTURE_DIR, path)) as f:
             tenant_config = yaml.safe_load(f.read())
         for tenant in tenant_config:
+            if 'tenant' not in tenant.keys():
+                continue
             sources = tenant['tenant']['source']
             for source, conf in sources.items():
                 for project in conf.get('config-projects', []):
@@ -2532,29 +2796,25 @@ class ZuulTestCase(BaseTestCase):
     def setupProjectKeys(self, source, project):
         # Make sure we set up an RSA key for the project so that we
         # don't spend time generating one:
-
         if isinstance(project, dict):
             project = list(project.keys())[0]
-        key_root = os.path.join(self.state_root, 'keys')
-        if not os.path.isdir(key_root):
-            os.mkdir(key_root, 0o700)
-        private_key_file = os.path.join(key_root, source, project + '.pem')
-        private_key_dir = os.path.dirname(private_key_file)
-        self.log.debug("Installing test keys for project %s at %s" % (
-            project, private_key_file))
-        if not os.path.isdir(private_key_dir):
-            os.makedirs(private_key_dir)
-        with open(os.path.join(FIXTURE_DIR, 'private.pem')) as i:
-            with open(private_key_file, 'w') as o:
-                o.write(i.read())
 
-    def setupZK(self):
-        self.zk_chroot_fixture = self.useFixture(
-            ChrootedKazooFixture(self.id()))
-        self.zk_config = '%s:%s%s' % (
-            self.zk_chroot_fixture.zookeeper_host,
-            self.zk_chroot_fixture.zookeeper_port,
-            self.zk_chroot_fixture.zookeeper_chroot)
+        password = self.config.get("keystore", "password")
+        keystore = zuul.lib.keystorage.KeyStorage(
+            self.zk_client, password=password)
+        import_keys = {}
+        import_data = {'keys': import_keys}
+
+        path = keystore.getProjectSecretsKeysPath(source, project)
+        with open(os.path.join(FIXTURE_DIR, 'secrets.json'), 'rb') as i:
+            import_keys[path] = json.load(i)
+
+        # ssh key
+        path = keystore.getSSHKeysPath(source, project)
+        with open(os.path.join(FIXTURE_DIR, 'ssh.json'), 'rb') as i:
+            import_keys[path] = json.load(i)
+
+        keystore.importKeys(import_data, False)
 
     def copyDirToRepo(self, project, source_path):
         self.init_repo(project)
@@ -2570,7 +2830,7 @@ class ZuulTestCase(BaseTestCase):
                     content = f.read()
                     # dynamically create symlinks if the content is of the form
                     # symlink: <target>
-                    match = re.match(b'symlink: ([^\s]+)', content)
+                    match = re.match(rb'symlink: ([^\s]+)', content)
                     if match:
                         content = SymLink(match.group(1))
 
@@ -2581,10 +2841,26 @@ class ZuulTestCase(BaseTestCase):
     def assertNodepoolState(self):
         # Make sure that there are no pending requests
 
-        requests = self.fake_nodepool.getNodeRequests()
+        requests = None
+        for x in iterate_timeout(30, "zk getNodeRequests"):
+            try:
+                requests = self.fake_nodepool.getNodeRequests()
+                break
+            except kazoo.exceptions.ConnectionLoss:
+                # NOTE(pabelanger): We lost access to zookeeper, iterate again
+                pass
         self.assertEqual(len(requests), 0)
 
-        nodes = self.fake_nodepool.getNodes()
+        nodes = None
+
+        for x in iterate_timeout(30, "zk getNodeRequests"):
+            try:
+                nodes = self.fake_nodepool.getNodes()
+                break
+            except kazoo.exceptions.ConnectionLoss:
+                # NOTE(pabelanger): We lost access to zookeeper, iterate again
+                pass
+
         for node in nodes:
             self.assertFalse(node['_lock'], "Node %s is locked" %
                              (node['_oid'],))
@@ -2596,14 +2872,45 @@ class ZuulTestCase(BaseTestCase):
         if self.create_project_keys:
             return
 
-        with open(os.path.join(FIXTURE_DIR, 'private.pem')) as i:
-            test_key = i.read()
+        test_keys = []
+        key_fns = ['private.pem', 'ssh.pem']
+        for fn in key_fns:
+            with open(os.path.join(FIXTURE_DIR, fn)) as i:
+                test_keys.append(i.read())
 
         key_root = os.path.join(self.state_root, 'keys')
         for root, dirname, files in os.walk(key_root):
             for fn in files:
+                if fn == '.version':
+                    continue
                 with open(os.path.join(root, fn)) as f:
-                    self.assertEqual(test_key, f.read())
+                    self.assertTrue(f.read() in test_keys)
+
+    def assertSQLState(self):
+        reporter = self.scheds.first.connections.getSqlReporter(None)
+        with self.scheds.first.connections.getSqlConnection().\
+             engine.connect() as conn:
+
+            try:
+                result = conn.execute(
+                    sqlalchemy.sql.select(
+                        reporter.connection.zuul_buildset_table)
+                )
+            except sqlalchemy.exc.ProgrammingError:
+                # Table doesn't exist
+                return
+
+            for buildset in result.fetchall():
+                self.assertIsNotNone(buildset.result)
+
+            result = conn.execute(
+                sqlalchemy.sql.select(reporter.connection.zuul_build_table)
+            )
+
+            for build in result.fetchall():
+                self.assertIsNotNone(build.result)
+                self.assertIsNotNone(build.start_time)
+                self.assertIsNotNone(build.end_time)
 
     def assertFinalState(self):
         self.log.debug("Assert final state")
@@ -2611,55 +2918,90 @@ class ZuulTestCase(BaseTestCase):
         self.assertEqual({}, self.executor_server.job_workers)
         # Make sure that git.Repo objects have been garbage collected.
         gc.disable()
-        gc.collect()
-        for obj in gc.get_objects():
-            if isinstance(obj, git.Repo):
-                self.log.debug("Leaked git repo object: 0x%x %s" %
-                               (id(obj), repr(obj)))
-        gc.enable()
+        try:
+            gc.collect()
+            for obj in gc.get_objects():
+                if isinstance(obj, git.Repo):
+                    self.log.debug("Leaked git repo object: 0x%x %s" %
+                                   (id(obj), repr(obj)))
+        finally:
+            gc.enable()
+        if len(self.scheds) > 1:
+            self.refreshPipelines(self.scheds.first.sched)
         self.assertEmptyQueues()
         self.assertNodepoolState()
         self.assertNoGeneratedKeys()
+        self.assertSQLState()
+        self.assertCleanZooKeeper()
         ipm = zuul.manager.independent.IndependentPipelineManager
-        for tenant in self.sched.abide.tenants.values():
-            for pipeline in tenant.layout.pipelines.values():
-                if isinstance(pipeline.manager, ipm):
-                    self.assertEqual(len(pipeline.queues), 0)
+        for tenant in self.scheds.first.sched.abide.tenants.values():
+            for manager in tenant.layout.pipeline_managers.values():
+                if isinstance(manager, ipm):
+                    self.assertEqual(len(manager.state.queues), 0)
+
+    def getAllItems(self, tenant_name, pipeline_name):
+        tenant = self.scheds.first.sched.abide.tenants.get(tenant_name)
+        manager = tenant.layout.pipeline_managers[pipeline_name]
+        items = manager.state.getAllItems()
+        return items
+
+    def getAllQueues(self, tenant_name, pipeline_name):
+        tenant = self.scheds.first.sched.abide.tenants.get(tenant_name)
+        manager = tenant.layout.pipeline_managers[pipeline_name]
+        return manager.state.queues
 
     def shutdown(self):
+        # Note: when making changes to this sequence, check if
+        # corresponding changes need to happen in
+        # tests/upgrade/test_upgrade_old.py
         self.log.debug("Shutting down after tests")
         self.executor_server.hold_jobs_in_build = False
         self.executor_server.release()
-        self.executor_client.stop()
-        self.merge_client.stop()
+        self.scheds.execute(lambda app: app.sched.executor.stop())
         if self.merge_server:
             self.merge_server.stop()
+            self.merge_server.join()
+
         self.executor_server.stop()
-        self.sched.stop()
-        self.sched.join()
+        self.executor_server.join()
+        self.launcher.stop()
+        self.launcher.join()
+        if self.validate_tenants is None:
+            self.scheds.execute(lambda app: app.sched.stop())
+            self.scheds.execute(lambda app: app.sched.join())
+        else:
+            self.scheds.execute(lambda app: app.sched.stopConnections())
         self.statsd.stop()
         self.statsd.join()
-        self.rpcclient.shutdown()
-        self.gearman_server.shutdown()
         self.fake_nodepool.stop()
-        self.zk.disconnect()
+        self.zk_client.disconnect()
         self.printHistory()
         # We whitelist watchdog threads as they have relatively long delays
         # before noticing they should exit, but they should exit on their own.
-        # Further the pydevd threads also need to be whitelisted so debugging
-        # e.g. in PyCharm is possible without breaking shutdown.
         whitelist = ['watchdog',
-                     'pydevd.CommandThread',
-                     'pydevd.Reader',
-                     'pydevd.Writer',
                      'socketserver_Thread',
+                     'cleanup start',
                      ]
+        # Ignore threads that start with
+        # * Thread- : Kazoo TreeCache
+        # * Dummy-  : Seen during debugging in VS Code
+        # * pydevd  : Debug helper threads of pydevd (used by many IDEs)
+        # * ptvsd   : Debug helper threads used by VS Code
         threads = [t for t in threading.enumerate()
-                   if t.name not in whitelist]
+                   if t.name not in whitelist
+                   and not t.name.startswith("Thread-")
+                   and not t.name.startswith('Dummy-')
+                   and not t.name.startswith('pydevd.')
+                   and not t.name.startswith('ptvsd.')
+                   and not t.name.startswith('OTLPFixture_')
+                   ]
         if len(threads) > 1:
+            thread_map = dict(map(lambda x: (x.ident, x.name),
+                                  threading.enumerate()))
             log_str = ""
             for thread_id, stack_frame in sys._current_frames().items():
-                log_str += "Thread: %s\n" % thread_id
+                log_str += "Thread id: %s, name: %s\n" % (
+                    thread_id, thread_map.get(thread_id, 'UNKNOWN'))
                 log_str += "".join(traceback.format_stack(stack_frame))
             self.log.debug(log_str)
             raise Exception("More than one thread is running: %s" % threads)
@@ -2685,13 +3027,13 @@ class ZuulTestCase(BaseTestCase):
             repo.create_tag(tag)
 
         repo.head.reference = master
-        zuul.merger.merger.reset_repo_to_head(repo)
+        repo.head.reset(working_tree=True)
         repo.git.clean('-x', '-f', '-d')
 
-    def create_branch(self, project, branch):
+    def create_branch(self, project, branch, commit_filename='README'):
         path = os.path.join(self.upstream_root, project)
         repo = git.Repo(path)
-        fn = os.path.join(path, 'README')
+        fn = os.path.join(path, commit_filename)
 
         branch_head = repo.create_head(branch)
         repo.head.reference = branch_head
@@ -2702,25 +3044,37 @@ class ZuulTestCase(BaseTestCase):
         repo.index.commit('%s commit' % branch)
 
         repo.head.reference = repo.heads['master']
-        zuul.merger.merger.reset_repo_to_head(repo)
+        repo.head.reset(working_tree=True)
         repo.git.clean('-x', '-f', '-d')
 
     def delete_branch(self, project, branch):
         path = os.path.join(self.upstream_root, project)
         repo = git.Repo(path)
         repo.head.reference = repo.heads['master']
-        zuul.merger.merger.reset_repo_to_head(repo)
+        repo.head.reset(working_tree=True)
         repo.delete_head(repo.heads[branch], force=True)
 
-    def create_commit(self, project):
+    def create_commit(self, project, files=None, delete_files=None,
+                      head='master', message='Creating a fake commit',
+                      **kwargs):
         path = os.path.join(self.upstream_root, project)
         repo = git.Repo(path)
-        repo.head.reference = repo.heads['master']
-        file_name = os.path.join(path, 'README')
-        with open(file_name, 'a') as f:
-            f.write('creating fake commit\n')
-        repo.index.add([file_name])
-        commit = repo.index.commit('Creating a fake commit')
+        repo.head.reference = repo.heads[head]
+        repo.head.reset(index=True, working_tree=True)
+
+        files = files or {"README": "creating fake commit\n"}
+        for name, content in files.items():
+            file_name = os.path.join(path, name)
+            with open(file_name, 'a') as f:
+                f.write(content)
+            repo.index.add([file_name])
+
+        delete_files = delete_files or []
+        for name in delete_files:
+            file_name = os.path.join(path, name)
+            repo.index.remove([file_name])
+
+        commit = repo.index.commit(message, **kwargs)
         return commit.hexsha
 
     def orderedRelease(self, count=None):
@@ -2738,172 +3092,411 @@ class ZuulTestCase(BaseTestCase):
 
         return sorted(self.builds, key=lambda x: x.name)
 
+    def getCurrentBuilds(self):
+        for tenant in self.scheds.first.sched.abide.tenants.values():
+            for manager in tenant.layout.pipeline_managers.values():
+                for item in manager.state.getAllItems():
+                    for build in item.current_build_set.builds.values():
+                        yield build
+
     def release(self, job):
-        if isinstance(job, FakeBuild):
-            job.release()
-        else:
-            job.waiting = False
-            self.log.debug("Queued job %s released" % job.unique)
-            self.gearman_server.wakeConnections()
+        job.release()
 
-    def getParameter(self, job, name):
-        if isinstance(job, FakeBuild):
-            return job.parameters[name]
-        else:
-            parameters = json.loads(job.arguments)
-            return parameters[name]
+    @property
+    def sched_zk_nodepool(self):
+        return self.scheds.first.sched.nodepool.zk_nodepool
 
-    def haveAllBuildsReported(self):
-        # See if Zuul is waiting on a meta job to complete
-        if self.executor_client.meta_jobs:
-            return False
-        # Find out if every build that the worker has completed has been
-        # reported back to Zuul.  If it hasn't then that means a Gearman
-        # event is still in transit and the system is not stable.
+    @property
+    def hold_jobs_in_queue(self):
+        return self.executor_api.hold_in_queue
+
+    @hold_jobs_in_queue.setter
+    def hold_jobs_in_queue(self, hold_in_queue):
+        """Helper method to set hold_in_queue on all involved Executor APIs"""
+
+        self.executor_api.hold_in_queue = hold_in_queue
+        for app in self.scheds:
+            app.sched.executor.executor_api.hold_in_queue = hold_in_queue
+
+    @property
+    def hold_merge_jobs_in_queue(self):
+        return self.merger_api.hold_in_queue
+
+    @hold_merge_jobs_in_queue.setter
+    def hold_merge_jobs_in_queue(self, hold_in_queue):
+        """Helper method to set hold_in_queue on all involved Merger APIs"""
+
+        self.merger_api.hold_in_queue = hold_in_queue
+        for app in self.scheds:
+            app.sched.merger.merger_api.hold_in_queue = hold_in_queue
+
+    @property
+    def hold_nodeset_requests_in_queue(self):
+        return self.scheds.first.sched.launcher.hold_in_queue
+
+    @hold_nodeset_requests_in_queue.setter
+    def hold_nodeset_requests_in_queue(self, hold_in_queue):
+        for app in self.scheds:
+            app.sched.launcher.hold_in_queue = hold_in_queue
+
+    def releaseNodesetRequests(self, *requests):
+        ctx = self.createZKContext(None)
+        for req in requests:
+            req.updateAttributes(ctx, state=req.State.REQUESTED)
+
+    @property
+    def merge_job_history(self):
+        history = defaultdict(list)
+        for app in self.scheds:
+            for job_type, jobs in app.sched.merger.merger_api.history.items():
+                history[job_type].extend(jobs)
+        return history
+
+    @merge_job_history.deleter
+    def merge_job_history(self):
+        for app in self.scheds:
+            app.sched.merger.merger_api.history.clear()
+
+    def waitUntilNodeCacheSync(self, zk_nodepool):
+        """Wait until the node cache on the zk_nodepool object is in sync"""
+        for _ in iterate_timeout(60, 'wait for node cache sync'):
+            cache_state = {}
+            zk_state = {}
+            for n in self.fake_nodepool.getNodes():
+                zk_state[n['_oid']] = n['state']
+            for nid in zk_nodepool.getNodes(cached=True):
+                n = zk_nodepool.getNode(nid)
+                cache_state[n.id] = n.state
+            if cache_state == zk_state:
+                return
+
+    def __haveAllBuildsReported(self):
+        # The build requests will be deleted from ZooKeeper once the
+        # scheduler processed their result event. Thus, as long as
+        # there are build requests left in ZooKeeper, the system is
+        # not stable.
         for build in self.history:
-            zbuild = self.executor_client.builds.get(build.uuid)
-            if not zbuild:
+            try:
+                self.zk_client.client.get(build.build_request_ref)
+            except NoNodeError:
                 # It has already been reported
                 continue
             # It hasn't been reported yet.
             return False
-        # Make sure that none of the worker connections are in GRAB_WAIT
-        worker = self.executor_server.executor_worker
-        for connection in worker.active_connections:
-            if connection.state == 'GRAB_WAIT':
-                return False
         return True
 
-    def areAllBuildsWaiting(self):
-        builds = self.executor_client.builds.values()
+    def __areAllBuildsWaiting(self):
+        # Look up the queued build requests directly from ZooKeeper
+        queued_build_requests = list(self.executor_api.all())
         seen_builds = set()
-        for build in builds:
-            seen_builds.add(build.uuid)
-            client_job = None
-            for conn in self.executor_client.gearman.active_connections:
-                for j in conn.related_jobs.values():
-                    if j.unique == build.uuid:
-                        client_job = j
-                        break
-            if not client_job:
-                self.log.debug("%s is not known to the gearman client" %
-                               build)
-                return False
-            if not client_job.handle:
-                self.log.debug("%s has no handle" % client_job)
-                return False
-            server_job = self.gearman_server.jobs.get(client_job.handle)
-            if not server_job:
-                self.log.debug("%s is not known to the gearman server" %
-                               client_job)
-                return False
-            if not hasattr(server_job, 'waiting'):
-                self.log.debug("%s is being enqueued" % server_job)
-                return False
-            if server_job.waiting:
+        # Always ignore builds which are on hold
+        for build_request in queued_build_requests:
+            seen_builds.add(build_request.uuid)
+            if build_request.state in (BuildRequest.HOLD):
                 continue
-            if build.url is None:
-                self.log.debug("%s has not reported start" % build)
-                return False
-            # using internal ServerJob which offers no Text interface
+            # Check if the build is currently processed by the
+            # RecordingExecutorServer.
             worker_build = self.executor_server.job_builds.get(
-                server_job.unique.decode('utf8'))
+                build_request.uuid)
             if worker_build:
+                if worker_build.paused:
+                    # Avoid a race between setting the resume flag and
+                    # the job actually resuming.  If the build is
+                    # paused, make sure that there is no resume flag
+                    # and if that's true, that the build is still
+                    # paused.  If there's no resume flag between two
+                    # checks of the paused attr, it should still be
+                    # paused.
+                    if not self.zk_client.client.exists(
+                            build_request.path + '/resume'):
+                        if worker_build.paused:
+                            continue
                 if worker_build.isWaiting():
                     continue
-                else:
-                    self.log.debug("%s is running" % worker_build)
-                    return False
-            else:
-                self.log.debug("%s is unassigned" % server_job)
+                self.log.debug("%s is running", worker_build)
                 return False
-        for (build_uuid, job_worker) in \
-            self.executor_server.job_workers.items():
+            else:
+                self.log.debug("%s is unassigned", build_request)
+                return False
+        # Wait until all running builds have finished on the executor
+        # and that all job workers are cleaned up. Otherwise there
+        # could be a short window in which the build is finished
+        # (and reported), but the job cleanup is not yet finished on
+        # the executor. During this time the test could settle, but
+        # assertFinalState() will fail because there are still
+        # job_workers present on the executor.
+        for build_uuid in self.executor_server.job_workers.keys():
             if build_uuid not in seen_builds:
-                self.log.debug("%s is not finalized" % build_uuid)
+                log = get_annotated_logger(
+                    self.log, event=None, build=build_uuid
+                )
+                log.debug("Build is not finalized")
                 return False
         return True
 
-    def areAllNodeRequestsComplete(self):
+    def __areAllNodeRequestsComplete(self, matcher=None):
         if self.fake_nodepool.paused:
             return True
-        if self.sched.nodepool.requests:
-            return False
+        # Check ZK and the scheduler cache and make sure they are
+        # in sync.
+        for app in self.scheds.filter(matcher):
+            sched = app.sched
+            nodepool = app.sched.nodepool
+            with nodepool.zk_nodepool._callback_lock:
+                for req in self.fake_nodepool.getNodeRequests():
+                    if req['state'] != model.STATE_FULFILLED:
+                        return False
+                    r2 = nodepool.zk_nodepool._node_request_cache.get(
+                        req['_oid'])
+                    if r2 and r2.state != req['state']:
+                        return False
+                    if req and not r2:
+                        return False
+                    tenant_name = r2.tenant_name
+                    pipeline_name = r2.pipeline_name
+                    if sched.pipeline_result_events[tenant_name][
+                            pipeline_name
+                    ].hasEvents():
+                        return False
         return True
 
-    def areAllMergeJobsWaiting(self):
-        for client_job in list(self.merge_client.jobs):
-            if not client_job.handle:
-                self.log.debug("%s has no handle" % client_job)
-                return False
-            server_job = self.gearman_server.jobs.get(client_job.handle)
-            if not server_job:
-                self.log.debug("%s is not known to the gearman server" %
-                               client_job)
-                return False
-            if not hasattr(server_job, 'waiting'):
-                self.log.debug("%s is being enqueued" % server_job)
-                return False
-            if server_job.waiting:
-                self.log.debug("%s is waiting" % server_job)
-                continue
-            self.log.debug("%s is not waiting" % server_job)
-            return False
+    def __areAllNodesetRequestsComplete(self, matcher=None):
+        # Check ZK and the scheduler cache and make sure they are
+        # in sync.
+        for app in self.scheds.filter(matcher):
+            sched = app.sched
+            for request in self.launcher.api.getNodesetRequests():
+                if request.state == request.State.TEST_HOLD:
+                    continue
+                if request.state not in model.NodesetRequest.FINAL_STATES:
+                    return False
+                if sched.pipeline_result_events[request.tenant_name][
+                    request.pipeline_name
+                ].hasEvents():
+                    return False
         return True
 
-    def eventQueuesEmpty(self):
-        for event_queue in self.event_queues:
-            yield event_queue.empty()
+    def __areAllMergeJobsWaiting(self):
+        # Look up the queued merge jobs directly from ZooKeeper
+        queued_merge_jobs = list(self.merger_api.all())
+        # Always ignore merge jobs which are on hold
+        for job in queued_merge_jobs:
+            if job.state != MergeRequest.HOLD:
+                return False
+        return True
 
-    def eventQueuesJoin(self):
-        for event_queue in self.event_queues:
+    def __eventQueuesEmpty(self, matcher=None) -> Generator[bool, None, None]:
+        for event_queue in self.__event_queues(matcher):
+            yield not event_queue.unfinished_tasks
+
+    def __eventQueuesJoin(self, matcher) -> None:
+        for app in self.scheds.filter(matcher):
+            for event_queue in app.event_queues:
+                event_queue.join()
+        for event_queue in self.additional_event_queues:
             event_queue.join()
 
-    def waitUntilSettled(self):
-        self.log.debug("Waiting until settled...")
+    def __areZooKeeperEventQueuesEmpty(self, matcher=None, debug=False):
+        for sched in map(lambda app: app.sched, self.scheds.filter(matcher)):
+            for connection_name in sched.connections.connections:
+                if self.connection_event_queues[connection_name].hasEvents():
+                    if debug:
+                        self.log.debug(
+                            f"Connection queue {connection_name} not empty")
+                    return False
+            for tenant in sched.abide.tenants.values():
+                if sched.management_events[tenant.name].hasEvents():
+                    if debug:
+                        self.log.debug(
+                            f"Tenant management queue {tenant.name} not empty")
+                    return False
+                if sched.trigger_events[tenant.name].hasEvents():
+                    if debug:
+                        self.log.debug(
+                            f"Tenant trigger queue {tenant.name} not empty")
+                    return False
+                for pipeline_name in tenant.layout.pipeline_managers:
+                    if sched.pipeline_management_events[tenant.name][
+                        pipeline_name
+                    ].hasEvents():
+                        if debug:
+                            self.log.debug(
+                                "Pipeline management queue "
+                                f"{tenant.name} {pipeline_name} not empty")
+                        return False
+                    if sched.pipeline_trigger_events[tenant.name][
+                        pipeline_name
+                    ].hasEvents():
+                        if debug:
+                            self.log.debug(
+                                "Pipeline trigger queue "
+                                f"{tenant.name} {pipeline_name} not empty")
+                        return False
+                    if sched.pipeline_result_events[tenant.name][
+                        pipeline_name
+                    ].hasEvents():
+                        if debug:
+                            self.log.debug(
+                                "Pipeline result queue "
+                                f"{tenant.name} {pipeline_name} not empty")
+                        return False
+        return True
+
+    def __areAllSchedulersPrimed(self, matcher=None):
+        for app in self.scheds.filter(matcher):
+            if app.sched.last_reconfigured is None:
+                return False
+        return True
+
+    def __areAllLaunchersSynced(self):
+        return (self.scheds.first.sched.local_layout_state ==
+                self.launcher.local_layout_state)
+
+    def __areAllImagesUploaded(self):
+        # TODO: this may need to check for failed image uploads
+        for upload in self.launcher.image_upload_registry.getItems():
+            if not upload.external_id:
+                return False
+        return True
+
+    def waitUntilSettled(self, msg="", matcher=None) -> None:
+        self.log.debug("Waiting until settled... (%s)", msg)
         start = time.time()
+        i = 0
         while True:
+            i = i + 1
             if time.time() - start > self.wait_timeout:
                 self.log.error("Timeout waiting for Zuul to settle")
-                self.log.error("Queue status:")
-                for event_queue in self.event_queues:
-                    self.log.error("  %s: %s" %
-                                   (event_queue, event_queue.empty()))
-                self.log.error("All builds waiting: %s" %
-                               (self.areAllBuildsWaiting(),))
-                self.log.error("All builds reported: %s" %
-                               (self.haveAllBuildsReported(),))
-                self.log.error("All requests completed: %s" %
-                               (self.areAllNodeRequestsComplete(),))
-                self.log.error("Merge client jobs: %s" %
-                               (self.merge_client.jobs,))
+                self.log.debug("All schedulers primed: %s",
+                               self.__areAllSchedulersPrimed(matcher))
+                self.log.debug("All launchers synced: %s",
+                               self.__areAllLaunchersSynced())
+                self._logQueueStatus(
+                    self.log.error, matcher,
+                    self.__areZooKeeperEventQueuesEmpty(debug=True),
+                    self.__areAllMergeJobsWaiting(),
+                    self.__haveAllBuildsReported(),
+                    self.__areAllBuildsWaiting(),
+                    self.__areAllNodeRequestsComplete(),
+                    self.__areAllNodesetRequestsComplete(),
+                    self.__areAllImagesUploaded(),
+                    all(self.__eventQueuesEmpty(matcher))
+                )
                 raise Exception("Timeout waiting for Zuul to settle")
-            # Make sure no new events show up while we're checking
 
+            # Make sure no new events show up while we're checking
             self.executor_server.lock.acquire()
+
             # have all build states propogated to zuul?
-            if self.haveAllBuildsReported():
+            if self.__haveAllBuildsReported():
                 # Join ensures that the queue is empty _and_ events have been
                 # processed
-                self.eventQueuesJoin()
-                self.sched.run_handler_lock.acquire()
-                if (self.areAllMergeJobsWaiting() and
-                    self.haveAllBuildsReported() and
-                    self.areAllBuildsWaiting() and
-                    self.areAllNodeRequestsComplete() and
-                    all(self.eventQueuesEmpty())):
-                    # The queue empty check is placed at the end to
-                    # ensure that if a component adds an event between
-                    # when locked the run handler and checked that the
-                    # components were stable, we don't erroneously
-                    # report that we are settled.
-                    self.sched.run_handler_lock.release()
-                    self.executor_server.lock.release()
-                    self.log.debug("...settled.")
-                    return
-                self.sched.run_handler_lock.release()
+                self.__eventQueuesJoin(matcher)
+                for sched in map(lambda app: app.sched,
+                                 self.scheds.filter(matcher)):
+                    sched.run_handler_lock.acquire()
+                with self.launcher._test_lock:
+                    if (self.__areAllSchedulersPrimed(matcher) and
+                        self.__areAllLaunchersSynced() and
+                        self.__areAllMergeJobsWaiting() and
+                        self.__haveAllBuildsReported() and
+                        self.__areAllBuildsWaiting() and
+                        self.__areAllNodeRequestsComplete() and
+                        self.__areAllNodesetRequestsComplete() and
+                        self.__areAllImagesUploaded() and
+                        self.__areZooKeeperEventQueuesEmpty() and
+                        all(self.__eventQueuesEmpty(matcher))):
+                        # The queue empty check is placed at the end to
+                        # ensure that if a component adds an event between
+                        # when locked the run handler and checked that the
+                        # components were stable, we don't erroneously
+                        # report that we are settled.
+                        for sched in map(lambda app: app.sched,
+                                         self.scheds.filter(matcher)):
+                            if len(self.scheds) > 1:
+                                self.refreshPipelines(sched)
+                            sched.run_handler_lock.release()
+                        self.executor_server.lock.release()
+                        self.log.debug("...settled after %.3f ms / "
+                                       "%s loops (%s)",
+                                       time.time() - start, i, msg)
+                        self.logState()
+                        return
+                for sched in map(lambda app: app.sched,
+                                 self.scheds.filter(matcher)):
+                    sched.run_handler_lock.release()
             self.executor_server.lock.release()
-            self.sched.wake_event.wait(0.1)
+            for sched in map(lambda app: app.sched,
+                             self.scheds.filter(matcher)):
+                sched.wake_event.wait(0.1)
+            # Let other threads work
+            time.sleep(0.1)
+
+    def refreshPipelines(self, sched):
+        ctx = None
+        for tenant in sched.abide.tenants.values():
+            with tenant_read_lock(self.zk_client, tenant.name):
+                for manager in tenant.layout.pipeline_managers.values():
+                    with (pipeline_lock(self.zk_client, tenant.name,
+                                        manager.pipeline.name) as lock,
+                          self.createZKContext(lock) as ctx):
+                        with manager.currentContext(ctx):
+                            manager.state.refresh(ctx)
+        # return the context in case the caller wants to examine iops
+        return ctx
+
+    def _logQueueStatus(self, logger, matcher, all_zk_queues_empty,
+                        all_merge_jobs_waiting, all_builds_reported,
+                        all_builds_waiting, all_node_requests_completed,
+                        all_nodeset_requests_completed,
+                        all_images_uploaded,
+                        all_event_queues_empty):
+        logger("Queue status:")
+        for event_queue in self.__event_queues(matcher):
+            is_empty = not event_queue.unfinished_tasks
+            self.log.debug("  %s: %s", event_queue, is_empty)
+        logger("All ZK event queues empty: %s", all_zk_queues_empty)
+        logger("All merge jobs waiting: %s", all_merge_jobs_waiting)
+        logger("All builds reported: %s", all_builds_reported)
+        logger("All builds waiting: %s", all_builds_waiting)
+        logger("All requests completed: %s", all_node_requests_completed)
+        logger("All nodeset requests completed: %s",
+               all_nodeset_requests_completed)
+        logger("All images uploaded: %s", all_images_uploaded)
+        logger("All event queues empty: %s", all_event_queues_empty)
+
+    def waitForPoll(self, poller, timeout=30):
+        self.log.debug("Wait for poll on %s", poller)
+        self.poller_events[poller].clear()
+        self.log.debug("Waiting for poll 1 on %s", poller)
+        self.poller_events[poller].wait(timeout)
+        self.poller_events[poller].clear()
+        self.log.debug("Waiting for poll 2 on %s", poller)
+        self.poller_events[poller].wait(timeout)
+        self.log.debug("Done waiting for poll on %s", poller)
+
+    def logState(self):
+        """ Log the current state of the system """
+        self.log.info("Begin state dump --------------------")
+        for build in self.history:
+            self.log.info("Completed build: %s" % build)
+        for build in self.builds:
+            self.log.info("Running build: %s" % build)
+        for tenant in self.scheds.first.sched.abide.tenants.values():
+            for manager in tenant.layout.pipeline_managers.values():
+                for pipeline_queue in manager.state.queues:
+                    if len(pipeline_queue.queue) != 0:
+                        status = ''
+                        for item in pipeline_queue.queue:
+                            status += item.formatStatus()
+                        self.log.info(
+                            'Tenant %s pipeline %s queue %s contents:' % (
+                                tenant.name, manager.pipeline.name,
+                                pipeline_queue.name))
+                        for l in status.split('\n'):
+                            if l.strip():
+                                self.log.info(l)
+        self.log.info("End state dump --------------------")
 
     def countJobResults(self, jobs, result):
         jobs = filter(lambda x: x.result == result, jobs)
@@ -2922,27 +3515,40 @@ class ZuulTestCase(BaseTestCase):
                 self.assertNotEqual(job.name, name,
                                     'Job %s found in history' % name)
 
-    def getJobFromHistory(self, name, project=None):
+    def getJobFromHistory(self, name, project=None, result=None, branch=None):
         for job in self.history:
             if (job.name == name and
                 (project is None or
-                 job.parameters['zuul']['project']['name'] == project)):
+                 job.parameters['zuul']['project']['name'] == project) and
+                (result is None or job.result == result) and
+                (branch is None or
+                 job.parameters['zuul']['branch'] == branch)):
                 return job
         raise Exception("Unable to find job %s in history" % name)
 
     def assertEmptyQueues(self):
         # Make sure there are no orphaned jobs
-        for tenant in self.sched.abide.tenants.values():
-            for pipeline in tenant.layout.pipelines.values():
-                for pipeline_queue in pipeline.queues:
+        for tenant in self.scheds.first.sched.abide.tenants.values():
+            for manager in tenant.layout.pipeline_managers.values():
+                for pipeline_queue in manager.state.queues:
                     if len(pipeline_queue.queue) != 0:
                         print('pipeline %s queue %s contents %s' % (
-                            pipeline.name, pipeline_queue.name,
+                            manager.pipeline.name, pipeline_queue.name,
                             pipeline_queue.queue))
                     self.assertEqual(len(pipeline_queue.queue), 0,
                                      "Pipelines queues should be empty")
 
-    def assertReportedStat(self, key, value=None, kind=None):
+    def assertCleanZooKeeper(self):
+        # Make sure there are no extraneous ZK nodes
+        client = self.merger_api
+        self.assertEqual(self.getZKPaths(client.REQUEST_ROOT), [])
+        self.assertEqual(self.getZKPaths(client.PARAM_ROOT), [])
+        self.assertEqual(self.getZKPaths(client.RESULT_ROOT), [])
+        self.assertEqual(self.getZKPaths(client.RESULT_DATA_ROOT), [])
+        self.assertEqual(self.getZKPaths(client.WAITER_ROOT), [])
+        self.assertEqual(self.getZKPaths(client.LOCK_ROOT), [])
+
+    def assertReportedStat(self, key, value=None, kind=None, timeout=5):
         """Check statsd output
 
         Check statsd return values.  A ``value`` should specify a
@@ -2958,29 +3564,58 @@ class ZuulTestCase(BaseTestCase):
           - ``g`` gauge
           - ``ms`` timing
           - ``s`` set
+
+        :arg int timeout: How long to wait for the stat to appear
+
+        :returns: The value
         """
 
         if value:
             self.assertNotEqual(kind, None)
 
         start = time.time()
-        while time.time() < (start + 5):
+        while time.time() <= (start + timeout):
             # Note our fake statsd just queues up results in a queue.
             # We just keep going through them until we find one that
             # matches, or fail out.  If statsd pipelines are used,
             # large single packets are sent with stats separated by
             # newlines; thus we first flatten the stats out into
             # single entries.
-            stats = itertools.chain.from_iterable(
-                [s.decode('utf-8').split('\n') for s in self.statsd.stats])
+            stats = list(itertools.chain.from_iterable(
+                [s.decode('utf-8').split('\n') for s in self.statsd.stats]))
+
+            # Check that we don't have already have a counter value
+            # that we then try to extend a sub-key under; this doesn't
+            # work on the server.  e.g.
+            #  zuul.new.stat            is already a counter
+            #  zuul.new.stat.sub.value  will silently not work
+            #
+            # note only valid for gauges and counters; timers are
+            # slightly different because statsd flushes them out but
+            # actually writes a bunch of different keys like "mean,
+            # std, count", so the "key" isn't so much a key, but a
+            # path to the folder where the actual values will be kept.
+            # Thus you can extend timer keys OK.
+            already_set_keys = set()
             for stat in stats:
                 k, v = stat.split(':')
+                s_value, s_kind = v.split('|')
+                if s_kind == 'c' or s_kind == 'g':
+                    already_set_keys.update([k])
+            for k in already_set_keys:
+                if key != k and key.startswith(k):
+                    raise StatException(
+                        "Key %s is a gauge/counter and "
+                        "we are trying to set subkey %s" % (k, key))
+
+            for stat in stats:
+                k, v = stat.split(':')
+                s_value, s_kind = v.split('|')
+
                 if key == k:
                     if kind is None:
                         # key with no qualifiers is found
-                        return True
-
-                    s_value, s_kind = v.split('|')
+                        return s_value
 
                     # if no kind match, look for other keys
                     if kind != s_kind:
@@ -2992,17 +3627,43 @@ class ZuulTestCase(BaseTestCase):
                         # length, hence foiling string matching.
                         if kind == 'ms':
                             if float(value) == float(s_value):
-                                return True
+                                return s_value
                         if value == s_value:
-                            return True
+                            return s_value
                         # otherwise keep looking for other matches
                         continue
 
                     # this key matches
-                    return True
+                    return s_value
             time.sleep(0.1)
 
-        raise Exception("Key %s not found in reported stats" % key)
+        stats = list(itertools.chain.from_iterable(
+            [s.decode('utf-8').split('\n') for s in self.statsd.stats]))
+        for stat in stats:
+            self.log.debug("Stat: %s", stat)
+        raise StatException("Key %s not found in reported stats" % key)
+
+    def assertUnReportedStat(self, key, value=None, kind=None):
+        try:
+            value = self.assertReportedStat(key, value=value,
+                                            kind=kind, timeout=0)
+        except StatException:
+            return
+        raise StatException("Key %s found in reported stats: %s" %
+                            (key, value))
+
+    def assertRegexInList(self, regex, items):
+        r = re.compile(regex)
+        for x in items:
+            if r.search(x):
+                return
+        raise Exception("Regex '%s' not in %s" % (regex, items))
+
+    def assertRegexNotInList(self, regex, items):
+        r = re.compile(regex)
+        for x in items:
+            if r.search(x):
+                raise Exception("Regex '%s' in %s" % (regex, items))
 
     def assertBuilds(self, builds):
         """Assert that the running builds are as described.
@@ -3024,10 +3685,10 @@ class ZuulTestCase(BaseTestCase):
                         getattr(self.builds[i], k), v,
                         "Element %i in builds does not match" % (i,))
         except Exception:
+            if not self.builds:
+                self.log.error("No running builds")
             for build in self.builds:
                 self.log.error("Running build: %s" % build)
-            else:
-                self.log.error("No running builds")
             raise
 
     def assertHistory(self, history, ordered=True):
@@ -3069,14 +3730,14 @@ class ZuulTestCase(BaseTestCase):
                             unseen.remove(unseen_item)
                             break
                     if not found:
-                        raise Exception("No match found for element %i "
-                                        "in history" % (i,))
+                        raise Exception("No match found for element %i %s "
+                                        "in history" % (i, d))
                 if unseen:
                     raise Exception("Unexpected items in history")
         except Exception:
             for build in self.history:
                 self.log.error("Completed build: %s" % build)
-            else:
+            if not self.history:
                 self.log.error("No completed builds")
             raise
 
@@ -3087,33 +3748,13 @@ class ZuulTestCase(BaseTestCase):
         completed.
 
         """
+        if not self.history:
+            self.log.debug("Build history: no builds ran")
+            return
+
         self.log.debug("Build history:")
         for build in self.history:
             self.log.debug(build)
-
-    def getPipeline(self, name):
-        return self.sched.abide.tenants.values()[0].layout.pipelines.get(name)
-
-    def updateConfigLayout(self, path):
-        root = os.path.join(self.test_root, "config")
-        if not os.path.exists(root):
-            os.makedirs(root)
-        f = tempfile.NamedTemporaryFile(dir=root, delete=False)
-        f.write("""
-- tenant:
-    name: openstack
-    source:
-      gerrit:
-        config-projects:
-          - %s
-        untrusted-projects:
-          - org/project
-          - org/project1
-          - org/project2\n""" % path)
-        f.close()
-        self.config.set('scheduler', 'tenant_config',
-                        os.path.join(FIXTURE_DIR, f.name))
-        self.setupAllProjectKeys()
 
     def addTagToRepo(self, project, name, sha):
         path = os.path.join(self.upstream_root, project)
@@ -3130,7 +3771,7 @@ class ZuulTestCase(BaseTestCase):
         path = os.path.join(self.upstream_root, project)
         repo = git.Repo(path)
         repo.head.reference = branch
-        zuul.merger.merger.reset_repo_to_head(repo)
+        repo.head.reset(working_tree=True)
         for fn, content in files.items():
             fn = os.path.join(path, fn)
             try:
@@ -3158,7 +3799,7 @@ class ZuulTestCase(BaseTestCase):
             repo.create_tag(tag)
         return before
 
-    def commitConfigUpdate(self, project_name, source_name):
+    def commitConfigUpdate(self, project_name, source_name, replace=None):
         """Commit an update to zuul.yaml
 
         This overwrites the zuul.yaml in the specificed project with
@@ -3176,6 +3817,9 @@ class ZuulTestCase(BaseTestCase):
         files = {}
         with open(source_path, 'r') as f:
             data = f.read()
+            if replace:
+                kw = replace(self)
+                data = data.format(**kw)
             layout = yaml.safe_load(data)
             files['zuul.yaml'] = data
         for item in layout:
@@ -3208,8 +3852,10 @@ class ZuulTestCase(BaseTestCase):
             self.tenant_config_file = new_tenant_config.name
             with open(source_path, mode='rb') as source_tenant_config:
                 new_tenant_config.write(source_tenant_config.read())
+        for app in self.scheds.instances:
+            app.config['scheduler']['tenant_config'] = self.tenant_config_file
         self.config['scheduler']['tenant_config'] = self.tenant_config_file
-        self.setupAllProjectKeys()
+        self.setupAllProjectKeys(self.config)
         self.log.debug(
             'tenant_config_file = {}'.format(self.tenant_config_file))
 
@@ -3223,7 +3869,6 @@ class ZuulTestCase(BaseTestCase):
         self.addCleanup(_restoreTenantConfig)
 
     def addEvent(self, connection, event):
-
         """Inject a Fake (Gerrit) event.
 
         This method accepts a JSON-encoded event and simulates Zuul
@@ -3247,8 +3892,8 @@ class ZuulTestCase(BaseTestCase):
         :arg str event: The JSON-encoded event.
 
         """
-        specified_conn = self.connections.connections[connection]
-        for conn in self.connections.connections.values():
+        specified_conn = self.scheds.first.connections.connections[connection]
+        for conn in self.scheds.first.connections.connections.values():
             if (isinstance(conn, specified_conn.__class__) and
                 specified_conn.server == conn.server):
                 conn.addEvent(event)
@@ -3276,6 +3921,77 @@ class ZuulTestCase(BaseTestCase):
             repos[project] = repo
         return repos
 
+    def addAutohold(self, tenant_name, project_name, job_name,
+                    ref_filter, reason, count, node_hold_expiration):
+        request = HoldRequest()
+        request.tenant = tenant_name
+        request.project = project_name
+        request.job = job_name
+        request.ref_filter = ref_filter
+        request.reason = reason
+        request.max_count = count
+        request.node_expiration = node_hold_expiration
+        self.sched_zk_nodepool.storeHoldRequest(request)
+
+    def saveChangeDB(self):
+        path = os.path.join(self.test_root, "changes.data")
+        self.test_config.changes.save(path)
+
+    def loadChangeDB(self):
+        path = os.path.join(self.test_root, "changes.data")
+        self.test_config.changes.load(path)
+
+    def waitForNodeRequest(self, request, timeout=10):
+        with self.createZKContext(None) as ctx:
+            for _ in iterate_timeout(
+                    timeout, "nodeset request to be fulfilled"):
+                request.refresh(ctx)
+                if request.state == model.NodesetRequest.State.FULFILLED:
+                    return
+
+    def requestNodes(self, labels, tenant="tenant-one", pipeline="check",
+                     timeout=10):
+        result_queue = PipelineResultEventQueue(
+            self.zk_client, tenant, pipeline)
+
+        with self.createZKContext(None) as ctx:
+            # Lock the pipeline, so we can grab the result event
+            with (self.scheds.first.sched.run_handler_lock,
+                  pipeline_lock(self.zk_client, tenant, pipeline)):
+                request = model.NodesetRequest.new(
+                    ctx,
+                    tenant_name="tenant-one",
+                    pipeline_name="check",
+                    buildset_uuid=uuid.uuid4().hex,
+                    job_uuid=uuid.uuid4().hex,
+                    job_name="foobar",
+                    labels=labels,
+                    priority=100,
+                    request_time=time.time(),
+                    zuul_event_id=uuid.uuid4().hex,
+                    span_info=None,
+                )
+                if timeout:
+                    for _ in iterate_timeout(
+                            timeout, "nodeset request to be fulfilled"):
+                        result_events = list(result_queue)
+                        if result_events:
+                            for event in result_events:
+                                # Remove event(s) from queue
+                                result_queue.ack(event)
+                            break
+                else:
+                    return request
+
+            self.assertEqual(len(result_events), 1)
+            for event in result_queue:
+                self.assertIsInstance(event, model.NodesProvisionedEvent)
+                self.assertEqual(event.request_id, request.uuid)
+                self.assertEqual(event.build_set_uuid, request.buildset_uuid)
+
+            request.refresh(ctx)
+        return request
+
 
 class AnsibleZuulTestCase(ZuulTestCase):
     """ZuulTestCase but with an actual ansible executor running"""
@@ -3293,11 +4009,11 @@ class AnsibleZuulTestCase(ZuulTestCase):
         try:
             yield
         except Exception:
-            path = os.path.join(self.test_root, build.uuid,
+            path = os.path.join(self.jobdir_root, build.uuid,
                                 'work', 'logs', 'job-output.txt')
             with open(path) as f:
                 self.log.debug(f.read())
-            path = os.path.join(self.test_root, build.uuid,
+            path = os.path.join(self.jobdir_root, build.uuid,
                                 'work', 'logs', 'job-output.json')
             with open(path) as f:
                 self.log.debug(f.read())
@@ -3309,40 +4025,19 @@ class SSLZuulTestCase(ZuulTestCase):
     use_ssl = True
 
 
-class ZuulDBTestCase(ZuulTestCase):
-    def setup_config(self):
-        super(ZuulDBTestCase, self).setup_config()
-        for section_name in self.config.sections():
-            con_match = re.match(r'^connection ([\'\"]?)(.*)(\1)$',
-                                 section_name, re.I)
-            if not con_match:
-                continue
-
-            if self.config.get(section_name, 'driver') == 'sql':
-                if (self.config.get(section_name, 'dburi') ==
-                    '$MYSQL_FIXTURE_DBURI$'):
-                    f = MySQLSchemaFixture()
-                    self.useFixture(f)
-                    self.config.set(section_name, 'dburi', f.dburi)
-                elif (self.config.get(section_name, 'dburi') ==
-                      '$POSTGRESQL_FIXTURE_DBURI$'):
-                    f = PostgresqlSchemaFixture()
-                    self.useFixture(f)
-                    self.config.set(section_name, 'dburi', f.dburi)
-
-
 class ZuulGithubAppTestCase(ZuulTestCase):
-    def setup_config(self):
-        super().setup_config()
-        for section_name in self.config.sections():
+    def setup_config(self, config_file: str):
+        config = super(ZuulGithubAppTestCase, self).setup_config(config_file)
+        for section_name in config.sections():
             con_match = re.match(r'^connection ([\'\"]?)(.*)(\1)$',
                                  section_name, re.I)
             if not con_match:
                 continue
 
-            if self.config.get(section_name, 'driver') == 'github':
-                if (self.config.get(section_name, 'app_key',
-                                    fallback=None) ==
+            if config.get(section_name, 'driver') == 'github':
+                if (config.get(section_name, 'app_key',
+                               fallback=None) ==
                     '$APP_KEY_FIXTURE$'):
-                    self.config.set(section_name, 'app_key',
-                                    os.path.join(FIXTURE_DIR, 'app_key'))
+                    config.set(section_name, 'app_key',
+                               os.path.join(FIXTURE_DIR, 'app_key'))
+        return config

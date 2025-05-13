@@ -1,0 +1,14 @@
+---
+upgrade:
+  - |
+    The default version of Ansible used by Zuul jobs has been changed to 2.8.
+    See :attr:`job.ansible-version` for more information.
+  - |
+    As a result of switching to Ansible 2.8, it is possible for the
+    ansible_python_interpreter version of your nodeset to change to 'auto'.
+    This could result in your jobs now running under a different version of
+    python than prior to this release. See :ref:`ansible-and-python-3` for
+    additional info.
+  - |
+    Ansible 2.6 for Zuul jobs has been marked deprecated and will be removed in
+    a future release.

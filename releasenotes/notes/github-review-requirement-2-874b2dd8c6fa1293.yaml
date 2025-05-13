@@ -1,0 +1,6 @@
+---
+features:
+  - |
+    Zuul now respects GitHub review requirements when enqueuing into gate
+    pipelines. This works for github.com and GitHub Enterprise starting with
+    version 2.21.0.

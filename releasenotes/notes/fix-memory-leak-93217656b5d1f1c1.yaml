@@ -1,0 +1,4 @@
+---
+fixes:
+  - |
+    Fixed a memory leak introduced in 3.8.0.

@@ -1,0 +1,5 @@
+---
+features:
+  - |
+    Pipelines can now trigger on ``wip-state-changed`` and filter events on the
+    wip state of a change with :attr:`pipeline.require.<gerrit source>.wip`.

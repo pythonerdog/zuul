@@ -1,0 +1,6 @@
+---
+deprecations:
+  - |
+    Running the zuul processes with the -d switch to enforce running in
+    foreground is now deprecated. Switch to use -f instead for this purpose.
+    The -d switch will change to just enable debug logging in the future.

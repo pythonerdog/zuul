@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 # Licensed under the Apache License, Version 2.0 (the "License"); you may
 # not use this file except in compliance with the License. You may obtain
@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import ssl
 
 # we to import Request and urlopen differently for python 2 and 3
 try:
@@ -45,15 +46,21 @@ def main():
     parser = argparse.ArgumentParser(description=DESCRIPTION)
     parser.add_argument('url',
                         help="The base URL of the zuul server.  "
-                        "E.g., https://zuul.example.com/")
-    parser.add_argument('project',
-                        help="The name of the project.")
+                        "E.g., https://zuul.example.com/ or path"
+                        " to project public key file. E.g.,"
+                        " file:///path/to/key.pub")
+    parser.add_argument('project', default=None, nargs="?",
+                        help="The name of the project. Required when using"
+                        " the Zuul API to fetch the public key.")
     parser.add_argument('--tenant',
                         default=None,
                         help="The name of the Zuul tenant.  This may be "
                         "required in a multi-tenant environment.")
-    parser.add_argument('--strip', action='store_true', default=False,
-                        help="Strip whitespace from beginning/end of input.")
+    parser.add_argument('--strip', default=None,
+                        help='Unused, kept for backward compatibility.')
+    parser.add_argument('--no-strip', action='store_true', default=False,
+                        help="Do not strip whitespace from beginning or "
+                        "end of input.")
     parser.add_argument('--infile',
                         default=None,
                         help="A filename whose contents will be encrypted.  "
@@ -64,6 +71,8 @@ def main():
                         help="A filename to which the encrypted value will be "
                         "written.  If not supplied, the value will be written "
                         "to standard output.")
+    parser.add_argument('--insecure', action='store_true', default=False,
+                        help="Do not verify remote certificate")
     args = parser.parse_args()
 
     # We should not use unencrypted connections for retrieving the public key.
@@ -75,22 +84,36 @@ def main():
                          "unencrypted connection. Your secret may get "
                          "compromised.\n")
 
-    # Check if tenant is white label
-    req = Request("%s/api/info" % (args.url.rstrip('/'),))
-    info = json.loads(urlopen(req).read().decode('utf8'))
-
-    api_tenant = info.get('info', {}).get('tenant')
-    if not api_tenant and not args.tenant:
-        print("Error: the --tenant argument is required")
-        exit(1)
-
-    if api_tenant:
-        req = Request("%s/api/key/%s.pub" % (
-            args.url.rstrip('/'), args.project))
+    ssl_ctx = None
+    if url.scheme == 'file':
+        req = Request(args.url)
     else:
-        req = Request("%s/api/tenant/%s/key/%s.pub" % (
-            args.url.rstrip('/'), args.tenant, args.project))
-    pubkey = urlopen(req)
+        if args.insecure:
+            ssl_ctx = ssl.create_default_context()
+            ssl_ctx.check_hostname = False
+            ssl_ctx.verify_mode = ssl.CERT_NONE
+
+        # Check if tenant is white label
+        req = Request("%s/api/info" % (args.url.rstrip('/'),))
+        info = json.loads(urlopen(req, context=ssl_ctx).read().decode('utf8'))
+
+        api_tenant = info.get('info', {}).get('tenant')
+        if not api_tenant and not args.tenant:
+            print("Error: the --tenant argument is required")
+            exit(1)
+
+        if api_tenant:
+            req = Request("%s/api/key/%s.pub" % (
+                args.url.rstrip('/'), args.project))
+        else:
+            req = Request("%s/api/tenant/%s/key/%s.pub" % (
+                args.url.rstrip('/'), args.tenant, args.project))
+    try:
+        pubkey = urlopen(req, context=ssl_ctx)
+    except Exception:
+        sys.stderr.write(
+            "ERROR: Couldn't retrieve project key via %s\n" % req.full_url)
+        raise
 
     if args.infile:
         with open(args.infile) as f:
@@ -99,7 +122,7 @@ def main():
         plaintext = sys.stdin.read()
 
     plaintext = plaintext.encode("utf-8")
-    if args.strip:
+    if not args.no_strip:
         plaintext = plaintext.strip()
 
     pubkey_file = tempfile.NamedTemporaryFile(delete=False)
@@ -118,10 +141,11 @@ def main():
         openssl_version = subprocess.check_output(
             ['openssl', 'version']).split()[1]
         if openssl_version.startswith(b'0.'):
-            m = re.match(r'^Modulus \((\d+) bit\):$', output, re.MULTILINE)
+            key_length_re = r'^Modulus \((?P<key_length>\d+) bit\):$'
         else:
-            m = re.match(r'^Public-Key: \((\d+) bit\)$', output, re.MULTILINE)
-        nbits = int(m.group(1))
+            key_length_re = r'^(|RSA )Public-Key: \((?P<key_length>\d+) bit\)$'
+        m = re.match(key_length_re, output, re.MULTILINE)
+        nbits = int(m.group('key_length'))
         nbytes = int(nbits / 8)
         max_bytes = nbytes - 42  # PKCS1-OAEP overhead
         chunks = int(math.ceil(float(len(plaintext)) / max_bytes))
@@ -172,4 +196,9 @@ def main():
 
 
 if __name__ == '__main__':
+    print(
+        "This script is deprecated. Use `zuul-client encrypt` instead. "
+        "Please refer to https://zuul-ci.org/docs/zuul-client/ "
+        "for more details on how to use zuul-client."
+    )
     main()

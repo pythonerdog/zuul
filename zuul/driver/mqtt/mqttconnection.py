@@ -15,11 +15,11 @@
 import logging
 import json
 
-import voluptuous as v
 import paho.mqtt.client as mqtt
 
 from zuul.connection import BaseConnection
 from zuul.exceptions import ConfigurationError
+from zuul.lib.logutil import get_annotated_logger
 
 
 class MQTTConnection(BaseConnection):
@@ -53,9 +53,23 @@ class MQTTConnection(BaseConnection):
                 keyfile=keyfile,
                 ciphers=ciphers)
         self.connected = False
+        self.client.on_connect = self._on_connect
+        self.client.on_disconnect = self._on_disconnect
 
-    def onLoad(self):
+    def _on_connect(self, client, userdata, flags, rc):
+        self.connected = True
+
+    def _on_disconnect(self, client, userdata, rc):
+        self.connected = False
+
+    def onLoad(self, zk_client, component_registry):
         self.log.debug("Starting MQTT Connection")
+
+        # If the connection was not loaded by a scheduler, but by e.g.
+        # zuul-web, we want to stop here.
+        if not self.sched:
+            return
+
         try:
             self.client.connect(
                 self.connection_config.get('server', 'localhost'),
@@ -68,21 +82,19 @@ class MQTTConnection(BaseConnection):
         self.client.loop_start()
 
     def onStop(self):
-        self.log.debug("Stopping MQTT Connection")
-        self.client.loop_stop()
-        self.client.disconnect()
-        self.connected = False
+        if self.connected:
+            self.log.debug("Stopping MQTT Connection")
+            self.client.loop_stop()
+            self.client.disconnect()
+            self.connected = False
 
-    def publish(self, topic, message, qos):
+    def publish(self, topic, message, qos, zuul_event_id):
+        log = get_annotated_logger(self.log, zuul_event_id)
         if not self.connected:
-            self.log.warn("MQTT reporter (%s) is disabled" % self)
+            log.warning("MQTT reporter (%s) is disabled", self)
             return
         try:
             self.client.publish(topic, payload=json.dumps(message), qos=qos)
         except Exception:
-            self.log.exception(
+            log.exception(
                 "Could not publish message to topic '%s' via mqtt", topic)
-
-
-def getSchema():
-    return v.Any(str, v.Schema(dict))

@@ -1,0 +1,7 @@
+---
+features:
+  - |
+    A new options, :attr:`job.workspace-checkout` is available to
+    disable checkouts of repositories on the Zuul executor.  This may
+    be useful to save time or space when preparing large repositories
+    which will be unused on the executor.

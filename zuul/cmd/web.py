@@ -1,5 +1,5 @@
-#!/usr/bin/env python
 # Copyright 2017 Red Hat, Inc.
+# Copyright 2021-2022 Acme Gating, LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may
 # not use this file except in compliance with the License. You may obtain
@@ -22,13 +22,17 @@ import zuul.model
 import zuul.web
 import zuul.driver.sql
 import zuul.driver.github
-
-from zuul.lib.config import get_default
+import zuul.lib.auth
 
 
 class WebServer(zuul.cmd.ZuulDaemonApp):
     app_name = 'web'
     app_description = 'A standalone Zuul web server.'
+
+    def createParser(self):
+        parser = super().createParser()
+        self.addSubCommands(parser, zuul.web.COMMANDS)
+        return parser
 
     def exit_handler(self, signum, frame):
         self.web.stop()
@@ -36,26 +40,6 @@ class WebServer(zuul.cmd.ZuulDaemonApp):
     def _run(self):
         info = zuul.model.WebInfo.fromConfig(self.config)
 
-        params = dict()
-
-        params['info'] = info
-        params['listen_address'] = get_default(self.config,
-                                               'web', 'listen_address',
-                                               '127.0.0.1')
-        params['listen_port'] = get_default(self.config, 'web', 'port', 9000)
-        params['static_cache_expiry'] = get_default(self.config, 'web',
-                                                    'static_cache_expiry',
-                                                    3600)
-        params['static_path'] = get_default(self.config,
-                                            'web', 'static_path',
-                                            None)
-        params['gear_server'] = get_default(self.config, 'gearman', 'server')
-        params['gear_port'] = get_default(self.config, 'gearman', 'port', 4730)
-        params['ssl_key'] = get_default(self.config, 'gearman', 'ssl_key')
-        params['ssl_cert'] = get_default(self.config, 'gearman', 'ssl_cert')
-        params['ssl_ca'] = get_default(self.config, 'gearman', 'ssl_ca')
-
-        params['connections'] = self.connections
         # Validate config here before we spin up the ZuulWeb object
         for conn_name, connection in self.connections.connections.items():
             try:
@@ -65,8 +49,15 @@ class WebServer(zuul.cmd.ZuulDaemonApp):
                 sys.exit(1)
 
         try:
-            self.web = zuul.web.ZuulWeb(**params)
-        except Exception as e:
+            self.web = zuul.web.ZuulWeb(
+                config=self.config,
+                info=info,
+                connections=self.connections,
+                authenticators=self.authenticators,
+            )
+            self.connections.load(self.web.zk_client,
+                                  self.web.component_registry)
+        except Exception:
             self.log.exception("Error creating ZuulWeb:")
             sys.exit(1)
 
@@ -77,23 +68,29 @@ class WebServer(zuul.cmd.ZuulDaemonApp):
         self.web.start()
 
         try:
-            signal.pause()
+            self.web.join()
         except KeyboardInterrupt:
-            print("Ctrl + C: asking web server to exit nicely...\n")
+            print("Ctrl + C: asking process to exit nicely...\n")
             self.exit_handler(signal.SIGINT, None)
+            self.web.join()
 
-        self.web.stop()
         self.log.info("Zuul Web Server stopped")
 
+    def configure_authenticators(self):
+        self.authenticators = zuul.lib.auth.AuthenticatorRegistry()
+        self.authenticators.configure(self.config)
+
     def run(self):
+        self.handleCommands()
+
         self.setup_logging('web', 'log_config')
         self.log = logging.getLogger("zuul.WebServer")
 
-        self.configure_connections(
-            include_drivers=[zuul.driver.sql.SQLDriver,
-                             zuul.driver.github.GithubDriver])
-
         try:
+            self.configure_connections(database=True, sources=True,
+                                       triggers=True, reporters=True,
+                                       providers=True)
+            self.configure_authenticators()
             self._run()
         except Exception:
             self.log.exception("Exception from WebServer:")
@@ -101,7 +98,3 @@ class WebServer(zuul.cmd.ZuulDaemonApp):
 
 def main():
     WebServer().main()
-
-
-if __name__ == "__main__":
-    main()

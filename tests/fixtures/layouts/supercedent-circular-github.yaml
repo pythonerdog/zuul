@@ -1,0 +1,49 @@
+- pipeline:
+    name: post
+    manager: supercedent
+    require:
+      github:
+        merged: true
+    trigger:
+      github:
+        - event: pull_request
+          action:
+            - closed
+    success:
+      github: {}
+    failure:
+      github: {}
+
+- job:
+    name: base
+    parent: null
+    run: playbooks/base.yaml
+
+- job:
+    name: post-job
+
+- job:
+    name: post1-job
+
+- job:
+    name: post2-job
+
+- queue:
+    name: shared
+    allow-circular-dependencies: true
+
+- project:
+    name: org/project1
+    queue: shared
+    post:
+      jobs:
+        - post-job
+        - post1-job
+
+- project:
+    name: org/project2
+    queue: shared
+    post:
+      jobs:
+        - post-job
+        - post2-job

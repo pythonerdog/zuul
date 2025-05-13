@@ -1,6 +1,11 @@
 include AUTHORS
 include ChangeLog
+include zuul/ansible/*/*
+include zuul/ansible/*/*/*
+include zuul/driver/github/graphql/*
+include zuul/lib/ansible-config.conf
 include zuul/web/static/*
+include zuul/web/static/static/*/*
 
 exclude .gitignore
 exclude .gitreview

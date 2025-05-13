@@ -1,0 +1,12 @@
+---
+upgrade:
+  - |
+    Include-vars behavior has changed when running on tags.
+    Previously, the use of :attr:`job.include-vars` in a job that ran
+    on a ref (i.e., tag or branch rather than a change) would use
+    either the override-checkout or the project default branch to
+    source the variables file.  In the case that the job is running on
+    a ref of the include-vars project, it will now source the file
+    from the ref checkout itself; this is expected to be more useful
+    and intuitive for users.  To restore the previous behavior, the
+    :attr:`job.include-vars.use-ref` may be used.

@@ -1,0 +1,13 @@
+---
+upgrade:
+  - |
+    The default value for the :attr:`executor.job_dir` configuration
+    setting has been changed from ``/tmp`` to
+    ``/var/lib/zuul/builds``.  It is important for
+    :attr:`executor.job_dir` and :attr:`executor.git_dir` to be
+    located on the same filesystem, so this change increases the chances
+    that they end up on the same filesystem in most default configurations.
+
+    The ``builds`` subdirectory will be created if it does not exist,
+    however, ``/var/lib/zuul`` at least must exist and be writable by
+    the Zuul user.

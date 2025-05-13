@@ -1,0 +1,6 @@
+- project:
+    check:
+      jobs:
+        - zuul-project
+        - zuul-project-required
+        - zuul-project-missing-ok

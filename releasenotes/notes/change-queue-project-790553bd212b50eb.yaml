@@ -1,0 +1,6 @@
+---
+deprecations:
+  - |
+    Shared ``queues`` should be configured per project now instead per
+    pipeline. Specifying `project.<pipeline>.queue` is deprecated
+    and will be removed in a future release.

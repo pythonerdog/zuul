@@ -1,0 +1,7 @@
+---
+features:
+  - |
+    When a remote host in a job is found to be unreachable, Zuul will
+    automatically add it to a new group named `zuul_unreachable` for
+    all subsequent playbooks.  This can be used to avoid running
+    certain post-run steps on hosts already known to be unreachable.

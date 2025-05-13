@@ -6,9 +6,15 @@ is managed using Javascript toolchains. It is intended to be served by zuul-web
 directly from zuul/web/static in the simple case, or to be published to
 an alternate static web location, such as an Apache server.
 
-The web dashboard is written in `Typescript`_ and `Angular`_ and is
-managed by `yarn`_ and `webpack`_ which in turn both assume a functioning
-and recent `nodejs`_ installation.
+The web dashboard is written in `React`_ and `PatternFly`_ and is
+managed by `create-react-app`_ and `yarn`_ which in turn both assume a
+functioning and recent `nodejs`_ installation.
+
+.. note::
+
+   The web dashboard source code and package.json are located in the ``web``
+   directory. All the yarn commands need to be executed from the ``web``
+   directory.
 
 For the impatient who don't want deal with javascript toolchains
 ----------------------------------------------------------------
@@ -98,28 +104,53 @@ conflicts is to first resolve the conflicts, if any, in ``package.json``. Then:
 Which causes yarn to discard the ``yarn.lock`` file, recalculate the
 dependencies and write new content.
 
-webpack asset management
-------------------------
+React Components and Styling
+----------------------------
 
-`webpack`_ takes care of bundling web assets for deployment, including tasks
-such as minifying and transpiling for older browsers. It takes a
-javascript-first approach, and generates a html file that includes the
-appropriate javascript and CSS to get going.
+Each page is a React Component. For instance the status.html page code
+is ``web/src/pages/status.jsx``. It is usually a good idea not to put
+too much markup in those page components and create different
+components for this instead. This way, the page component can deal
+with the logic like reloading data if needed or evaluating URL
+parameters and the child components can deal with the markup.  Thus,
+you will find a lot of components in the ``web/src/containers``
+directory that mainly deal with the markup.
 
-The main `webpack`_ config file is ``webpack.config.js``. In the Zuul tree that
-file is a stub file that includes either a dev or a prod environment from
-``web/config/webpack.dev.js`` or ``web/config/webpack.prod.js``. Most of the
-important bits are in ``web/config/webpack.common.js``.
+Mapping of pages/urls to components can be found in the route list in
+``web/src/routes.js``.
 
-Angular Components
-------------------
+The best way to get started is to check out the libraries that glue
+everything together. Those are `React`__, `react-router`_ and
+`Redux`_.
 
-Each page has an `Angular Component`_ associated with it. For instance, the
-``status.html`` page has code in ``web/status/status.component.ts`` and the
-relevant HTML can be found in ``web/status/status.component.html``.
+.. _React-getting-started: https://reactjs.org/docs/getting-started.html
 
-Mapping of pages/urls to components can be found in the routing module in
-``web/app-routing.module.ts``.
+__ React-getting-started_
+
+For the visual part we are using `PatternFly`_. For a list of available
+PatternFly React components, take a look at the `Components`_ section in their
+documentation. If a single component is not enough, you could also take a
+look at the `Demos`_ sections which provides some more advanced examples
+incorporating multiple components and their interaction.
+
+If you are unsure which component you should use for your purpose, you might
+want to check out the `Usage and behaviour`_ section in their design guidelines.
+
+There is also a list of available `icons`_ including some recommendations on
+when to use which icon. In case you don't find an appropriate icon there, you
+could check out the `FontAwesome Free`_ icons, as most of them are included in
+PatternFly. To find out if an icon is available, simply try to import it from
+the ``@patternfly/react-icons`` package.
+
+For example if you want to use the `address-book`_ icon (which is not listed in
+the PatternFly icon list) you can import it via the following statement:
+
+.. code-block:: javascript
+
+   import { AddressBookIcon } from '@patternfly/react-icons'
+
+Please note that the spelling of the icon name changes to CamelCase and is
+always extended by ``Icon``.
 
 Development
 -----------
@@ -128,68 +159,57 @@ Building the code can be done with:
 
 .. code-block:: bash
 
-  npm run build
+  yarn build
 
 zuul-web has a ``static`` route defined which serves files from
-``zuul/web/static``. ``npm run build`` will put the build output files
+``zuul/web/static``. ``yarn build`` will put the build output files
 into the ``zuul/web/static`` directory so that zuul-web can serve them.
 
-There is a also a development-oriented version of that same command:
+Development server that handles things like reloading and
+hot-updating of code can be started with:
 
 .. code-block:: bash
 
-  npm run build:dev
+  yarn start
 
-which will build for the ``dev`` environment. This causes some sample data
-to be bundled and included.
-
-Webpack includes a development server that handles things like reloading and
-hot-updating of code. The following:
+will build the code and launch the dev server on `localhost:3000`. Fake
+api response needs to be set in the ``web/public/api`` directory.
 
 .. code-block:: bash
 
-  npm run start
+  mkdir public/api/
+  for route in info status jobs builds; do
+  curl -o public/api/${route} https://zuul.openstack.org/api/${route}
+  done
 
-will build the code and launch the dev server on `localhost:8080`. It will
-be configured to use the API endpoint from OpenStack's Zuul. The
-``webpack-dev-server`` watches for changes to the files and
-re-compiles/refresh as needed.
-
-.. code-block:: bash
-
-  npm run start:multi
-
-will do the same but will be pointed at the SoftwareFactory Project Zuul, which
-is multi-tenant.
-
-Arbitrary command line options will be passed through after a ``--`` such as:
+To use an existing zuul api, uses the REACT_APP_ZUUL_API environment
+variable:
 
 .. code-block:: bash
 
-  npm run start -- --open-file='status.html'
+  # Use openstack zuul's api:
+  yarn start:openstack
 
-That's kind of annoying though, so additional targets exist for common tasks:
+  # Use software-factory multi-tenant zuul's api:
+  yarn start:multi
 
-Run status against `basic` built-in demo data.
+  # Use a custom zuul:
+  REACT_APP_ZUUL_API="https://zuul.example.com/api/" yarn start
 
-.. code-block:: bash
-
-  npm run start:basic
-
-Run status against `openstack` built-in demo data
-
-.. code-block:: bash
-
-  npm run start:openstack
-
-Run status against `tree` built-in demo data.
+To run eslint tests locally:
 
 .. code-block:: bash
 
-  npm run start:tree
+  yarn lint
 
-Additional run commands can be added in `package.json` in the ``scripts``
-section.
+Authentication
+~~~~~~~~~~~~~~
+
+The docker-compose file in ``doc/source/examples/keycloak`` can be
+used to run a Keycloak server for use with a development build of the
+web app.  The default values in that file are already set up for the
+web app running on localhost.  See the Keycloak tutorial for details.
+
 
 Deploying
 ---------
@@ -199,31 +219,29 @@ by zuul-web from its ``static`` route. In order to make sure this works
 properly, the javascript build needs to be performed so that the javascript
 files are in the ``zuul/web/static`` directory. Because the javascript
 build outputs into the ``zuul/web/static`` directory, as long as
-``npm run build`` has been done before ``pip install .`` or
+``yarn build`` has been done before ``pip install .`` or
 ``python setup.py sdist``, all the files will be where they need to be.
 As long as `yarn`_ is installed, the installation of zuul will run
-``npm run build`` appropriately.
-
-Debugging minified code
------------------------
-
-Both the ``dev`` and ``prod`` ennvironments use the same `devtool`_
-called ``source-map`` which makes debugging errors easier by including mapping
-information from the minified and bundled resources to their approriate
-non-minified source code locations. Javascript errors in the browser as seen
-in the developer console can be clicked on and the appropriate actual source
-code location will be shown.
-
-``source-map`` is considered an appropriate `devtool`_ for production, but has
-the downside that it is slower to update. However, since it includes the most
-complete mapping information and doesn't impact execution performance, so in
-our case we use it for both.
+``yarn build`` appropriately.
 
 .. _yarn: https://yarnpkg.com/en/
 .. _nodejs: https://nodejs.org/
 .. _webpack: https://webpack.js.org/
 .. _devtool: https://webpack.js.org/configuration/devtool/#devtool
 .. _nodeenv: https://pypi.org/project/nodeenv
-.. _Angular: https://angular.io
-.. _Angular Component: https://angular.io/guide/architecture-components
-.. _Typescript: https://www.typescriptlang.org/
+.. _React: https://reactjs.org/
+.. _react-router: https://reactrouter.com/web/guides/philosophy
+.. _Redux: https://redux.js.org/introduction/core-concepts
+.. _PatternFly: https://www.patternfly.org/
+.. _create-react-app: https://github.com/facebook/create-react-app/blob/master/packages/react-scripts/template/README.md
+.. _Components: https://www.patternfly.org/v4/documentation/react/components/aboutmodal
+.. _Demos: https://www.patternfly.org/v4/documentation/react/demos/bannerdemo
+.. _Usage and behaviour: https://www.patternfly.org/v4/design-guidelines/usage-and-behavior/about-modal
+.. _icons: https://www.patternfly.org/v4/guidelines/icons
+.. _FontAwesome Free: https://fontawesome.com/icons?d=gallery&m=free
+.. _address-book: https://fontawesome.com/icons/address-book?style=solid
+
+By default, zuul-web provides a Progressive Web Application but does
+not run a Service Worker. For deployers who would like to enable one,
+set the environment variable
+``REACT_APP_ENABLE_SERVICE_WORKER=true`` during installation.

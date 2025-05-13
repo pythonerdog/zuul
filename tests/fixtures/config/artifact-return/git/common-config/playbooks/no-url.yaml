@@ -1,0 +1,9 @@
+- hosts: localhost
+  tasks:
+    - zuul_return:
+        data:
+          zuul:
+            artifacts:
+              - name: image
+                metadata:
+                  type: test_data

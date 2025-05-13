@@ -1,0 +1,11 @@
+# Sanity checks that our container image is built as expected
+
+- hosts: all
+  tasks:
+    - name: Test skopeo inside the executor bwrap
+      command: docker run --rm -i --privileged quay.io/zuul-ci/zuul-executor:latest zuul-bwrap /tmp skopeo copy docker://quay.io/zuul-ci/zuul:latest oci:test
+      register: skopeo_output
+    - name: Verify that skopeo ran correctly
+      assert:
+        that:
+          - "'Writing manifest to image destination' in skopeo_output.stdout"

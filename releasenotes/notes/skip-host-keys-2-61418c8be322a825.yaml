@@ -1,0 +1,6 @@
+---
+features:
+  - |
+    Host key checking is now disabled for a host in the generated
+    Ansible inventory if ``host-key-checking`` is set to ``False``
+    in the corresponding nodepool config.

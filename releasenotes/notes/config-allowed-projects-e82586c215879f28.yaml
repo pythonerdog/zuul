@@ -1,0 +1,7 @@
+---
+features:
+  - |
+    Config projects may now add any job to any project's pipelines,
+    regardless of the setting of allowed-projets (including the implicit
+    setting of allowed-projects on jobs with secrets in untrusted
+    projects).

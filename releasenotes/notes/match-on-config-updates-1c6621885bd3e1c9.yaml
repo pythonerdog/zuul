@@ -1,0 +1,10 @@
+---
+upgrade:
+  - |
+    Jobs with file matchers will now automatically match if the configuration
+    of the job is changed.  This means that the Zuul configuration file no
+    longer needs to be included in the list of files to match in order for
+    changes to job configuration to be self-testing.
+
+    To keep the old behavior, set :attr:`job.match-on-config-updates`
+    to ``False``.

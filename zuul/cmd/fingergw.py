@@ -1,5 +1,5 @@
-#!/usr/bin/env python
 # Copyright 2017 Red Hat, Inc.
+# Copyright 2021-2022 Acme Gating, LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may
 # not use this file except in compliance with the License. You may obtain
@@ -15,12 +15,10 @@
 
 import logging
 import signal
-import sys
 
 import zuul.cmd
-import zuul.lib.fingergw
-
 from zuul.lib.config import get_default
+from zuul.lib import fingergw
 
 
 class FingerGatewayApp(zuul.cmd.ZuulDaemonApp):
@@ -37,15 +35,12 @@ class FingerGatewayApp(zuul.cmd.ZuulDaemonApp):
 
     def createParser(self):
         parser = super(FingerGatewayApp, self).createParser()
-        parser.add_argument('command',
-                            choices=zuul.lib.fingergw.COMMANDS,
-                            nargs='?')
+        self.addSubCommands(parser, fingergw.COMMANDS)
         return parser
 
-    def parseArguments(self, args=None):
-        super(FingerGatewayApp, self).parseArguments()
-        if self.args.command:
-            self.args.nodaemon = True
+    def exit_handler(self, signum, frame):
+        if self.gateway:
+            self.gateway.stop()
 
     def run(self):
         '''
@@ -53,56 +48,33 @@ class FingerGatewayApp(zuul.cmd.ZuulDaemonApp):
 
         Called by the main() method of the parent class.
         '''
-        if self.args.command in zuul.lib.fingergw.COMMANDS:
-            self.send_command(self.args.command)
-            sys.exit(0)
+        self.handleCommands()
 
         self.setup_logging('fingergw', 'log_config')
         self.log = logging.getLogger('zuul.fingergw')
 
-        # Get values from configuration file
-        host = get_default(self.config, 'fingergw', 'listen_address', '::')
-        port = int(get_default(self.config, 'fingergw', 'port', 79))
-        user = get_default(self.config, 'fingergw', 'user', 'zuul')
         cmdsock = get_default(
             self.config, 'fingergw', 'command_socket',
             '/var/lib/zuul/%s.socket' % self.app_name)
-        gear_server = get_default(self.config, 'gearman', 'server')
-        gear_port = get_default(self.config, 'gearman', 'port', 4730)
-        ssl_key = get_default(self.config, 'gearman', 'ssl_key')
-        ssl_cert = get_default(self.config, 'gearman', 'ssl_cert')
-        ssl_ca = get_default(self.config, 'gearman', 'ssl_ca')
 
-        self.gateway = zuul.lib.fingergw.FingerGateway(
-            (gear_server, gear_port, ssl_key, ssl_cert, ssl_ca),
-            (host, port),
-            user,
+        self.gateway = fingergw.FingerGateway(
+            self.config,
             cmdsock,
             self.getPidFile(),
         )
 
-        self.log.info('Starting Zuul finger gateway app')
         self.gateway.start()
 
         if self.args.nodaemon:
-            # NOTE(Shrews): When running in non-daemon mode, although sending
-            # the 'stop' command via the command socket will shutdown the
-            # gateway, it's still necessary to Ctrl+C to stop the app.
-            while True:
-                try:
-                    signal.pause()
-                except KeyboardInterrupt:
-                    print("Ctrl + C: asking gateway to exit nicely...\n")
-                    self.stop()
-                    break
-        else:
-            self.gateway.wait()
+            signal.signal(signal.SIGTERM, self.exit_handler)
 
-        self.log.info('Stopped Zuul finger gateway app')
-
-    def stop(self):
-        if self.gateway:
-            self.gateway.stop()
+        while True:
+            try:
+                self.gateway.join()
+                break
+            except KeyboardInterrupt:
+                print("Ctrl + C: asking gateway to exit nicely...\n")
+                self.exit_handler(signal.SIGINT, None)
 
 
 def main():

@@ -1,0 +1,24 @@
+---
+prelude: >
+  This is the first 4.x release of Zuul.  It requires some deployment
+  changes by operators which have been carefully planned in order to
+  facilitate work on Zuul version 5, which will be the first version
+  of Zuul where every component is fault tolerant and able to scale.
+
+  If you read the release notes for the last 3.x release, you may have
+  already made all of the required changes.  If not, please do so
+  before upgrading to version 4.  Every required change in version 4
+  is optionally supported in 3.19, so it is safe to make these changes
+  and then upgrade.
+
+  Please read all of the notes below, especially in the "Upgrading"
+  section for details.  The primary additional requirements are:
+
+    * TLS ZooKeeper connections
+    * Network connectivity from all components to ZooKeeper
+    * An SQL database
+
+  With these changes in place, it is anticipated that further upgrades
+  to Zuul made in support of the scale-out-scheduler work will be done
+  with minimal disruption in the course of normal releases between
+  version 4 and 5.

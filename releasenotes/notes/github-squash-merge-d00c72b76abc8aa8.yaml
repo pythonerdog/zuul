@@ -1,0 +1,4 @@
+---
+features:
+  - |
+    The merge-mode ``squash-merge`` is now supported for Github.

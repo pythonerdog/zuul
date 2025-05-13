@@ -1,0 +1,6 @@
+---
+fixes:
+  - |
+    Nodepool host variables are now available even for unreachable
+    hosts.  This is useful for network appliances which start the job
+    in an unreachable state.

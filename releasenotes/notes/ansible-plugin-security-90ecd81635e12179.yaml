@@ -1,0 +1,31 @@
+---
+security:
+  - |
+    A vulnerability which allowed the execution of untrusted code on
+    the executor was fixed.
+
+    Zuul restricts the Ansible modules and plugins which can be used
+    in the `untrusted` security context (i.e., untrusted projects).
+    It also prohibits running programs on the Zuul executor in the
+    untrusted security context.
+
+    Ansible 2.8 and later versions support referencing builtin modules
+    using the `ansible.builtin.<name>` alias.  Playbooks which use
+    this mechanism can bypass Zuul's security restrictions and run
+    arbitrary local code or otherwise restricted modules.
+
+    Zuul's use of bubblewrap means that any commands executed via this
+    vulnerability would still be contained within the restricted
+    environment, meaning that they can not access files outside of the
+    build directory or continue running longer than the playbook.  But
+    they may have been able to access files within the build directory
+    but outside of the `work/` directory, as well as potentially
+    exploit any kernel or hypervisor privilege escalation
+    vulnerabilities.
+
+    The Zuul team now considers the restricted Ansible environment to
+    be ineffective as a security mechanism and is developing plans to
+    remove the restrictions and rely entirely on bubblewrap in the
+    future.  These changes will occur in a future release of Zuul
+    (likely 6.0.0) and will be preceded by more details about the
+    change.

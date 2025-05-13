@@ -1,0 +1,5 @@
+---
+features:
+  - |
+    The topic of a change (if any) is now reported in the :var:`zuul.topic`
+    job variable

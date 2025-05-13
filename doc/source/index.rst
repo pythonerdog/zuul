@@ -5,13 +5,6 @@ Zuul is a program that drives continuous integration, delivery, and
 deployment systems with a focus on project gating and interrelated
 projects.
 
-Zuul's documentation is organized in three guides based on audience.
-If Zuul is being used to gate or drive automation around your project,
-read the :doc:`user/index` to find out how to configure Zuul.  If you
-are installing or operating a Zuul system, you will also find the
-:doc:`admin/index` useful.  If you want help make Zuul itself better,
-take a look at the :doc:`developer/index`.
-
 If you are looking for the Edge routing service named Zuul that is
 related to Netflix, it can be found here:
 https://github.com/Netflix/zuul
@@ -20,25 +13,39 @@ If you are looking for the Javascript testing tool named Zuul, it
 can be found here:
 https://github.com/defunctzombie/zuul
 
-Contents:
+
+How To Use This Manual
+----------------------
+
+If you have access to a Zuul system operated by someone else, then you
+may be interested in :ref:`about-zuul` and the following reference
+sections: :ref:`project-configuration` and :ref:`job-content`.
+
+If you would like to learn how to run Zuul, try the :ref:`quick-start`.
+
+If you are or will be responsible for installing and operating a Zuul
+System, the remainder of the sections will be useful.
 
 .. toctree::
-   :maxdepth: 2
+   :includehidden:
+   :maxdepth: 1
 
-   user/index
-   admin/index
+   about
+   tutorials/quick-start
+   project-config
+   job-content
+   admin
+   rest-api
+   howtos/index
    developer/index
+   governance
+   vulnerabilities
    releasenotes
-
-.. toctree::
-   :hidden:
-
    glossary
 
 Indices and tables
-==================
+------------------
 
 * :ref:`genindex`
 * :ref:`search`
-* :ref:`glossary`
 

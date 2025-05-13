@@ -1,0 +1,8 @@
+---
+upgrade:
+  - |
+    Schedulers will no longer trigger a smart-reconfig after startup and with
+    that also not pick up modifications to the local tenant config and system
+    attributes in the zuul config file with a restart of a scheduler. This
+    means that changes to the tenant config or the zuul config always require
+    an explicit (smart) reconfiguration.

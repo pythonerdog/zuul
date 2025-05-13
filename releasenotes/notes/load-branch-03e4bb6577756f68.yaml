@@ -1,0 +1,6 @@
+---
+features:
+  - |
+    The tenant configuration now supports loading a different branch than
+    master from config projects.
+    See :attr:`tenant.config-projects.<project>.load-branch`.

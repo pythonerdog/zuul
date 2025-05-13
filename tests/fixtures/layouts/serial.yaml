@@ -1,0 +1,48 @@
+- pipeline:
+    name: deploy
+    manager: serial
+    trigger:
+      gerrit:
+        - event: change-merged
+    post-review: True
+    success:
+      gerrit: {}
+    failure:
+      gerrit: {}
+
+- job:
+    name: base
+    parent: null
+    nodeset:
+      nodes:
+        - label: ubuntu-xenial
+          name: controller
+
+- job:
+    name: job1
+    run: playbooks/job1.yaml
+
+- job:
+    name: job2
+    run: playbooks/job2.yaml
+
+- project:
+    name: org/project
+    deploy:
+      jobs:
+        - job1
+        - job2
+
+- project:
+    name: org/project1
+    queue: shared
+    deploy:
+      jobs:
+        - job1
+
+- project:
+    name: org/project2
+    queue: shared
+    deploy:
+      jobs:
+        - job1

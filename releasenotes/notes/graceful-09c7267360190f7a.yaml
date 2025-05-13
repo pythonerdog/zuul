@@ -1,0 +1,13 @@
+---
+features:
+  - |
+    The executor now honors the :attr:`executor.sigterm_method`
+    configuration file setting to determine whether ``SIGTERM`` should be
+    equivalent to the ``graceful`` command (the default) or the
+    ``stop`` command.
+upgrade:
+  - |
+    The default behavior when an executor receives SIGTERM has been
+    changed from immediately stopping jobs to gracefully waiting for
+    them to finish.  Set the :attr:`executor.sigterm_method`
+    configuration file setting to ``stop`` to preserve the old behavior.

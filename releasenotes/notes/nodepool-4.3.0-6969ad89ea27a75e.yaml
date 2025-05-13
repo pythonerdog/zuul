@@ -1,0 +1,6 @@
+---
+upgrade:
+  - |
+    Nodepool 4.3.0 is now required.  Zuul stores additional
+    information in node records in preparation for supporting multiple
+    schedulers.

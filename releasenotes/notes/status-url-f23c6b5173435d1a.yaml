@@ -1,0 +1,6 @@
+---
+deprecations:
+  - |
+    The ``status-url`` attribute of the Github and Pagure reporter is
+    deprecated. Reporters will currently ignore this setting and automatically
+    use the best URL for information about the item instead.

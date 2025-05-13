@@ -1,0 +1,5 @@
+---
+features:
+  - |
+    Support for using Google Cloud Pub/Sub as an event source has been
+    added to the Gerrit driver.

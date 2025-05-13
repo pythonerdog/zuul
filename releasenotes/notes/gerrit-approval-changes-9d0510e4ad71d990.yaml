@@ -1,0 +1,7 @@
+---
+features:
+  - |
+    The gerrit driver now supports a new synthetic trigger,
+    :attr:`pipeline.trigger.<gerrit source>.approval-change`. This is
+    similar to `approval`, but only triggers when the value of the
+    approval changes instead of simply being present.

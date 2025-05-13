@@ -1,0 +1,7 @@
+---
+features:
+  - |
+    The ``zuul delete-state`` command may be used to delete all of the
+    ephemeral state stored by Zuul in ZooKeeper.  Normally Zuul is able
+    to detect and correct errors on its own, but in case it is unable to,
+    this may prove a useful utility for manual recovery.

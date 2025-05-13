@@ -1,0 +1,12 @@
+---
+features:
+  - |
+    It is now possible for jobs to skip retries caused by failures in
+    'pre-run' by returning `retry: false`:
+
+    .. code-block:: yaml
+
+      - zuul_return:
+          data:
+            zuul:
+              retry: false

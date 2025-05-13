@@ -1,0 +1,13 @@
+- job:
+    name: require-test1-github
+    parent: null
+    run: playbooks/require-test.yaml
+    required-projects:
+      - name: org/requiredproject-github
+        # Checkout unprotected branch
+        override-checkout: feat-x
+
+- project:
+    check:
+      jobs:
+        - require-test1-github

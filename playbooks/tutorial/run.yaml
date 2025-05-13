@@ -1,0 +1,17 @@
+- hosts: all
+  vars:
+    workspace: /tmp/tutorial-zuul
+    local: false
+  environment:
+    GIT_SSH_COMMAND: "ssh -o UserKnownHostsFile={{ workspace }}/known_hosts"
+  tasks:
+    - block:
+        - name: Run tutorial
+          include_tasks: run-tutorial.yaml
+      always:
+        - name: Stop ssh-agent
+          shell:
+            executable: /bin/bash
+            cmd: |
+              {{ ssh_agent.stdout }}
+              ssh-agent -k

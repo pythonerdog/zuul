@@ -1,0 +1,5 @@
+---
+features:
+  - |
+    The :attr:`project.<pipeline>.fail-fast` attribute now also applies to node failures
+    of voting jobs.

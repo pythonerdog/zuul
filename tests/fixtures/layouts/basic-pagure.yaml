@@ -1,0 +1,76 @@
+- pipeline:
+    name: check
+    manager: independent
+    trigger:
+      pagure:
+        - event: pg_pull_request
+          action: comment
+          comment: (?i)^\s*recheck\s*$
+        - event: pg_pull_request
+          action:
+            - opened
+            - changed
+    start:
+      pagure:
+        status: 'pending'
+        comment: True
+    success:
+      pagure:
+        status: 'success'
+        comment: True
+    failure:
+      pagure:
+        status: 'failure'
+        comment: True
+
+- pipeline:
+    name: post
+    post-review: true
+    manager: independent
+    trigger:
+      pagure:
+        - event: pg_push
+          ref: ^refs/heads/.*$
+
+- pipeline:
+    name: tag
+    post-review: true
+    manager: independent
+    trigger:
+      pagure:
+        - event: pg_push
+          ref: ^refs/tags/.*$
+
+- job:
+    name: base
+    parent: null
+    run: playbooks/base.yaml
+
+- job:
+    name: project-test1
+    run: playbooks/project-test1.yaml
+
+- job:
+    name: project-test2
+    run: playbooks/project-test2.yaml
+
+- job:
+    name: project-post-job
+    run: playbooks/project-post.yaml
+
+- job:
+    name: project-tag-job
+    run: playbooks/project-tag.yaml
+
+- project:
+    name: org/project
+    check:
+      jobs:
+        - project-test1
+        - project-test2
+    post:
+      jobs:
+        - project-post-job
+    tag:
+      jobs:
+        - project-tag-job

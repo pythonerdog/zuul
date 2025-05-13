@@ -1,0 +1,11 @@
+---
+upgrade:
+  - |
+    Users upgrading from previous versions of zuul will need to run
+    ``zuul delete-state`` to delete Zuul's ephemeral state from
+    Zookeeper. The ephemeral state produced by older versions of zuul
+    is not compatible with this release. This command should be run while
+    all Zuul services are stopped to prevent writes to the Zookeeper
+    database. More information on this command can be found in the
+    documentation:
+    https://zuul-ci.org/docs/zuul/reference/client.html#delete-state

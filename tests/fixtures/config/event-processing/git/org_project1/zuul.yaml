@@ -1,0 +1,7 @@
+- project:
+    check:
+      jobs:
+        - checkjob
+    tag:
+      jobs:
+        - tagjob

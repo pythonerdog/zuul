@@ -1,0 +1,4 @@
+---
+upgrade:
+  - |
+    Github Enterprise versions older than 2.21 are not supported.

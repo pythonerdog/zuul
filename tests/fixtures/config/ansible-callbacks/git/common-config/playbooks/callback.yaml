@@ -1,0 +1,8 @@
+- hosts: localhost
+  gather_facts: false
+  tasks:
+    - command: echo test
+
+    - name: Echo ansible version.
+      debug:
+        msg: Ansible version={{ ansible_version.major }}.{{ ansible_version.minor }}

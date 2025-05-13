@@ -1,0 +1,6 @@
+---
+features:
+  - |
+    The status pipeline requirements of the Github driver
+    :attr:`pipeline.require.<github source>.status` now also matches
+    on statuses reported via the Github checks API.

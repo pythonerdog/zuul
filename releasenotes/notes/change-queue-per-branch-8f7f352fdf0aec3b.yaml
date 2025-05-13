@@ -1,0 +1,5 @@
+---
+features:
+  - |
+    Projects can now configure change queues to queue per branch.
+    See :attr:`queue` for more information.

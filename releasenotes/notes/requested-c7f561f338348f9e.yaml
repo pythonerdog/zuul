@@ -1,0 +1,8 @@
+---
+deprecations:
+  - |
+    Zuul now correctly handles the ``rerequested`` action on check run trigger
+    definitions (:value:`pipeline.trigger.<github source>.event.check_run`)
+    literally. This has been ``requested`` which doesn't match the GitHub api.
+    The value ``requested`` is now deprecated and will be removed in a later
+    release.

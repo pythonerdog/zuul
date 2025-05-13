@@ -1,0 +1,16 @@
+- tenant:
+    name: tenant-one
+    source:
+      gerrit:
+        config-projects:
+          - common-config
+        untrusted-projects:
+          - org/project1:
+              exclude-branches:
+                - foo
+                - bar
+              # Include branches has higher priority than exclude branches
+              include-branches:
+                - foo
+                - bar
+          - org/project2

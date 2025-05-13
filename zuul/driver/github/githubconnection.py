@@ -1,4 +1,5 @@
 # Copyright 2015 Hewlett-Packard Development Company, L.P.
+# Copyright 2023 Acme Gating, LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may
 # not use this file except in compliance with the License. You may obtain
@@ -13,39 +14,89 @@
 # under the License.
 
 import collections
+import concurrent.futures
 import datetime
 import logging
 import hmac
 import hashlib
-import queue
 import threading
 import time
-import re
 import json
-import traceback
+from collections import OrderedDict, defaultdict
+from collections.abc import Mapping
+from itertools import chain
+from json.decoder import JSONDecodeError
+from typing import Optional
 
 import cherrypy
 import cachecontrol
 from cachecontrol.cache import DictCache
 from cachecontrol.heuristics import BaseHeuristic
-import iso8601
+import cachetools
 import jwt
 import requests
-import voluptuous as v
 import github3
 import github3.exceptions
+import github3.pulls
+from github3.session import AppInstallationTokenAuth
+from opentelemetry import trace
 
-import gear
-
-from zuul.connection import BaseConnection
+from zuul.connection import (
+    BaseConnection,
+    BaseThreadPoolEventConnector,
+    ZKBranchCacheMixin,
+    ZKChangeCacheMixin,
+)
+from zuul.driver.github.graphql import GraphQLClient
+from zuul.lib import tracing
 from zuul.web.handler import BaseWebController
-from zuul.lib.config import get_default
+from zuul.lib.logutil import get_annotated_logger
+from zuul import model
 from zuul.model import Ref, Branch, Tag, Project
 from zuul.exceptions import MergeFailure
 from zuul.driver.github.githubmodel import PullRequest, GithubTriggerEvent
+from zuul.model import DequeueEvent
+from zuul.zk.branch_cache import (BranchCache, BranchFlag, BranchInfo)
+from zuul.zk.change_cache import (
+    AbstractChangeCache,
+    ChangeKey,
+    ConcurrentUpdateError,
+)
+from zuul.zk.components import COMPONENT_REGISTRY
+from zuul.zk.event_queues import ConnectionEventQueue
 
 GITHUB_BASE_URL = 'https://api.github.com'
 PREVIEW_JSON_ACCEPT = 'application/vnd.github.machine-man-preview+json'
+PREVIEW_DRAFT_ACCEPT = 'application/vnd.github.shadow-cat-preview+json'
+PREVIEW_CHECKS_ACCEPT = 'application/vnd.github.antiope-preview+json'
+ALL_MERGE_MODES = [
+    model.MERGER_MERGE,
+    model.MERGER_MERGE_RESOLVE,
+    model.MERGER_MERGE_RECURSIVE,
+    model.MERGER_MERGE_ORT,
+    model.MERGER_SQUASH_MERGE,
+    model.MERGER_REBASE,
+]
+
+# NOTE (felix): Using log levels for file comments / annotations is IMHO more
+# convenient than the values Github expects. Having in mind that those comments
+# most probably come from various linters, "info", "warning" and "error"
+# should be more general terms than "notice", "warning" and "failure".
+ANNOTATION_LEVELS = {
+    "info": "notice",
+    "warning": "warning",
+    "error": "failure",
+}
+# The maximum size for the 'message' field is 64 KB. Since it's unclear
+# from the Github docs if the unit is KiB or KB we'll use KB to be on
+# the safe side.
+ANNOTATION_MAX_MESSAGE_SIZE = 64 * 1000
+
+EventTuple = collections.namedtuple(
+    "EventTuple", [
+        "timestamp", "span_context", "body", "event_type", "delivery"
+    ]
+)
 
 
 def _sign_request(body, secret):
@@ -70,179 +121,376 @@ class UTC(datetime.tzinfo):
 utc = UTC()
 
 
-class GithubGearmanWorker(object):
-    """A thread that answers gearman requests"""
-    log = logging.getLogger("zuul.GithubGearmanWorker")
+class GithubChangeCache(AbstractChangeCache):
+    log = logging.getLogger("zuul.driver.GithubChangeCache")
 
-    def __init__(self, connection):
-        self.config = connection.sched.config
-        self.connection = connection
-        self.thread = threading.Thread(target=self._run,
-                                       name='github-gearman-worker')
-        self._running = False
-        handler = "github:%s:payload" % self.connection.connection_name
-        self.jobs = {
-            handler: self.handle_payload,
-        }
+    CHANGE_TYPE_MAP = {
+        "Ref": Ref,
+        "Tag": Tag,
+        "Branch": Branch,
+        "PullRequest": PullRequest,
+    }
 
-    def _run(self):
-        while self._running:
-            try:
-                job = self.gearman.getJob()
-                try:
-                    if job.name not in self.jobs:
-                        self.log.exception("Exception while running job")
-                        job.sendWorkException(
-                            traceback.format_exc().encode('utf8'))
-                        continue
-                    output = self.jobs[job.name](json.loads(job.arguments))
-                    job.sendWorkComplete(json.dumps(output))
-                except Exception:
-                    self.log.exception("Exception while running job")
-                    job.sendWorkException(
-                        traceback.format_exc().encode('utf8'))
-            except gear.InterruptedError:
-                pass
-            except Exception:
-                self.log.exception("Exception while getting job")
 
-    def handle_payload(self, args):
-        headers = args.get("headers")
-        body = args.get("body")
+class GithubRequestLogger:
 
-        delivery = headers.get('x-github-delivery')
-        self.log.debug("Github Webhook Received: {delivery}".format(
-            delivery=delivery))
+    def __init__(self, zuul_event_id):
+        log = logging.getLogger("zuul.GithubRequest")
+        self.log = get_annotated_logger(log, zuul_event_id)
 
-        # TODO(jlk): Validate project in the request is a project we know
+    def log_request(self, response, *args, **kwargs):
+        fields = OrderedDict()
+        fields['result'] = response.status_code
+        fields['size'] = len(response.content)
+        fields['duration'] = int(response.elapsed.microseconds / 1000)
+        if response.url.endswith('/graphql'):
+            body = json.loads(response.request.body)
+            for key, value in body.get('variables', {}).items():
+                fields[key] = value
+        info = ', '.join(['%s: %s' % (key, value)
+                          for key, value in fields.items()])
+        self.log.debug('%s %s %s',
+                       response.request.method, response.url, info)
 
+
+class GithubRateLimitHandler:
+    """
+    The GithubRateLimitHandler supplies the method handle_response that can be
+    added to the requests session hooks. It will transparently catch API rate
+    limit triggered 403 responses from github and retry the request after the
+    wait time github tells us.
+    """
+
+    def __init__(self, github, log_rate_limit, zuul_event_id):
+        log = logging.getLogger("zuul.GithubRateLimitHandler")
+        self.log = get_annotated_logger(log, zuul_event_id)
+        self.github = github
+        self.rate_limit_logging_enabled = log_rate_limit
+
+    def _log_rate_limit(self, response):
+        if not self.rate_limit_logging_enabled:
+            return
+
+        rate_limit_remaining = response.headers.get('x-ratelimit-remaining')
+        rate_limit_reset = response.headers.get('x-ratelimit-reset')
+
+        # Determine rate limit resource from the path.
+        path = response.request.path_url
+        if path.startswith('/api/v3'):
+            path = path[len('/api/v3'):]
+        if path.startswith('/search/'):
+            rate_limit_resource = 'search'
+        else:
+            rate_limit_resource = 'core'
+
+        # Log the rate limits if enabled.
+        if self.github._zuul_user_id:
+            self.log.debug(
+                'GitHub API rate limit (%s, %s) resource: %s, '
+                'remaining: %s, reset: %s',
+                self.github._zuul_project, self.github._zuul_user_id,
+                rate_limit_resource, rate_limit_remaining, rate_limit_reset)
+        else:
+            self.log.debug(
+                'GitHub API rate limit resource: %s, '
+                'remaining: %s, reset: %s',
+                rate_limit_resource, rate_limit_remaining, rate_limit_reset)
+
+    def _handle_rate_limit(self, response):
+        # We've hit the rate limit so calculate the time we need to wait based
+        # on the x-ratelimit-reset header. After waiting we can retry the
+        # original request and return it to the caller.
+        reset = response.headers.get('x-ratelimit-reset')
+        wait_time = int(reset) - int(time.time()) + 1
+        self.log.warning('API rate limit reached, need to wait for '
+                         '%s seconds', wait_time)
+        time.sleep(wait_time)
+        return self.github.session.send(response.request)
+
+    def _handle_abuse(self, response):
         try:
-            self.__dispatch_event(body, headers)
-            output = {'return_code': 200}
+            retry_after = int(response.headers.get('retry-after'))
         except Exception:
-            output = {'return_code': 503}
-            self.log.exception("Exception handling Github event:")
+            # This should not happen but if it does we cannot handle it.
+            # In this case the caller will need to handle the 403.
+            self.log.error('Missing retry-after header while trying to handle '
+                           'abuse error.')
+            return response
+        self.log.error('We triggered abuse detection, need to wait for '
+                       '%s seconds', retry_after)
+        time.sleep(retry_after + 1)
+        return self.github.session.send(response.request)
 
-        return output
+    def handle_response(self, response, *args, **kwargs):
 
-    def __dispatch_event(self, body, headers):
+        rate_limit = response.headers.get('x-ratelimit-limit')
+
+        if rate_limit:
+            self._log_rate_limit(response)
+
+        # If we got a 403 we could potentially have hit the rate limit. For
+        # any other response we're finished here.
+        if response.status_code != 403:
+            return
+
+        # Decode the body and check if we hit the rate limit.
         try:
-            event = headers['x-github-event']
-            self.log.debug("X-Github-Event: " + event)
-        except KeyError:
-            self.log.debug("Request headers missing the X-Github-Event.")
-            raise Exception('Please specify a X-Github-Event header.')
+            body = json.loads(response.content)
+            message = body.get('message', '')
 
-        delivery = headers.get('x-github-delivery')
-        try:
-            self.connection.addEvent(body, event, delivery)
+            # Catch rate limit and abuse detection responses. Every other 403
+            # needs to be handled by the caller.
+            if message.startswith('API rate limit exceeded'):
+                return self._handle_rate_limit(response)
+            elif message.startswith('You have triggered an abuse detection'):
+                return self._handle_abuse(response)
         except Exception:
-            message = 'Exception deserializing JSON body'
-            self.log.exception(message)
-            # TODO(jlk): Raise this as something different?
-            raise Exception(message)
-
-    def start(self):
-        self._running = True
-        server = self.config.get('gearman', 'server')
-        port = get_default(self.config, 'gearman', 'port', 4730)
-        ssl_key = get_default(self.config, 'gearman', 'ssl_key')
-        ssl_cert = get_default(self.config, 'gearman', 'ssl_cert')
-        ssl_ca = get_default(self.config, 'gearman', 'ssl_ca')
-        self.gearman = gear.TextWorker('Zuul Github Connector')
-        self.log.debug("Connect to gearman")
-        self.gearman.addServer(server, port, ssl_key, ssl_cert, ssl_ca)
-        self.log.debug("Waiting for server")
-        self.gearman.waitForServer()
-        self.log.debug("Registering")
-        for job in self.jobs:
-            self.gearman.registerFunction(job)
-        self.thread.start()
-
-    def stop(self):
-        self._running = False
-        self.gearman.stopWaitingForJobs()
-        # We join here to avoid whitelisting the thread -- if it takes more
-        # than 5s to stop in tests, there's a problem.
-        self.thread.join(timeout=5)
-        self.gearman.shutdown()
+            # If we cannot decode the response body, log it here and return so
+            # the caller can handle the response.
+            self.log.exception("Couldn't json decode the response body.")
 
 
-class GithubEventConnector(threading.Thread):
-    """Move events from GitHub into the scheduler"""
+class GithubRetryHandler:
+    """
+    The GithubRetrHandler supplies the method handle_response that can be added
+    to the requests session hooks. It will transparently handle 5xx errors on
+    GET requests and retry them using an exponential backoff.
+    """
 
-    log = logging.getLogger("zuul.GithubEventConnector")
+    def __init__(self, github, retries, max_delay, zuul_event_id):
+        log = logging.getLogger("zuul.GithubRetryHandler")
+        self.log = get_annotated_logger(log, zuul_event_id)
 
-    def __init__(self, connection):
-        super(GithubEventConnector, self).__init__()
-        self.daemon = True
-        self.connection = connection
-        self._stopped = False
+        self.github = github
+        self.max_retries = retries
+        self.max_delay = max_delay
+        self.initial_delay = 5
 
-    def stop(self):
-        self._stopped = True
-        self.connection.addEvent(None)
+    def handle_response(self, response, *args, **kwargs):
+        # Only handle GET requests that failed with 5xx. Retrying other request
+        # types like POST can be dangerous because we cannot know if they
+        # already might have altered the state on the server side.
+        if response.request.method != 'GET':
+            return
+        if not 500 <= response.status_code < 600:
+            return
 
-    def _handleEvent(self):
-        ts, json_body, event_type, delivery = self.connection.getEvent()
-        if self._stopped:
+        try:
+            data = response.json()
+            errors = data.get('errors', [])
+            for error in errors:
+                resource = error.get('resource')
+                field = error.get('field')
+                code = error.get('code')
+                if (resource == 'PullRequest' and
+                        field == 'diff' and
+                        code == 'not_available'):
+                    # Github responds with 500 if the diff is too large so we
+                    # need to ignore it because retries won't help.
+                    return
+        except JSONDecodeError:
+            # If there is no json just continue with retry handling.
+            pass
+
+        if hasattr(response.request, 'zuul_retry_count'):
+            retry_count = response.request.zuul_retry_count
+            retry_delay = min(response.request.zuul_retry_delay * 2,
+                              self.max_delay)
+        else:
+            retry_count = 0
+            retry_delay = self.initial_delay
+
+        if retry_count >= self.max_retries:
+            # We've reached the max retries so let the caller handle thr 503.
+            self.log.error('GET Request failed with %s (%s/%s retries), '
+                           'won\'t retry again.', response.status_code,
+                           retry_count, self.max_retries)
+            return
+
+        self.log.warning('GET Request failed with %s (%s/%s retries), '
+                         'retrying in %s seconds', response.status_code,
+                         retry_count, self.max_retries, retry_delay)
+        time.sleep(retry_delay)
+
+        # Store retry information in the request object and perform the retry.
+        retry_count += 1
+        response.request.zuul_retry_count = retry_count
+        response.request.zuul_retry_delay = retry_delay
+        return self.github.session.send(response.request)
+
+
+class GithubShaCache(object):
+    def __init__(self):
+        self.projects = {}
+
+    def update(self, project_name, pr):
+        project_cache = self.projects.setdefault(
+            project_name,
+            # Cache up to 4k shas for each project
+            # Note we cache the actual sha for a PR and the
+            # merge_commit_sha so we make this fairly large.
+            cachetools.LRUCache(4096)
+        )
+        sha = pr['head']['sha']
+        number = pr['number']
+        cached_prs = project_cache.setdefault(sha, set())
+        cached_prs.add(number)
+        merge_commit_sha = pr.get('merge_commit_sha')
+        if merge_commit_sha:
+            cached_prs = project_cache.setdefault(merge_commit_sha, set())
+            cached_prs.add(number)
+
+    def get(self, project_name, sha):
+        project_cache = self.projects.get(project_name, {})
+        cached_prs = project_cache.get(sha, set())
+        return cached_prs
+
+
+class GithubEventProcessor(object):
+    tracer = trace.get_tracer("zuul")
+
+    def __init__(self, connector, event_tuple, connection_event):
+        self.connector = connector
+        self.connection = connector.connection
+        (
+            self.ts,
+            span_context,
+            self.body,
+            self.event_type,
+            self.delivery
+        ) = event_tuple
+        self.event_span = tracing.restoreSpanContext(span_context)
+        logger = logging.getLogger("zuul.GithubEventProcessor")
+        self.zuul_event_id = self.delivery
+        self.log = get_annotated_logger(logger, self.zuul_event_id)
+        self.connection_event = connection_event
+        # We typically return a list of one event, but we can return
+        # multiple Zuul events from a single Github event.
+        self.events = []
+        self._dispatch_ts = time.monotonic()
+
+    def run(self):
+        start = time.monotonic()
+        time_to_start = round(start - self._dispatch_ts, 3)
+        self.log.debug("Starting event processing (time-to-start: %s seconds)",
+                       time_to_start)
+        try:
+            attributes = {"rel": "GithubEvent"}
+            link = trace.Link(self.event_span.get_span_context(),
+                              attributes=attributes)
+            with self.tracer.start_as_current_span(
+                    "GithubEventProcessing", links=[link]):
+                self._process_event()
+        except Exception:
+            self.log.exception("Exception when processing event:")
+        finally:
+            duration = round(time.monotonic() - start, 3)
+            self.log.debug("Finished event processing (duration: %s seconds)",
+                           duration)
+        return self.events, self.connection_event
+
+    def _process_event(self):
+        if self.connector._stopped:
             return
 
         # If there's any installation mapping information in the body then
         # update the project mapping before any requests are made.
-        installation_id = json_body.get('installation', {}).get('id')
-        project_name = json_body.get('repository', {}).get('full_name')
+        installation_id = self.body.get('installation', {}).get('id')
+        project_name = self.body.get('repository', {}).get('full_name')
 
         if installation_id and project_name:
-            old_id = self.connection.installation_map.get(project_name)
+            installation_map = \
+                self.connection._github_client_manager.installation_map
+            old_id = installation_map.get(project_name)
 
             if old_id and old_id != installation_id:
                 msg = "Unexpected installation_id change for %s. %d -> %d."
                 self.log.warning(msg, project_name, old_id, installation_id)
 
-            self.connection.installation_map[project_name] = installation_id
+            installation_map[project_name] = installation_id
 
         try:
-            method = getattr(self, '_event_' + event_type)
+            method = getattr(self, '_event_' + self.event_type)
         except AttributeError:
             # TODO(jlk): Gracefully handle event types we don't care about
             # instead of logging an exception.
-            message = "Unhandled X-Github-Event: {0}".format(event_type)
+            message = "Unhandled X-Github-Event: {0}".format(self.event_type)
             self.log.debug(message)
             # Returns empty on unhandled events
             return
 
+        self.log.debug("Handling %s event with installation id %s",
+                       self.event_type, installation_id)
+        events = []
         try:
-            event = method(json_body)
+            events = method()
+            if not events:
+                events = []
+            elif not isinstance(events, list):
+                events = [events]
         except Exception:
+            # NOTE(pabelanger): We should report back to the PR we could
+            # not process the event, to give the user a chance to
+            # retrigger.
             self.log.exception('Exception when handling event:')
-            event = None
 
-        if event:
-            event.delivery = delivery
-            if event.change_number:
+        for event in events:
+            # Note we limit parallel requests per installation id to avoid
+            # triggering abuse detection.
+            lock_start = time.perf_counter()
+            with self.connection.get_request_lock(installation_id):
+                lock_elapsed = int((time.perf_counter() - lock_start) * 1000)
+                event.project_hostname = self.connection.canonical_hostname
+                event.delivery = self.delivery
+                event.zuul_event_id = self.delivery
+                event.timestamp = self.ts
+                self.log.debug("Post-processing event %s, "
+                               "lock wait time for installation id %s: %sms",
+                               event, installation_id, lock_elapsed)
                 project = self.connection.source.getProject(event.project_name)
-                self.connection._getChange(project,
-                                           event.change_number,
-                                           event.patch_number,
-                                           refresh=True)
-            event.project_hostname = self.connection.canonical_hostname
-            self.connection.logEvent(event)
-            self.connection.sched.addEvent(event)
+                change = None
+                if event.change_number:
+                    change_key = self.connection.source.getChangeKey(event)
+                    change = self.connection._getChange(change_key,
+                                                        refresh=True,
+                                                        event=event)
+                    self.log.debug("Refreshed change %s,%s",
+                                   event.change_number, event.patch_number)
 
-    def _event_push(self, body):
-        base_repo = body.get('repository')
+                # If this event references a branch and we're excluding
+                # unprotected branches, we might need to check whether the
+                # branch is now protected.
+                if hasattr(event, "branch") and event.branch:
+                    protected = None
+                    # Only use the `branch_protected` flag if the
+                    # target branch of change and event are the same.
+                    # The base branch could have changed in the
+                    # meantime.
+                    if change and change.branch == event.branch:
+                        # PR based events already have the information if the
+                        # target branch is protected so take the information
+                        # from there.
+                        protected = change.branch_protected
+                    self.connection.checkBranchCache(project.name, event,
+                                                     protected=protected)
+                    self.log.debug("Checked branch cache")
+
+            self.log.debug("Finished post-processing event %s", event)
+        self.events = events
+
+    def _event_push(self):
+        base_repo = self.body.get('repository')
 
         event = GithubTriggerEvent()
+        event.connection_name = self.connection.connection_name
         event.trigger_name = 'github'
         event.project_name = base_repo.get('full_name')
         event.type = 'push'
-        event.branch_updated = True
 
-        event.ref = body.get('ref')
-        event.oldrev = body.get('before')
-        event.newrev = body.get('after')
-        event.commits = body.get('commits')
+        event.ref = self.body.get('ref')
+        event.oldrev = self.body.get('before')
+        event.newrev = self.body.get('after')
+        event.commits = self.body.get('commits')
 
         ref_parts = event.ref.split('/', 2)  # ie, ['refs', 'heads', 'foo/bar']
 
@@ -250,42 +498,16 @@ class GithubEventConnector(threading.Thread):
             # necessary for the scheduler to match against particular branches
             event.branch = ref_parts[2]
 
-        # This checks whether the event created or deleted a branch so
-        # that Zuul may know to perform a reconfiguration on the
-        # project.
-        if event.oldrev == '0' * 40:
-            event.branch_created = True
-        if event.newrev == '0' * 40:
-            event.branch_deleted = True
-
-        if event.branch:
-            if event.branch_deleted:
-                # We currently cannot determine if a deleted branch was
-                # protected so we need to assume it was. GitHub doesn't allow
-                # deletion of protected branches but we don't get a
-                # notification about branch protection settings. Thus we don't
-                # know if branch protection has been disabled before deletion
-                # of the branch.
-                # FIXME(tobiash): Find a way to handle that case
-                event.branch_protected = True
-            elif event.branch_created:
-                # A new branch never can be protected because that needs to be
-                # configured after it has been created.
-                event.branch_protected = False
-            else:
-                # An updated branch can be protected or not so we have to ask
-                # GitHub whether it is.
-                b = self.connection.getBranch(event.project_name, event.branch)
-                event.branch_protected = b.get('protected')
+        self.connection.clearConnectionCacheOnBranchEvent(event)
 
         return event
 
-    def _event_pull_request(self, body):
-        action = body.get('action')
-        pr_body = body.get('pull_request')
+    def _event_pull_request(self):
+        action = self.body.get('action')
+        pr_body = self.body.get('pull_request')
 
         event = self._pull_request_to_event(pr_body)
-        event.account = self._get_sender(body)
+        event.account = self._get_sender(self.body)
 
         event.type = 'pull_request'
         if action == 'opened':
@@ -298,77 +520,267 @@ class GithubEventConnector(threading.Thread):
             event.action = 'reopened'
         elif action == 'labeled':
             event.action = 'labeled'
-            event.label = body['label']['name']
+            event.label = self.body['label']['name']
         elif action == 'unlabeled':
             event.action = 'unlabeled'
-            event.label = body['label']['name']
+            event.label = self.body['label']['name']
         elif action == 'edited':
             event.action = 'edited'
+            if 'body' in self.body.get('changes', {}):
+                event.body_edited = True
         else:
             return None
 
         return event
 
-    def _event_issue_comment(self, body):
+    def _event_issue_comment(self):
         """Handles pull request comments"""
-        action = body.get('action')
+        action = self.body.get('action')
         if action != 'created':
             return
-        if not body.get('issue', {}).get('pull_request'):
+        if not self.body.get('issue', {}).get('pull_request'):
             # Do not process non-PR issue comment
             return
-        pr_body = self._issue_to_pull_request(body)
+        pr_body = self._issue_to_pull_request(self.body)
         if pr_body is None:
             return
 
         event = self._pull_request_to_event(pr_body)
-        event.account = self._get_sender(body)
-        event.comment = body.get('comment').get('body')
+        event.account = self._get_sender(self.body)
+        event.comment = self.body.get('comment').get('body')
         event.type = 'pull_request'
         event.action = 'comment'
         return event
 
-    def _event_pull_request_review(self, body):
+    def _event_pull_request_review(self):
         """Handles pull request reviews"""
-        pr_body = body.get('pull_request')
+        pr_body = self.body.get('pull_request')
         if pr_body is None:
             return
 
-        review = body.get('review')
+        review = self.body.get('review')
         if review is None:
             return
 
         event = self._pull_request_to_event(pr_body)
         event.state = review.get('state')
-        event.account = self._get_sender(body)
+        event.account = self._get_sender(self.body)
         event.type = 'pull_request_review'
-        event.action = body.get('action')
+        event.action = self.body.get('action')
         return event
 
-    def _event_status(self, body):
-        action = body.get('action')
+    def _event_status(self):
+        action = self.body.get('action')
         if action == 'pending':
             return
-        project = body.get('name')
-        pr_body = self.connection.getPullBySha(body['sha'], project)
+        project = self.body.get('name')
+        pr_body = self.connection.getPullBySha(
+            self.body['sha'], project, self.zuul_event_id)
         if pr_body is None:
             return
 
         event = self._pull_request_to_event(pr_body)
-        event.account = self._get_sender(body)
+        event.account = self._get_sender(self.body)
         event.type = 'pull_request'
         event.action = 'status'
         # Github API is silly. Webhook blob sets author data in
         # 'sender', but API call to get status puts it in 'creator'.
         # Duplicate the data so our code can look in one place
-        body['creator'] = body['sender']
-        event.status = "%s:%s:%s" % _status_as_tuple(body)
+        self.body['creator'] = self.body['sender']
+        event.status = "%s:%s:%s" % _status_as_tuple(self.body)
+        return event
+
+    def _event_check_run(self):
+        """Handles check_run requests.
+
+        This maps to the "Re-run" action on a check run and the "Re-run failed
+        checks" on a check suite in Github.
+
+        This event should be handled similar to a PR commnent or a push.
+        """
+        action = self.body.get("action")
+
+        # NOTE (felix): We could also handle "requested" events here, which are
+        # sent by Github whenever a change is pushed. But as we are already
+        # listening to push events, this would result in two trigger events
+        # for the same Github event.
+        if action not in ["rerequested", "completed", "requested_action"]:
+            return
+
+        # The head_sha identifies the commit the check_run is requested for
+        # (similar to Github's status API).
+        check_run = self.body.get("check_run")
+        if not check_run:
+            # This shouldn't happen but in case something went wrong it should
+            # also not cause an exception in the event handling
+            return
+
+        project = self.body.get("repository", {}).get("full_name")
+        head_sha = check_run.get("head_sha")
+
+        # Zuul will only accept Github changes that are part of a PR, thus we
+        # must look up the PR first.
+        pr_body = self.connection.getPullBySha(
+            head_sha, project, self.zuul_event_id)
+        if pr_body is None:
+            self.log.debug(
+                "Could not find appropriate PR for SHA %s. "
+                "Skipping check_run event",
+                head_sha
+            )
+            return
+
+        # In case a "requested_action" event was triggered, we must first
+        # evaluate the contained action (identifier), to build the right
+        # event that will e.g. abort/dequeue a buildset.
+        if action == "requested_action":
+            # Look up the action's identifier from the payload
+            identifier = self.body.get("requested_action", {}).get(
+                "identifier"
+            )
+
+            # currently we only support "abort" identifier
+            if identifier != "abort":
+                return
+
+            # In case of an abort (which is currently the only supported
+            # action), we will build a dequeue event and return this rather
+            # than a trigger event.
+            return self._check_run_action_to_event(check_run, project)
+
+        # If no requested_action was supplied, we build a trigger event for the
+        # check run request
+        event = self._pull_request_to_event(pr_body)
+        event.type = "check_run"
+
+        event.action = action
+
+        check_run_tuple = "%s:%s:%s" % _check_as_tuple(check_run)
+        event.check_run = check_run_tuple
+        return event
+
+    def _event_branch_protection_rule(self):
+        # This method can return any number of events depending on
+        # which branches changed their protection status.
+        project_name = self.body.get('repository').get('full_name')
+        project = self.connection.source.getProject(project_name)
+
+        # Save all protected branches
+        cached_branches = self.connection._branch_cache.getProjectBranches(
+            project_name, BranchFlag.PROTECTED, default=None)
+
+        if cached_branches is None:
+            raise RuntimeError(f"No branches for project {project_name}")
+        else:
+            cached_branches = [b.name for b in cached_branches
+                               if b.protected is True]
+        old_protected_branches = set(cached_branches)
+
+        # Update the project banches
+        self.log.debug('Updating branches for %s after '
+                       'branch protection rule "%s" was %s',
+                       project,
+                       self.body.get('rule').get('name'),
+                       self.body.get('action'))
+        self.connection.updateProjectBranches(project)
+
+        # Get all protected branches
+        new_protected_branches =\
+            self.connection._branch_cache.getProjectBranches(
+                project_name, BranchFlag.PROTECTED)
+        new_protected_branches = set(
+            [b.name for b in new_protected_branches if b.protected is True])
+
+        newly_protected = new_protected_branches - old_protected_branches
+        newly_unprotected = old_protected_branches - new_protected_branches
+        # Emit events for changed branches
+
+        events = []
+        for branch in newly_protected:
+            self.log.debug("Generating synthetic event for newly "
+                           "protected branch %s in %s",
+                           branch, project_name)
+            events.append(
+                self._branch_protection_rule_to_event(project_name, branch))
+        for branch in newly_unprotected:
+            self.log.debug("Generating synthetic event for newly "
+                           "unprotected branch %s in %s",
+                           branch, project_name)
+            events.append(
+                self._branch_protection_rule_to_event(project_name, branch))
+
+        for event in events:
+            # Make sure every event has a branch cache ltime
+            self.connection.clearConnectionCacheOnBranchEvent(event)
+
+        return events
+
+    def _event_repository(self):
+        project_name = self.body['repository']['full_name']
+        project = self.connection.source.getProject(project_name)
+
+        events = []
+        if self.body.get('action') == 'edited':
+            if 'default_branch' in self.body.get('changes', {}):
+                default_branch = self.body['repository']['default_branch']
+                self.log.debug('Updating default branch for %s to %s',
+                               project, default_branch)
+                self.connection._branch_cache.setProjectDefaultBranch(
+                    project.name, default_branch)
+                event = self._repository_to_event(project_name, default_branch)
+                event.action = 'edited'
+                events.append(event)
+        return events
+
+    def _repository_to_event(self, project_name, branch):
+        event = GithubTriggerEvent()
+        event.connection_name = self.connection.connection_name
+        event.trigger_name = 'github'
+        event.project_name = project_name
+        event.default_branch_changed = True
+        event.type = 'repository'
+
+        event.ref = f'refs/heads/{branch}'
+        event.branch = branch
+        return event
+
+    def _branch_protection_rule_to_event(self, project_name, branch):
+        event = GithubTriggerEvent()
+        event.connection_name = self.connection.connection_name
+        event.trigger_name = 'github'
+        event.project_name = project_name
+        event.branch_protection_changed = True
+        event.type = 'branch_protection_rule'
+
+        event.ref = f'refs/heads/{branch}'
+        event.branch = branch
+        return event
+
+    def _check_run_action_to_event(self, check_run, project):
+        # Extract necessary values from the check's external id to dequeue
+        # the corresponding change in Zuul
+        dequeue_attrs = json.loads(check_run["external_id"])
+        # The dequeue operations needs the change in format
+        # <pr_number>,<commit_sha>
+        change = "{},{}".format(dequeue_attrs["change"], check_run["head_sha"])
+
+        # Instead of a trigger event, we directly dequeue the change by calling
+        # the appropriate method on the scheduler.
+        event = DequeueEvent(
+            dequeue_attrs["tenant"],
+            dequeue_attrs["pipeline"],
+            self.connection.canonical_hostname,
+            project,
+            change,
+            ref=None
+        )
         return event
 
     def _issue_to_pull_request(self, body):
         number = body.get('issue').get('number')
         project_name = body.get('repository').get('full_name')
-        pr_body = self.connection.getPull(project_name, number)
+        pr_body, pr_obj = self.connection.getPull(
+            project_name, number, self.zuul_event_id)
         if pr_body is None:
             self.log.debug('Pull request #%s not found in project %s' %
                            (number, project_name))
@@ -376,6 +788,7 @@ class GithubEventConnector(threading.Thread):
 
     def _pull_request_to_event(self, pr_body):
         event = GithubTriggerEvent()
+        event.connection_name = self.connection.connection_name
         event.trigger_name = 'github'
 
         base = pr_body.get('base')
@@ -396,32 +809,40 @@ class GithubEventConnector(threading.Thread):
         return event
 
     def _get_sender(self, body):
-        login = body.get('sender').get('login')
-        if login:
-            # TODO(tobiash): it might be better to plumb in the installation id
-            project = body.get('repository', {}).get('full_name')
-            return self.connection.getUser(login, project)
-
-    def run(self):
-        while True:
-            if self._stopped:
-                return
-            try:
-                self._handleEvent()
-            except Exception:
-                self.log.exception("Exception moving GitHub event:")
-            finally:
-                self.connection.eventDone()
+        return body.get('sender').get('login')
 
 
-class GithubUser(collections.Mapping):
+class GithubEventConnector(BaseThreadPoolEventConnector):
+    """Move events from GitHub into the scheduler"""
+
+    log = logging.getLogger("zuul.GithubEventConnector")
+
+    def _getEventProcessor(self, event):
+        etuple = self._eventAsTuple(event)
+        log = get_annotated_logger(self.log, etuple.delivery)
+        log.debug("Github Webhook Received")
+        log.debug("X-Github-Event: %s", etuple.event_type)
+        return GithubEventProcessor(self, etuple, event).run
+
+    @staticmethod
+    def _eventAsTuple(event):
+        span_context = event.get("span_context")
+        body = event.get("body")
+        headers = event.get("headers", {})
+        event_type = headers.get('x-github-event')
+        delivery = headers.get('x-github-delivery')
+        return EventTuple(
+            time.time(), span_context, body, event_type, delivery)
+
+
+class GithubUser(Mapping):
     log = logging.getLogger('zuul.GithubUser')
 
-    def __init__(self, username, connection, project):
+    def __init__(self, username, connection, project_name):
         self._connection = connection
         self._username = username
         self._data = None
-        self._project = project
+        self._project_name = project_name
 
     def __getitem__(self, key):
         self._init_data()
@@ -437,38 +858,31 @@ class GithubUser(collections.Mapping):
 
     def _init_data(self):
         if self._data is None:
-            github = self._connection.getGithubClient(self._project)
+            github = self._connection.getGithubClient(self._project_name)
             user = github.user(self._username)
             self.log.debug("Initialized data for user %s", self._username)
-            log_rate_limit(self.log, github)
             self._data = {
                 'username': user.login,
                 'name': user.name,
-                'email': user.email
+                'email': user.email,
+                'html_url': user.html_url,
             }
 
 
-class GithubConnection(BaseConnection):
-    driver_name = 'github'
-    log = logging.getLogger("zuul.GithubConnection")
-    payload_path = 'payload'
+class GithubClientManager:
+    log = logging.getLogger('zuul.GithubConnection.GithubClientManager')
+    github_class = github3.GitHub
+    github_enterprise_class = github3.GitHubEnterprise
 
-    def __init__(self, driver, connection_name, connection_config):
-        super(GithubConnection, self).__init__(
-            driver, connection_name, connection_config)
-        self._change_cache = {}
-        self._project_branch_cache = {}
-        self.projects = {}
-        self.git_ssh_key = self.connection_config.get('sshkey')
+    def __init__(self, connection_config):
+        self.connection_config = connection_config
         self.server = self.connection_config.get('server', 'github.com')
-        self.canonical_hostname = self.connection_config.get(
-            'canonical_hostname', self.server)
-        self.source = driver.getSource(self)
-        self.event_queue = queue.Queue()
 
         if self.server == 'github.com':
+            self.api_base_url = GITHUB_BASE_URL
             self.base_url = GITHUB_BASE_URL
         else:
+            self.api_base_url = 'https://%s/api' % self.server
             self.base_url = 'https://%s/api/v3' % self.server
 
         # ssl verification must default to true
@@ -476,14 +890,6 @@ class GithubConnection(BaseConnection):
         self.verify_ssl = True
         if verify_ssl.lower() == 'false':
             self.verify_ssl = False
-
-        self._github = None
-        self.app_id = None
-        self.app_key = None
-        self.sched = None
-
-        self.installation_map = {}
-        self.installation_token_cache = {}
 
         # NOTE(jamielennox): Better here would be to cache to memcache or file
         # or something external - but zuul already sucks at restarting so in
@@ -504,77 +910,50 @@ class GithubConnection(BaseConnection):
                 if 'cache-control' in response.headers:
                     del response.headers['cache-control']
 
+        self._cache = DictCache()
         self.cache_adapter = cachecontrol.CacheControlAdapter(
-            DictCache(),
+            self._cache,
             cache_etags=True,
             heuristic=NoAgeHeuristic())
 
-        # The regex is based on the connection host. We do not yet support
-        # cross-connection dependency gathering
-        self.depends_on_re = re.compile(
-            r"^Depends-On: https://%s/.+/.+/pull/[0-9]+$" % self.server,
-            re.MULTILINE | re.IGNORECASE)
+        # Logging of rate limit is optional as this does additional requests
+        rate_limit_logging = self.connection_config.get(
+            'rate_limit_logging', 'true')
+        self._log_rate_limit = True
+        if rate_limit_logging.lower() == 'false':
+            self._log_rate_limit = False
 
-    def onLoad(self):
-        self.log.info('Starting GitHub connection: %s' % self.connection_name)
-        self.gearman_worker = GithubGearmanWorker(self)
+        self.app_id = None
+        self.app_key = None
+        self._initialized = False
+
+        self._installation_map_lock = threading.Lock()
+        self.installation_map = {}
+        self.installation_token_cache = {}
+
+        # The version of github enterprise stays None for github.com
+        self._github_version = None
+
+    def initialize(self):
         self.log.info('Authing to GitHub')
         self._authenticateGithubAPI()
         self._prime_installation_map()
-        self.log.info('Starting event connector')
-        self._start_event_connector()
-        self.log.info('Starting GearmanWorker')
-        self.gearman_worker.start()
+        self._initialized = True
 
-    def onStop(self):
-        # TODO(jeblair): remove this check which is here only so that
-        # zuul-web can call connections.stop to shut down the sql
-        # connection.
-        if hasattr(self, 'gearman_worker'):
-            self.gearman_worker.stop()
-            self._stop_event_connector()
+    @property
+    def initialized(self):
+        return self._initialized
 
-    def _start_event_connector(self):
-        self.github_event_connector = GithubEventConnector(self)
-        self.github_event_connector.start()
-
-    def _stop_event_connector(self):
-        if self.github_event_connector:
-            self.github_event_connector.stop()
-            self.github_event_connector.join()
-
-    def _createGithubClient(self):
-        if self.server != 'github.com':
-            url = 'https://%s/' % self.server
-            if not self.verify_ssl:
-                # disabling ssl verification is evil so emit a warning
-                self.log.warning("SSL verification disabled for "
-                                 "GitHub Enterprise")
-            github = github3.GitHubEnterprise(url, verify=self.verify_ssl)
-        else:
-            github = github3.GitHub()
-
-        # anything going through requests to http/s goes through cache
-        github.session.mount('http://', self.cache_adapter)
-        github.session.mount('https://', self.cache_adapter)
-        # Add properties to store project and user for logging later
-        github._zuul_project = None
-        github._zuul_user_id = None
-        return github
+    @property
+    def usesAppAuthentication(self):
+        return True if self.app_id else False
 
     def _authenticateGithubAPI(self):
         config = self.connection_config
 
-        api_token = config.get('api_token')
-
         app_id = config.get('app_id')
         app_key = None
         app_key_file = config.get('app_key')
-
-        self._github = self._createGithubClient()
-
-        if api_token:
-            self._github.login(token=api_token)
 
         if app_key_file:
             try:
@@ -589,13 +968,57 @@ class GithubConnection(BaseConnection):
             self.log.warning("You must provide an app_id and "
                              "app_key to use installation based "
                              "authentication")
-
             return
 
         if app_id:
             self.app_id = int(app_id)
         if app_key:
             self.app_key = app_key
+
+    def _createGithubClient(self, zuul_event_id=None):
+        session = github3.session.GitHubSession(default_read_timeout=300)
+
+        if self.server != 'github.com':
+            url = 'https://%s/' % self.server
+            if not self.verify_ssl:
+                # disabling ssl verification is evil so emit a warning
+                self.log.warning("SSL verification disabled for "
+                                 "GitHub Enterprise")
+            github = self.github_enterprise_class(
+                url, session=session, verify=self.verify_ssl)
+            if not self._github_version:
+                version = github.meta().get('installed_version')
+                self._github_version = tuple(
+                    [int(v) for v in version.split('.', 2)])
+        else:
+            github = self.github_class(session=session)
+
+        # Attach a version number to the github client so we can support per
+        # version features.
+        github.version = self._github_version
+
+        # anything going through requests to http/s goes through cache
+        github.session.mount('http://', self.cache_adapter)
+        github.session.mount('https://', self.cache_adapter)
+
+        # Log all requests with attached event id
+        request_logger = GithubRequestLogger(zuul_event_id)
+        github.session.hooks['response'].append(request_logger.log_request)
+
+        # Install hook for handling rate limit errors transparently
+        rate_limit_handler = GithubRateLimitHandler(
+            github, self._log_rate_limit, zuul_event_id)
+        github.session.hooks['response'].append(
+            rate_limit_handler.handle_response)
+
+        # Install hook for handling retries of GET requests transparently
+        retry_handler = GithubRetryHandler(github, 5, 30, zuul_event_id)
+        github.session.hooks['response'].append(retry_handler.handle_response)
+
+        # Add properties to store project and user for logging later
+        github._zuul_project = None
+        github._zuul_user_id = None
+        return github
 
     def _get_app_auth_headers(self):
         now = datetime.datetime.now(utc)
@@ -604,56 +1027,76 @@ class GithubConnection(BaseConnection):
         data = {'iat': now, 'exp': expiry, 'iss': self.app_id}
         app_token = jwt.encode(data,
                                self.app_key,
-                               algorithm='RS256').decode('utf-8')
+                               algorithm='RS256')
 
         headers = {'Accept': PREVIEW_JSON_ACCEPT,
                    'Authorization': 'Bearer %s' % app_token}
 
         return headers
 
-    def _get_installation_key(self, project, user_id=None, inst_id=None,
-                              reprime=False):
+    def get_installation_key(self, project_name, inst_id=None,
+                             reprime=True):
         installation_id = inst_id
-        if project is not None:
-            installation_id = self.installation_map.get(project)
+        if project_name is not None:
+            installation_id = self.installation_map.get(project_name)
 
         if not installation_id:
             if reprime:
                 # prime installation map and try again without refreshing
                 self._prime_installation_map()
-                return self._get_installation_key(project,
-                                                  user_id=user_id,
-                                                  inst_id=inst_id,
-                                                  reprime=False)
+                return self.get_installation_key(project_name,
+                                                 inst_id=inst_id,
+                                                 reprime=False)
 
-            self.log.error("No installation ID available for project %s",
-                           project)
+            if self.connection_config.get('api_token'):
+                log_severity = self.log.info
+            else:
+                log_severity = self.log.error
+            log_severity("No installation ID available for project %s",
+                         project_name)
             return ''
 
-        now = datetime.datetime.now(utc)
+        # Consider tokens outdated 5min before the actual expiry time
+        cutoff_time = datetime.datetime.now(utc) + datetime.timedelta(
+            minutes=5)
         token, expiry = self.installation_token_cache.get(installation_id,
                                                           (None, None))
 
-        if ((not expiry) or (not token) or (now >= expiry)):
+        if ((not expiry) or (not token) or (expiry < cutoff_time)):
             headers = self._get_app_auth_headers()
 
-            url = "%s/installations/%s/access_tokens" % (self.base_url,
-                                                         installation_id)
+            url = "%s/app/installations/%s/access_tokens" % (
+                self.base_url, installation_id)
 
-            json_data = {'user_id': user_id} if user_id else None
-
-            response = requests.post(url, headers=headers, json=json_data)
+            github = self._createGithubClient()
+            response = github.session.post(url, headers=headers, json=None)
             response.raise_for_status()
 
             data = response.json()
 
-            expiry = iso8601.parse_date(data['expires_at'])
-            expiry -= datetime.timedelta(minutes=2)
+            expiry = datetime.datetime.fromisoformat(data['expires_at'])
             token = data['token']
 
             self.installation_token_cache[installation_id] = (token, expiry)
 
         return token
+
+    def _get_repos_of_installation(self, inst_id, headers):
+        url = '%s/installation/repositories?per_page=100' % self.base_url
+        project_names = []
+        while url:
+            self.log.debug("Fetching repos for install %s" % inst_id)
+            response = requests.get(url, headers=headers)
+            response.raise_for_status()
+            repos = response.json()
+
+            for repo in repos.get('repositories'):
+                project_name = repo.get('full_name')
+                project_names.append(project_name)
+
+            # check if we need to do further paged calls
+            url = response.links.get('next', {}).get('url')
+        return project_names
 
     def _prime_installation_map(self):
         """Walks each app install for the repos to prime install IDs"""
@@ -661,125 +1104,391 @@ class GithubConnection(BaseConnection):
         if not self.app_id:
             return
 
-        url = '%s/app/installations' % self.base_url
-        installations = []
-        headers = self._get_app_auth_headers()
-        page = 1
-        while url:
-            self.log.debug("Fetching installations for GitHub app "
-                           "(page %s)" % page)
-            page += 1
-            response = requests.get(url, headers=headers)
-            response.raise_for_status()
-            installations.extend(response.json())
+        if self._installation_map_lock.acquire(blocking=False):
+            try:
+                url = '%s/app/installations' % self.base_url
+                installations = []
+                headers = self._get_app_auth_headers()
+                page = 1
+                while url:
+                    self.log.debug("Fetching installations for GitHub app "
+                                   "(page %s)" % page)
+                    page += 1
+                    response = requests.get(url, headers=headers)
+                    response.raise_for_status()
+                    for i in response.json():
+                        # admins can hit "suspend app" which populates
+                        # this in the app response.  A suspended app
+                        # will just get back 400 "This installation
+                        # has been suspended" responses.
+                        if i.get('suspended_at'):
+                            self.log.info("Skipping GitHub installation %s due"
+                                          " to admin suspension (by %s @ %s)" %
+                                          (i['id'], i['suspended_by']['login'],
+                                           i['suspended_at']))
+                        else:
+                            installations.append(i)
 
-            # check if we need to do further paged calls
-            url = response.links.get(
-                'next', {}).get('url')
+                    # check if we need to do further paged calls
+                    url = response.links.get(
+                        'next', {}).get('url')
 
-        for install in installations:
-            inst_id = install.get('id')
-            token = self._get_installation_key(
-                project=None, inst_id=inst_id)
-            headers = {'Accept': PREVIEW_JSON_ACCEPT,
-                       'Authorization': 'token %s' % token}
+                headers_per_inst = {}
+                with concurrent.futures.ThreadPoolExecutor() as executor:
 
-            url = '%s/installation/repositories?per_page=100' % self.base_url
-            while url:
-                self.log.debug("Fetching repos for install %s" % inst_id)
-                response = requests.get(url, headers=headers)
-                response.raise_for_status()
-                repos = response.json()
+                    token_by_inst = {}
+                    for install in installations:
+                        inst_id = install.get('id')
+                        token_by_inst[inst_id] = executor.submit(
+                            self.get_installation_key, project_name=None,
+                            inst_id=inst_id)
 
-                for repo in repos.get('repositories'):
-                    project_name = repo.get('full_name')
-                    self.installation_map[project_name] = inst_id
+                    for inst_id, result in token_by_inst.items():
+                        token = result.result()
+                        headers_per_inst[inst_id] = {
+                            'Accept': PREVIEW_JSON_ACCEPT,
+                            'Authorization': 'token %s' % token
+                        }
 
-                # check if we need to do further paged calls
-                url = response.links.get('next', {}).get('url')
+                    project_names_by_inst = {}
+                    for install in installations:
+                        inst_id = install.get('id')
+                        headers = headers_per_inst[inst_id]
 
-    def addEvent(self, data, event=None, delivery=None):
-        return self.event_queue.put((time.time(), data, event, delivery))
+                        project_names_by_inst[inst_id] = executor.submit(
+                            self._get_repos_of_installation, inst_id, headers)
 
-    def getEvent(self):
-        return self.event_queue.get()
+                    for inst_id, result in project_names_by_inst.items():
+                        project_names = result.result()
+                        for project_name in project_names:
+                            self.installation_map[project_name] = inst_id
+            finally:
+                self._installation_map_lock.release()
+        else:
+            self.log.debug(
+                'Already fetching installations, waiting to finish.')
+            with self._installation_map_lock:
+                self.log.debug('Finished waiting for fetching installations')
 
-    def eventDone(self):
-        self.event_queue.task_done()
+    def getGithubClientsForProjects(self, projects):
+        # Get a list of projects with unique installation ids
+        installation_ids = set()
+        installation_projects = set()
+
+        for project in projects:
+            installation_id = self.installation_map.get(project.name)
+            if installation_id not in installation_ids:
+                installation_ids.add(installation_id)
+                installation_projects.add(project.name)
+
+        clients = [self.getGithubClient(project_name)
+                   for project_name in installation_projects]
+        return clients
 
     def getGithubClient(self,
-                        project=None,
-                        user_id=None):
+                        project_name=None,
+                        zuul_event_id=None):
+        github = self._createGithubClient(zuul_event_id)
+        token = ''
+
         # if you're authenticating for a project and you're an integration then
         # you need to use the installation specific token.
-        if project and self.app_id:
-            github = self._createGithubClient()
-            github.login(token=self._get_installation_key(project, user_id))
-            github._zuul_project = project
-            github._zuul_user_id = user_id
-            return github
+        if project_name and self.app_id:
+            # Call get_installation_key to ensure the token gets refresehd in
+            # case it's expired.
+            token = self.get_installation_key(project_name)
 
-        # if we're using api_key authentication then this is already token
-        # authenticated, if not then anonymous is the best we have.
-        return self._github
+            # Only set the auth header if we have a token. If not,
+            # falls back to the api_token specified below
+            if token:
+                # To set the AppInstallationAuthToken on the github session, we
+                # also need the expiry date, but in the correct ISO format.
+                installation_id = self.installation_map.get(project_name)
+                _, expiry = self.installation_token_cache.get(installation_id)
+                format_expiry = datetime.datetime.strftime(
+                    expiry, "%Y-%m-%dT%H:%M:%SZ"
+                )
 
-    def maintainCache(self, relevant):
-        remove = set()
-        for key, change in self._change_cache.items():
-            if change not in relevant:
-                remove.add(key)
-        for key in remove:
-            del self._change_cache[key]
+                # Usually one should use github.login_as_app_installation() to
+                # authenticate as github app. This method will then request the
+                # access token for the installation or refresh it if necessary
+                # and set the correct class on the github.session.auth
+                # attribute to be identified as github app. As we are already
+                # managing the installation tokens by ourselves, we just have
+                # to set the correct TokenAuth class on the github.session.auth
+                # attribute.
+                github.session.auth = AppInstallationTokenAuth(
+                    token, format_expiry
+                )
+                github._zuul_project = project_name
+                github._zuul_user_id = self.installation_map.get(project_name)
 
-    def getChange(self, event, refresh=False):
-        """Get the change representing an event."""
+        # If we have an api_token then we may be using webhooks or are in an
+        # application setup where the application isn't applied to the project.
+        if not token:
+            # Fall back to using the API token
+            api_token = self.connection_config.get('api_token')
+            if api_token:
+                github.login(token=api_token)
+            # If we have no API token we fallback further to anonymous access
+            # which is limited but the best we can do for now.
 
-        project = self.source.getProject(event.project_name)
-        if event.change_number:
-            change = self._getChange(project, event.change_number,
-                                     event.patch_number, refresh=refresh)
-            change.url = event.change_url
-            change.uris = [
-                '%s/%s/pull/%s' % (self.server, project, change.number),
-            ]
-            change.source_event = event
-            change.is_current_patchset = (change.pr.get('head').get('sha') ==
-                                          event.patch_number)
-        else:
-            if event.ref and event.ref.startswith('refs/tags/'):
-                change = Tag(project)
-                change.tag = event.ref[len('refs/tags/'):]
-            elif event.ref and event.ref.startswith('refs/heads/'):
-                change = Branch(project)
-                change.branch = event.ref[len('refs/heads/'):]
+        return github
+
+
+class GithubConnection(ZKChangeCacheMixin, ZKBranchCacheMixin, BaseConnection):
+    driver_name = 'github'
+    log = logging.getLogger("zuul.GithubConnection")
+    payload_path = 'payload'
+    client_manager_class = GithubClientManager
+    _event_connector_class = GithubEventConnector
+
+    def __init__(self, driver, connection_name, connection_config):
+        super(GithubConnection, self).__init__(driver, connection_name,
+                                               connection_config)
+        self._change_update_lock = {}
+        self.projects = {}
+        self.git_ssh_key = self.connection_config.get('sshkey')
+        self.server = self.connection_config.get('server', 'github.com')
+        self.canonical_hostname = self.connection_config.get(
+            'canonical_hostname', self.server)
+        self.repo_cache = self.connection_config.get('repo_cache')
+        if self.git_ssh_key and self.repo_cache:
+            self.log.warning("Both sshkey and repo_cache specified "
+                             "but are incompatible; "
+                             "repo_cache will be ignored")
+            self.repo_cache = None
+        if self.repo_cache:
+            rrt = self.connection_config.get('repo_retry_timeout')
+            if rrt:
+                self.repo_retry_timeout = int(rrt)
             else:
-                change = Ref(project)
-            change.ref = event.ref
-            change.oldrev = event.oldrev
-            change.newrev = event.newrev
-            change.url = self.getGitwebUrl(project, sha=event.newrev)
-            change.source_event = event
-            if hasattr(event, 'commits'):
-                change.files = self.getPushedFileNames(event)
-        return change
+                self.repo_retry_timeout = None
+        else:
+            self.repo_retry_timeout = None
 
-    def _getChange(self, project, number, patchset=None, refresh=False):
-        key = (project.name, number, patchset)
-        change = self._change_cache.get(key)
+        self.source = driver.getSource(self)
+        self._sha_pr_cache = GithubShaCache()
+
+        self._request_locks = {}
+        self.max_threads_per_installation = int(self.connection_config.get(
+            'max_threads_per_installation', 1))
+
+        self._github_client_manager = self.client_manager_class(
+            self.connection_config)
+
+        self.sched = None
+
+        self.graphql_client = GraphQLClient(
+            '%s/graphql' % self._github_client_manager.api_base_url)
+
+    def toDict(self):
+        d = super().toDict()
+        d.update({
+            "baseurl": self._github_client_manager.base_url,
+            "canonical_hostname": self.canonical_hostname,
+            "server": self.server,
+            "repo_cache": self.repo_cache,
+        })
+        return d
+
+    def onLoad(self, zk_client, component_registry):
+        self.log.info('Starting GitHub connection: %s', self.connection_name)
+        self._github_client_manager.initialize()
+
+        # Set the project branch cache to read only if no scheduler is
+        # provided to prevent fetching the branches from the connection.
+        self.read_only = not self.sched
+
+        self.log.debug('Creating Zookeeper branch cache')
+        self._branch_cache = BranchCache(zk_client, self, component_registry)
+
+        self.log.debug('Creating Zookeeper event queue')
+        self.event_queue = ConnectionEventQueue(
+            zk_client, self.connection_name
+        )
+
+        # If the connection was not loaded by a scheduler, but by e.g.
+        # zuul-web, we want to stop here.
+        if not self.sched:
+            return
+
+        self.log.debug('Creating Zookeeper change cache')
+        self._change_cache = GithubChangeCache(zk_client, self)
+
+        self.log.info('Starting event connector')
+        self._start_event_connector()
+
+    def onStop(self):
+        # TODO(jeblair): remove this check which is here only so that
+        # zuul-web can call connections.stop to shut down the sql
+        # connection.
+        if hasattr(self, 'github_event_connector'):
+            self._stop_event_connector()
+        if self._change_cache:
+            self._change_cache.stop()
+
+    def _start_event_connector(self):
+        self.github_event_connector = self._event_connector_class(self)
+        self.github_event_connector.start()
+
+    def _stop_event_connector(self):
+        if self.github_event_connector:
+            self.github_event_connector.stop()
+
+    @staticmethod
+    def _append_accept_header(github, value):
+        old_header = github.session.headers.get('Accept', None)
+        if old_header:
+            new_value = '%s,%s' % (old_header, value)
+        else:
+            new_value = value
+        github.session.headers['Accept'] = new_value
+
+    def get_request_lock(self, installation_id):
+        return self._request_locks.setdefault(
+            installation_id, threading.Semaphore(
+                value=self.max_threads_per_installation))
+
+    def getGithubClient(self,
+                        project_name=None,
+                        zuul_event_id=None):
+
+        # if app_id is configured but self.app_id is empty we are not
+        # authenticated yet against github as app
+        if not self._github_client_manager.initialized:
+            self._github_client_manager.initialize()
+
+        return self._github_client_manager.getGithubClient(
+            project_name=project_name, zuul_event_id=zuul_event_id)
+
+    def getChange(self, change_key, refresh=False, event=None):
+        if change_key.connection_name != self.connection_name:
+            return None
+        if change_key.change_type == 'PullRequest':
+            return self._getChange(change_key, refresh=refresh, event=event)
+        elif change_key.change_type == 'Tag':
+            return self._getTag(change_key, refresh=refresh, event=event)
+        elif change_key.change_type == 'Branch':
+            return self._getBranch(change_key, refresh=refresh, event=event)
+        elif change_key.change_type == 'Ref':
+            return self._getRef(change_key, refresh=refresh, event=event)
+
+    def _getChange(self, change_key, refresh=False, event=None):
+        # Note(tobiash): We force the pull request number to int centrally here
+        # because it can originate from different sources (github event, manual
+        # enqueue event) where some might just parse the string and forward it.
+        number = int(change_key.stable_id)
+        change = self._change_cache.get(change_key)
         if change and not refresh:
             return change
+        project = self.source.getProject(change_key.project_name)
         if not change:
             change = PullRequest(project.name)
             change.project = project
             change.number = number
-            change.patchset = patchset
-        self._change_cache[key] = change
+            change.patchset = change_key.revision
+
+        # This can be called multi-threaded during github event
+        # preprocessing. In order to avoid data races perform locking
+        # by cached key. Try to acquire the lock non-blocking at first.
+        # If the lock is already taken we're currently updating the very
+        # same chnange right now and would likely get the same data again.
+        lock = self._change_update_lock.setdefault(change_key,
+                                                   threading.Lock())
+        if lock.acquire(blocking=False):
+            try:
+                pull = self.getPull(change.project.name, change.number,
+                                    event=event)
+
+                def _update_change(c):
+                    self._updateChange(c, event, pull)
+
+                change = self._change_cache.updateChangeWithRetry(
+                    change_key, change, _update_change)
+            finally:
+                # We need to remove the lock here again so we don't leak
+                # them.
+                del self._change_update_lock[change_key]
+                lock.release()
+        else:
+            # We didn't get the lock so we don't need to update the same
+            # change again, but to be correct we should at least wait until
+            # the other thread is done updating the change.
+            log = get_annotated_logger(self.log, event)
+            log.debug("Change %s is currently being updated, "
+                      "waiting for it to finish", change)
+            with lock:
+                change = self._change_cache.get(change_key)
+                log.debug('Finished updating change %s', change)
+        return change
+
+    def _getTag(self, change_key, refresh=False, event=None):
+        tag = change_key.stable_id
+        change = self._change_cache.get(change_key)
+        if change:
+            if refresh:
+                self._change_cache.updateChangeWithRetry(
+                    change_key, change, lambda c: None)
+            return change
+        project = self.source.getProject(change_key.project_name)
+        change = Tag(project)
+        change.tag = tag
+        change.ref = f'refs/tags/{tag}'
+        change.oldrev = change_key.oldrev
+        change.newrev = change_key.newrev
+        # Build the url pointing to this tag/release on GitHub.
+        change.url = self.getGitwebUrl(project, sha=change.newrev, tag=tag)
+        if hasattr(event, 'commits'):
+            change.files = self.getPushedFileNames(event)
         try:
-            self._updateChange(change)
-        except Exception:
-            if key in self._change_cache:
-                del self._change_cache[key]
-            raise
+            self._change_cache.set(change_key, change)
+        except ConcurrentUpdateError:
+            change = self._change_cache.get(change_key)
+        return change
+
+    def _getBranch(self, change_key, refresh=False, event=None):
+        branch = change_key.stable_id
+        change = self._change_cache.get(change_key)
+        if change:
+            if refresh:
+                self._change_cache.updateChangeWithRetry(
+                    change_key, change, lambda c: None)
+            return change
+        project = self.source.getProject(change_key.project_name)
+        change = Branch(project)
+        change.branch = branch
+        change.ref = f'refs/heads/{branch}'
+        change.oldrev = change_key.oldrev
+        change.newrev = change_key.newrev
+        change.url = self.getGitwebUrl(project, sha=change.newrev)
+        if hasattr(event, 'commits'):
+            change.files = self.getPushedFileNames(event)
+        try:
+            self._change_cache.set(change_key, change)
+        except ConcurrentUpdateError:
+            change = self._change_cache.get(change_key)
+        return change
+
+    def _getRef(self, change_key, refresh=False, event=None):
+        change = self._change_cache.get(change_key)
+        if change:
+            if refresh:
+                self._change_cache.updateChangeWithRetry(
+                    change_key, change, lambda c: None)
+            return change
+        project = self.source.getProject(change_key.project_name)
+        change = Ref(project)
+        change.ref = change_key.stable_id
+        change.oldrev = change_key.oldrev
+        change.newrev = change_key.newrev
+        change.url = self.getGitwebUrl(project, sha=change.newrev)
+        if hasattr(event, 'commits'):
+            change.files = self.getPushedFileNames(event)
+        try:
+            self._change_cache.set(change_key, change)
+        except ConcurrentUpdateError:
+            change = self._change_cache.get(change_key)
         return change
 
     def getChangesDependingOn(self, change, projects, tenant):
@@ -787,44 +1496,27 @@ class GithubConnection(BaseConnection):
         if not change.uris:
             return changes
 
-        # Get a list of projects with unique installation ids
-        installation_ids = set()
-        installation_projects = set()
-
-        if projects:
-            # We only need to find changes in projects in the supplied
-            # ChangeQueue.  Find all of the github installations for
-            # all of those projects, and search using each of them, so
-            # that if we get the right results based on the
-            # permissions granted to each of the installations.  The
-            # common case for this is likely to be just one
-            # installation -- change queues aren't likely to span more
-            # than one installation.
-            for project in projects:
-                installation_id = self.installation_map.get(project.name)
-                if installation_id not in installation_ids:
-                    installation_ids.add(installation_id)
-                    installation_projects.add(project.name)
-        else:
+        if not projects:
             # We aren't in the context of a change queue and we just
             # need to query all installations of this tenant. This currently
             # only happens if certain features of the zuul trigger are
             # used; generally it should be avoided.
-            for project_name, installation_id in self.installation_map.items():
-                trusted, project = tenant.getProject(project_name)
-                # ignore projects from different tenants
-                if not project:
-                    continue
-                if installation_id not in installation_ids:
-                    installation_ids.add(installation_id)
-                    installation_projects.add(project_name)
+            projects = [p for p in tenant.all_projects
+                        if p.connection_name == self.connection_name]
+        # Otherwise we use the input projects list and look for changes in the
+        # supplied projects.
+        clients = self._github_client_manager.getGithubClientsForProjects(
+            projects)
 
         keys = set()
-        pattern = ' OR '.join(change.uris)
+        # TODO: Max of 5 OR operators can be used per query and
+        # query can be max of 256 characters long
+        # If making changes to this pattern you may need to update
+        # tests/fakegithub.py
+        pattern = ' OR '.join(['"Depends-On: %s"' % x for x in change.uris])
         query = '%s type:pr is:open in:body' % pattern
-        # Repeat the search for each installation id (project)
-        for installation_project in installation_projects:
-            github = self.getGithubClient(installation_project)
+        # Repeat the search for each client (project)
+        for github in clients:
             for issue in github.search_issues(query=query):
                 pr = issue.issue.pull_request().as_dict()
                 if not pr.get('url'):
@@ -833,7 +1525,19 @@ class GithubConnection(BaseConnection):
                 org, proj, _, num = pr.get('url').split('/')[-4:]
                 proj = pr.get('base').get('repo').get('full_name')
                 sha = pr.get('head').get('sha')
+                # This is not a ChangeKey
                 key = (proj, num, sha)
+
+                # A single tenant could have multiple projects with the same
+                # name on different sources. Ensure we use the canonical name
+                # to handle that case.
+                s_project = self.source.getProject(proj)
+                trusted, t_project = tenant.getProject(
+                    s_project.canonical_name)
+                # ignore projects zuul doesn't know about
+                if not t_project:
+                    continue
+
                 if key in keys:
                     continue
                 self.log.debug("Found PR %s/%s needs %s/%s" %
@@ -841,32 +1545,67 @@ class GithubConnection(BaseConnection):
                                 change.number))
                 keys.add(key)
             self.log.debug("Ran search issues: %s", query)
-            log_rate_limit(self.log, github)
 
         for key in keys:
             (proj, num, sha) = key
-            project = self.source.getProject(proj)
-            change = self._getChange(project, int(num), patchset=sha)
+            dep_change_key = ChangeKey(self.connection_name, proj,
+                                       'PullRequest', str(num), str(sha))
+            change = self._getChange(dep_change_key)
             changes.append(change)
 
         return changes
 
-    def _updateChange(self, change):
-        self.log.info("Updating %s" % (change,))
-        change.pr = self.getPull(change.project.name, change.number)
+    def _updateChange(self, change, event, pull):
+        log = get_annotated_logger(self.log, event)
+        log.info("Updating %s" % (change,))
+        change.pr, pr_obj = pull
+        change.is_current_patchset = (change.pr.get('head').get('sha') ==
+                                      change.patchset)
         change.ref = "refs/pull/%s/head" % change.number
         change.branch = change.pr.get('base').get('ref')
-        change.files = change.pr.get('files')
+        change.base_sha = change.pr.get('base').get('sha')
+        change.commit_id = change.pr.get('head').get('sha')
+        change.owner = change.pr.get('user').get('login')
+        # Don't overwrite the files list. The change object is bound to a
+        # specific revision and thus the changed files won't change. This is
+        # important if we got the files later because of the 300 files limit.
+        if not change.files:
+            change.files = change.pr.get('files')
+            # Github's pull requests files API only returns at max
+            # the first 300 changed files of a PR in alphabetical order.
+            # https://developer.github.com/v3/pulls/#list-pull-requests-files
+            if change.files is None:
+                log.warning("Got no files of PR.")
+            elif len(change.files) < change.pr.get('changed_files', 0):
+                log.warning("Got only %s files but PR has %s files.",
+                            len(change.files),
+                            change.pr.get('changed_files', 0))
+                # In this case explicitly set change.files to None to signalize
+                # that we need to ask the mergers later in pipeline processing.
+                # We cannot query the files here using the mergers because this
+                # can slow down the github event queue considerably.
+                change.files = None
         change.title = change.pr.get('title')
         change.open = change.pr.get('state') == 'open'
-        change.is_merged = change.pr.get('merged')
-        change.status = self._get_statuses(change.project,
-                                           change.patchset)
-        change.reviews = self.getPullReviews(change.project,
-                                             change.number)
+
+        # Never change the is_merged attribute back to unmerged. This is
+        # crucial so this cannot race with mergePull wich sets this attribute
+        # after a successful merge.
+        if not change.is_merged:
+            change.is_merged = change.pr.get('merged')
+
+        change.reviews = self.getPullReviews(
+            pr_obj, change.project, change.number, event)
         change.labels = change.pr.get('labels')
         # ensure message is at least an empty string
-        change.message = change.pr.get('body') or ''
+        message = change.pr.get("body") or ""
+        if change.title:
+            if message:
+                message = "{}\n\n{}".format(change.title, message)
+            else:
+                message = change.title
+        change.message = message
+        change.body_text = change.pr.get("body_text")
 
         # Note(tobiash): The updated_at timestamp is a moving target that is
         # not bound to the pull request 'version' we can solve that by just not
@@ -874,18 +1613,52 @@ class GithubConnection(BaseConnection):
         # This way the old pull request object retains its old timestamp and
         # the update check works.
         if not change.updated_at:
-            change.updated_at = self._ghTimestampToDate(
-                change.pr.get('updated_at'))
-        change.url = change.pr.get('url')
+            change.updated_at = int(time.mktime(self._ghTimestampToDate(
+                change.pr.get('updated_at'))))
+
+        # Note: Github returns different urls for the pr:
+        #  - url: this is the url meant for api use
+        #  - html_url: this is the url meant for use in browser (this is what
+        #              change.url means)
+        change.url = change.pr.get('html_url')
         change.uris = [
-            '%s/%s/pull/%s' % (self.server, change.project.name,
-                               change.number),
+            'https://%s/%s/pull/%s' % (
+                self.server, change.project.name, change.number),
         ]
 
-        if self.sched:
-            self.sched.onChangeUpdated(change)
+        self._updateCanMergeInfo(change, event)
 
         return change
+
+    def _updateCanMergeInfo(self, change, event):
+        # NOTE: The 'mergeable' field may get a false (null) while GitHub is
+        # calculating if it can merge. The Github API will just return
+        # that as false. This could lead to false negatives. So don't get this
+        # field here and only evaluate branch protection settings. Any merge
+        # conflicts which would block merging finally will be detected by
+        # the zuul-mergers anyway.
+        github = self.getGithubClient(change.project.name, zuul_event_id=event)
+
+        # Append accept headers so we get the draft status and checks api
+        self._append_accept_header(github, PREVIEW_DRAFT_ACCEPT)
+        self._append_accept_header(github, PREVIEW_CHECKS_ACCEPT)
+
+        # For performance reasons fetch all needed data upfront using a
+        # single graphql call.
+        canmerge_data = self.graphql_client.fetch_canmerge(
+            github, change, zuul_event_id=event)
+
+        change.contexts = self._get_contexts(canmerge_data)
+        change.draft = canmerge_data.get('isDraft', False)
+        change.mergeable = (canmerge_data.get('mergeable', 'MERGEABLE').lower()
+                            in ('mergeable', 'unknown'))
+        change.review_decision = canmerge_data['reviewDecision']
+        change.unresolved_conversations = canmerge_data.get(
+            'unresolvedConversations', False)
+        change.required_contexts = set(
+            canmerge_data['requiredStatusCheckContexts']
+        )
+        change.branch_protected = canmerge_data['protected']
 
     def getGitUrl(self, project: Project):
         if self.git_ssh_key:
@@ -893,26 +1666,33 @@ class GithubConnection(BaseConnection):
 
         # if app_id is configured but self.app_id is empty we are not
         # authenticated yet against github as app
-        if not self.app_id and self.connection_config.get('app_id', None):
-            self._authenticateGithubAPI()
-            self._prime_installation_map()
+        if not self._github_client_manager.initialized:
+            self._github_client_manager.initialize()
 
-        if self.app_id:
+        if self.repo_cache:
+            server = self.repo_cache
+        else:
+            server = self.server
+
+        if self._github_client_manager.usesAppAuthentication:
             # We may be in the context of a merger or executor here. The
             # mergers and executors don't receive webhook events so they miss
             # new repository installations. In order to cope with this we need
             # to reprime the installation map if we don't find the repo there.
-            installation_key = self._get_installation_key(project.name,
-                                                          reprime=True)
+            installation_key = \
+                self._github_client_manager.get_installation_key(
+                    project.name, reprime=True)
             return 'https://x-access-token:%s@%s/%s' % (installation_key,
-                                                        self.server,
+                                                        server,
                                                         project.name)
 
-        return 'https://%s/%s' % (self.server, project.name)
+        return 'https://%s/%s' % (server, project.name)
 
-    def getGitwebUrl(self, project, sha=None):
+    def getGitwebUrl(self, project, sha=None, tag=None):
         url = 'https://%s/%s' % (self.server, project)
-        if sha is not None:
+        if tag is not None:
+            url += '/releases/tag/%s' % tag
+        elif sha is not None:
             url += '/commit/%s' % sha
         return url
 
@@ -922,146 +1702,334 @@ class GithubConnection(BaseConnection):
     def addProject(self, project):
         self.projects[project.name] = project
 
-    def getProjectBranches(self, project, tenant):
-        github = self.getGithubClient(project.name)
-        exclude_unprotected = tenant.getExcludeUnprotectedBranches(project)
+    def _getProjectBranchesRequiredFlags(
+            self, exclude_unprotected, exclude_locked):
+        required_flags = BranchFlag.CLEAR
+        if exclude_unprotected:
+            required_flags |= BranchFlag.PROTECTED
+        if exclude_locked:
+            required_flags |= BranchFlag.LOCKED
+            if not exclude_unprotected:
+                # We also need all the branches:
+                required_flags |= BranchFlag.PRESENT
+        if not required_flags:
+            required_flags = BranchFlag.PRESENT
+        return required_flags
 
+    def _filterProjectBranches(
+            self, branch_infos, exclude_unprotected, exclude_locked):
+        if exclude_unprotected:
+            branch_infos = [b for b in branch_infos if b.protected is True]
+        if exclude_locked:
+            branch_infos = [b for b in branch_infos if b.locked is not True]
+        return branch_infos
+
+    def _fetchProjectBranches(self, project, required_flags):
+        github = self.getGithubClient(project.name)
+
+        valid_flags = BranchFlag.CLEAR
+        branch_infos = {}
+        protected_and_locked = BranchFlag.PROTECTED | BranchFlag.LOCKED
+        if (protected_and_locked & required_flags):
+            valid_flags |= protected_and_locked
+            for branch_name, locked in \
+                self.graphql_client.fetch_branch_protection(
+                    github, project).items():
+                bi = branch_infos.setdefault(
+                    branch_name, BranchInfo(branch_name))
+                bi.protected = True
+                bi.locked = locked
+        if BranchFlag.PRESENT in required_flags:
+            valid_flags |= BranchFlag.PRESENT
+            for branch_name in self._fetchProjectBranchesREST(
+                    github, project, protected_only=False):
+                bi = branch_infos.setdefault(
+                    branch_name, BranchInfo(branch_name))
+                bi.present = True
+        return valid_flags, list(branch_infos.values())
+
+    def _fetchProjectBranchesREST(self, github, project, protected_only):
+        # Fetch the project branches from the rest api
         url = github.session.build_url('repos', project.name,
                                        'branches')
 
         headers = {'Accept': 'application/vnd.github.loki-preview+json'}
-        protected = 1 if exclude_unprotected else 0
-        params = {'per_page': 100, 'protected': protected}
+        params = {'per_page': 100}
+        if protected_only:
+            params['protected'] = 1
 
-        branches = []
+        branches = set()
         while url:
             resp = github.session.get(
                 url, headers=headers, params=params)
 
             # check if we need to do further paged calls
-            url = resp.links.get(
-                'next', {}).get('url')
+            url = resp.links.get('next', {}).get('url')
 
             if resp.status_code == 403:
                 self.log.error(str(resp))
                 rate_limit = github.rate_limit()
                 if rate_limit['resources']['core']['remaining'] == 0:
                     self.log.warning(
-                        "Rate limit exceeded, using stale branch list")
-                # failed to list branches so use a stale branch list
-                return self._project_branch_cache.get(project.name, [])
+                        "Rate limit exceeded, using empty branch list")
+                return []
+            elif resp.status_code == 404:
+                raise Exception("Got status code 404 when listing branches "
+                                "of project %s" % project.name)
 
-            branches.extend([x['name'] for x in resp.json()])
+            for x in resp.json():
+                branches.add(x['name'])
+        return branches
 
-        log_rate_limit(self.log, github)
-        self._project_branch_cache[project.name] = branches
-        return self._project_branch_cache[project.name]
+    def _fetchProjectMergeModes(self, project):
+        github = self.getGithubClient(project.name)
+        url = github.session.build_url('repos', project.name)
+        headers = {'Accept': 'application/vnd.github.loki-preview+json'}
+        merge_modes = []
 
-    def getBranch(self, project_name, branch):
-        github = self.getGithubClient(project_name)
+        # GitHub API bug: if the allow_* attributes below are changed,
+        # the ETag is not updated, meaning that once we cache the repo
+        # URL, we'll never update it.  To avoid this, clear this URL
+        # from the cache before performing the request.
+        self._github_client_manager._cache.data.pop(url, None)
+
+        resp = github.session.get(url, headers=headers)
+
+        if resp.status_code == 403:
+            self.log.error(str(resp))
+            rate_limit = github.rate_limit()
+            if rate_limit['resources']['core']['remaining'] == 0:
+                self.log.warning(
+                    "Rate limit exceeded, using full merge method list")
+            return ALL_MERGE_MODES
+        elif resp.status_code == 404:
+            raise Exception("Got status code 404 when fetching "
+                            "project %s" % project.name)
+
+        resp = resp.json()
+        if resp.get('allow_merge_commit'):
+            merge_modes.append(model.MERGER_MERGE)
+            merge_modes.append(model.MERGER_MERGE_RESOLVE)
+            if COMPONENT_REGISTRY.model_api >= 18:
+                merge_modes.append(model.MERGER_MERGE_RECURSIVE)
+                merge_modes.append(model.MERGER_MERGE_ORT)
+        if resp.get('allow_squash_merge'):
+            merge_modes.append(model.MERGER_SQUASH_MERGE)
+        if resp.get('allow_rebase_merge'):
+            merge_modes.append(model.MERGER_REBASE)
+
+        return merge_modes
+
+    def _fetchProjectDefaultBranch(self, project):
+        github = self.getGithubClient(project.name)
+        url = github.session.build_url('repos', project.name)
+        headers = {'Accept': 'application/vnd.github.loki-preview+json'}
+
+        resp = github.session.get(url, headers=headers)
+
+        if resp.status_code == 403:
+            self.log.error(str(resp))
+            rate_limit = github.rate_limit()
+            if rate_limit['resources']['core']['remaining'] == 0:
+                self.log.warning("Rate limit exceeded")
+            return None
+        elif resp.status_code == 404:
+            raise Exception("Got status code 404 when fetching "
+                            "project %s" % project.name)
+
+        resp = resp.json()
+        return resp['default_branch']
+
+    def isBranchProtected(self, project_name: str, branch_name: str,
+                          zuul_event_id=None) -> Optional[bool]:
+        github = self.getGithubClient(
+            project_name, zuul_event_id=zuul_event_id)
 
         # Note that we directly use a web request here because if we use the
         # github3.py api directly we need a repository object which needs
         # an unneeded web request during creation.
-        url = github.session.build_url('repos', project_name,
-                                       'branches', branch)
+        url = github.session.build_url('repos', project_name, 'branches',
+                                       branch_name)
 
-        resp = github.session.get(url)
+        # Prevent the cachecontrol adapter from returning cached responses, as
+        # this doesn't work correctly with renamed branches for which Github
+        # returns HTTP 301 permanent redirects.
+        headers = {
+            "Cache-Control": "no-cache",
+        }
 
-        if resp.status_code == 404:
+        # When a branch is renamed Github will redirect to the endpoint for
+        # the new name. This is not what we want, so we disable redirects.
+        resp = github.session.get(url, headers=headers, allow_redirects=False)
+
+        # Ignore redirects and error responses
+        if not (200 <= resp.status_code <= 299):
             return None
 
-        return resp.json()
+        data = resp.json()
+        # Make sure the information we receive is for the requested branch.
+        if data["name"] != branch_name:
+            return None
+
+        return data.get('protected')
 
     def getPullUrl(self, project, number):
         return '%s/pull/%s' % (self.getGitwebUrl(project), number)
 
-    def getPull(self, project_name, number):
-        github = self.getGithubClient(project_name)
+    def getPull(self, project_name, number, event=None):
+        log = get_annotated_logger(self.log, event)
+        github = self.getGithubClient(project_name, zuul_event_id=event)
         owner, proj = project_name.split('/')
         for retry in range(5):
-            probj = github.pull_request(owner, proj, number)
-            if probj is not None:
-                break
-            self.log.warning("Pull request #%s of %s/%s returned None!" % (
-                             number, owner, proj))
+            try:
+                probj = github.pull_request(owner, proj, number)
+                if probj is not None:
+                    break
+                self.log.warning("Pull request #%s of %s/%s returned None!" % (
+                                 number, owner, proj))
+            except github3.exceptions.GitHubException:
+                self.log.warning(
+                    "Failed to get pull request #%s of %s/%s; retrying" %
+                    (number, owner, proj))
             time.sleep(1)
-        # Get the issue obj so we can get the labels (this is silly)
-        issueobj = probj.issue()
+        else:
+            raise Exception("Failed to get pull request #%s of %s/%s" % (
+                number, owner, proj))
         pr = probj.as_dict()
-        pr['files'] = [f.filename for f in probj.files()]
-        pr['labels'] = [l.name for l in issueobj.labels()]
-        self.log.debug('Got PR %s#%s', project_name, number)
-        log_rate_limit(self.log, github)
-        return pr
+        try:
+            if pr.get('changed_files', 0) > 999:
+                # Don't request more than ten pages. If we exceed this we
+                # need to determine the files via the mergers asynchronously
+                # in order to not block the event processing by iterating on
+                # too many pages.
+                self.log.warning('Pull request #%s of %s/%s has too many '
+                                 'files. Files will be requested '
+                                 'asynchronously', number, owner, proj)
+                pr['files'] = None
+            else:
+                files = []
+                for pr_file in probj.files():
+                    files.append(pr_file.filename)
+                    # Also include the old path if a file was renamed.
+                    if hasattr(pr_file, "previous_filename"):
+                        files.append(pr_file.previous_filename)
+                pr['files'] = files
+        except github3.exceptions.ResponseError as exc:
+            # NOTE: For PRs with a lot of lines changed, Github will return
+            # an error (HTTP 500, 422, ...) because it can't generate the diff.
+            self.log.warning("Failed to get list of files from Github. "
+                             "Using empty file list to trigger update "
+                             "via the merger: %s", exc)
+            pr['files'] = None
 
-    def canMerge(self, change, allow_needs):
-        # NOTE: The mergeable call may get a false (null) while GitHub is
-        # calculating if it can merge. The github3.py library will just return
-        # that as false. This could lead to false negatives. So don't do this
-        # call here and only evaluate branch protection settings. Any merge
-        # conflicts which would block merging finally will be detected by
-        # the zuul-mergers anyway.
+        labels = [l['name'] for l in pr['labels']]
+        pr['labels'] = labels
 
-        github = self.getGithubClient(change.project.name)
-        owner, proj = change.project.name.split('/')
-        pull = github.pull_request(owner, proj, change.number)
+        self._sha_pr_cache.update(project_name, pr)
 
-        protection = self._getBranchProtection(
-            change.project.name, change.branch)
+        log.debug('Got PR %s#%s', project_name, number)
+        return (pr, probj)
 
-        if not self._hasRequiredStatusChecks(allow_needs, protection, pull):
+    def canMerge(self, change, allow_needs, event=None, allow_refresh=False):
+        log = get_annotated_logger(self.log, event)
+
+        if allow_refresh:
+            self._updateCanMergeInfo(change, event)
+
+        # If the PR is a draft it cannot be merged.
+        if change.draft:
+            log.debug('Change %s can not merge because it is a draft', change)
             return False
 
-        required_reviews = protection.get(
-            'required_pull_request_reviews')
-        if required_reviews:
-            if required_reviews.get('require_code_owner_reviews'):
-                # we need to process the reviews using code owners
-                # TODO(tobiash): not implemented yet
-                pass
-            else:
-                # we need to process the review using access rights
-                # TODO(tobiash): not implemented yet
-                pass
+        if not change.mergeable:
+            log.debug('Change %s can not merge because Github detected a '
+                      'merge conflict', change)
+            return False
+
+        missing_status_checks = self._getMissingStatusChecks(
+            change, allow_needs)
+        if missing_status_checks:
+            log.debug('Change %s can not merge because required status checks '
+                      'are missing: %s', change, missing_status_checks)
+            return False
+
+        if change.review_decision and change.review_decision != 'APPROVED':
+            # If we got a review decision it must be approved
+            log.debug('Change %s can not merge because it is not approved',
+                      change)
+            return False
+
+        if change.unresolved_conversations:
+            log.debug('Change %s can not merge because '
+                      'it has unresolved conversations',
+                      change)
+            return False
 
         return True
 
-    def getPullBySha(self, sha, project):
-        pulls = []
-        owner, project = project.split('/')
-        github = self.getGithubClient("%s/%s" % (owner, project))
-        repo = github.repository(owner, project)
-        for pr in repo.pull_requests(state='open'):
-            if pr.head.sha != sha:
-                continue
-            if pr.as_dict() in pulls:
-                continue
-            pulls.append(pr.as_dict())
+    def isMerged(self, change, event):
+        github = self.getGithubClient(change.project.name, zuul_event_id=event)
+        return self.graphql_client.merged(github, change)
 
-        self.log.debug('Got PR on project %s for sha %s', project, sha)
-        log_rate_limit(self.log, github)
-        if len(pulls) > 1:
+    def getPullBySha(self, sha, project_name, event):
+        log = get_annotated_logger(self.log, event)
+
+        # Serve from the cache if existing
+        cached_pr_numbers = self._sha_pr_cache.get(project_name, sha)
+        if len(cached_pr_numbers) > 1:
             raise Exception('Multiple pulls found with head sha %s' % sha)
+        if len(cached_pr_numbers) == 1:
+            for pr in cached_pr_numbers:
+                pr_change_key = ChangeKey(self.connection_name, project_name,
+                                          'PullRequest', str(pr), str(sha))
+                pr_body = self._getChange(pr_change_key, event=event).pr
+                return pr_body
 
-        if len(pulls) == 0:
+        github = self.getGithubClient(project_name, zuul_event_id=event)
+        issues = list(github.search_issues(sha))
+
+        log.debug('Got PR on project %s for sha %s', project_name, sha)
+        if len(issues) == 0:
             return None
-        return pulls.pop()
 
-    def getPullReviews(self, project, number):
-        owner, proj = project.name.split('/')
+        # Github returns all issues that contain the sha, not only the ones
+        # with that sha as head_sha so we need to get and update all those
+        # changes and then filter for the head sha before we can error out
+        # with multiple pulls found.
+        found_pr_body = None
+        for item in issues:
+            pr_change_key = ChangeKey(self.connection_name, project_name,
+                                      'PullRequest', str(item.issue.number),
+                                      str(sha))
+            pr_body = self._getChange(pr_change_key, event=event).pr
+            self._sha_pr_cache.update(project_name, pr_body)
+            if pr_body['head']['sha'] == sha:
+                if found_pr_body:
+                    raise Exception(
+                        'Multiple pulls found with head sha %s' % sha)
+                found_pr_body = pr_body
 
-        revs = self._getPullReviews(owner, proj, number)
+        return found_pr_body
+
+    def getPullReviews(self, pr_obj, project, number, event):
+        log = get_annotated_logger(self.log, event)
+        # make a list out of the reviews so that we complete our
+        # API transaction
+        revs = [review.as_dict() for review in pr_obj.reviews()]
+        log.debug('Got reviews for PR %s#%s', project, number)
 
         permissions = {}
         reviews = {}
 
         for rev in revs:
-            user = rev.get('user').get('login')
+            login = rev.get('user').get('login')
+            user = self.getUser(login, project.name)
+
             review = {
                 'by': {
-                    'username': user,
-                    'email': rev.get('user').get('email'),
+                    'username': user.get('username'),
+                    'email': user.get('email'),
+                    'name': user.get('name')
                 },
                 'grantedOn': int(time.mktime(self._ghTimestampToDate(
                                              rev.get('submitted_at')))),
@@ -1073,19 +2041,19 @@ class GithubConnection(BaseConnection):
             # Get user's rights. A user always has read to leave a review
             review['permission'] = 'read'
 
-            if user in permissions:
-                permission = permissions[user]
+            if login in permissions:
+                permission = permissions[login]
             else:
-                permission = self.getRepoPermission(project.name, user)
-                permissions[user] = permission
+                permission = self.getRepoPermission(project.name, login)
+                permissions[login] = permission
 
             if permission == 'write':
                 review['permission'] = 'write'
             if permission == 'admin':
                 review['permission'] = 'admin'
 
-            if user not in reviews:
-                reviews[user] = review
+            if login not in reviews:
+                reviews[login] = review
             else:
                 # if there are multiple reviews per user, keep the newest
                 # note that this breaks the ability to set the 'older-than'
@@ -1094,85 +2062,46 @@ class GithubConnection(BaseConnection):
                 # previous review was 'approved' or 'changes_requested', as
                 # the GitHub model does not change the vote if a comment is
                 # added after the fact. THANKS GITHUB!
-                if review['grantedOn'] > reviews[user]['grantedOn']:
-                    if (review['type'] == 'commented' and reviews[user]['type']
-                            in ('approved', 'changes_requested')):
-                        self.log.debug("Discarding comment review %s due to "
-                                       "an existing vote %s" % (review,
-                                                                reviews[user]))
+                if review['grantedOn'] > reviews[login]['grantedOn']:
+                    if (review['type'] == 'commented' and
+                        reviews[login]['type'] in
+                        ('approved', 'changes_requested')):
+                        log.debug("Discarding comment review %s due to "
+                                  "an existing vote %s" % (review,
+                                                           reviews[login]))
                         pass
                     else:
-                        reviews[user] = review
+                        reviews[login] = review
 
         return reviews.values()
 
-    def _getBranchProtection(self, project_name: str, branch: str):
-        github = self.getGithubClient(project_name)
-        url = github.session.build_url('repos', project_name,
-                                       'branches', branch,
-                                       'protection')
-
-        headers = {'Accept': 'application/vnd.github.loki-preview+json'}
-        resp = github.session.get(url, headers=headers)
-
-        if resp.status_code == 404:
-            return None
-
-        return resp.json()
-
-    def _hasRequiredStatusChecks(self, allow_needs, protection, pull):
-        if not protection:
-            # There are no protection settings -> ok by definition
-            return True
-
-        required_contexts = protection.get(
-            'required_status_checks', {}).get('contexts')
-
-        if not required_contexts:
+    @staticmethod
+    def _getMissingStatusChecks(change, allow_needs):
+        if not change.required_contexts:
             # There are no required contexts -> ok by definition
-            return True
+            return set()
 
         # Strip allow_needs as we will set this in the gate ourselves
         required_contexts = set(
-            [x for x in required_contexts if x not in allow_needs])
+            x for x in change.required_contexts if x not in allow_needs
+        )
 
-        # NOTE(tobiash): We cannot just take the last commit in the list
-        # because it is not sorted that the head is the last one in every case.
-        # E.g. when doing a re-merge from the target the PR head can be
-        # somewhere in the middle of the commit list. Thus we need to search
-        # the whole commit list for the PR head commit which has the statuses
-        # attached.
-        commits = list(pull.commits())
-        commit = None
-        for c in commits:
-            if c.sha == pull.head.sha:
-                commit = c
-                break
+        # Remove successful checks from the required contexts to get the
+        # remaining missing required status.
+        return required_contexts.difference(change.successful_contexts)
 
-        # Get successful statuses
-        successful = set(
-            [s.context for s in commit.statuses() if s.state == 'success'])
+    @cachetools.cached(cache=cachetools.TTLCache(maxsize=2048, ttl=3600),
+                       key=lambda self, login, project:
+                       (self.connection_name, login))
+    def getUser(self, login, project_name):
+        """
+        Get a Github user
 
-        # Required contexts must be a subset of the successful contexts as
-        # we allow additional successful status contexts we don't care about.
-        return required_contexts.issubset(successful)
-
-    def _getPullReviews(self, owner, project, number):
-        # make a list out of the reviews so that we complete our
-        # API transaction
-        github = self.getGithubClient("%s/%s" % (owner, project))
-        reviews = [review.as_dict() for review in
-                   github.pull_request(owner, project, number).reviews()]
-
-        self.log.debug('Got reviews for PR %s/%s#%s', owner, project, number)
-        log_rate_limit(self.log, github)
-        return reviews
-
-    def getUser(self, login, project):
-        return GithubUser(login, self, project)
-
-    def getUserUri(self, login):
-        return 'https://%s/%s' % (self.server, login)
+        The returned user only contains static information so this can be
+        cached. For the cache omit the project as this is only used for
+        requesting the data and doesn't affect the properties of the user.
+        """
+        return GithubUser(login, self, project_name)
 
     def getRepoPermission(self, project, login):
         github = self.getGithubClient(project)
@@ -1194,7 +2123,6 @@ class GithubConnection(BaseConnection):
         perms = repository._get(url, headers=headers)
 
         self.log.debug("Got repo permissions for %s/%s", owner, proj)
-        log_rate_limit(self.log, github)
 
         # no known user, maybe deleted since review?
         if perms.status_code == 404:
@@ -1203,71 +2131,388 @@ class GithubConnection(BaseConnection):
         # get permissions from the data
         return perms.json().get('permission', 'none')
 
-    def commentPull(self, project, pr_number, message):
-        github = self.getGithubClient(project)
-        owner, proj = project.split('/')
-        repository = github.repository(owner, proj)
-        pull_request = repository.issue(pr_number)
-        pull_request.create_comment(message)
-        self.log.debug("Commented on PR %s/%s#%s", owner, proj, pr_number)
-        log_rate_limit(self.log, github)
+    def commentPull(self, project, pr_number, message, zuul_event_id=None):
+        log = get_annotated_logger(self.log, zuul_event_id)
+        github = self.getGithubClient(project, zuul_event_id=zuul_event_id)
+        url = github.session.build_url('repos', project,
+                                       'issues', str(pr_number), 'comments')
+        resp = github.session.post(url, json={'body': message})
+        resp.raise_for_status()
+        log.debug("Commented on PR %s#%s", project, pr_number)
 
-    def mergePull(self, project, pr_number, commit_message='', sha=None):
-        github = self.getGithubClient(project)
-        owner, proj = project.split('/')
-        pull_request = github.pull_request(owner, proj, pr_number)
+    def mergePull(self, project, pr_number, commit_message='', sha=None,
+                  method='merge', zuul_event_id=None):
+        log = get_annotated_logger(self.log, zuul_event_id)
+        github = self.getGithubClient(project, zuul_event_id=zuul_event_id)
+        url = github.session.build_url("repos", project, "pulls",
+                                       str(pr_number), "merge")
+
+        payload = {
+            "merge_method": method,
+        }
+        if sha:
+            payload["sha"] = sha
+        if commit_message:
+            payload["commit_message"] = commit_message
+
         try:
-            result = pull_request.merge(commit_message=commit_message, sha=sha)
-        except github3.exceptions.MethodNotAllowed as e:
-            raise MergeFailure('Merge was not successful due to mergeability'
-                               ' conflict, original error is %s' % e)
+            resp = github.session.put(url, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+            if not data:
+                result = False
+            else:
+                result = data["merged"]
+        except Exception as e:
+            api_message = None
+            if hasattr(e, 'response'):
+                try:
+                    api_message = e.response.json().get('message')
+                except ValueError:
+                    # There was no json body so use the generic message below.
+                    pass
 
-        self.log.debug("Merged PR %s/%s#%s", owner, proj, pr_number)
-        log_rate_limit(self.log, github)
+            msg = None
+            if api_message == "Resource not accessible by integration":
+                msg = (f'Pull request merge failed: {api_message}, '
+                       'You may need to manually rebase your PR and '
+                       'retry.')
+            elif api_message:
+                msg = f'Pull request merge failed: {api_message}'
+            else:
+                msg = 'Pull request merge failed: %s' % e
+            raise MergeFailure(msg)
+
         if not result:
-            raise Exception('Pull request was not merged')
+            raise MergeFailure('Pull request was not merged')
+        log.debug("Merged PR %s#%s", project, pr_number)
 
-    def getCommitStatuses(self, project, sha):
-        github = self.getGithubClient(project)
-        owner, proj = project.split('/')
-        repository = github.repository(owner, proj)
-        commit = repository.commit(sha)
-        # make a list out of the statuses so that we complete our
-        # API transaction
-        statuses = [status.as_dict() for status in commit.statuses()]
+    def _getCommit(self, repository, sha, retries=5):
+        try:
+            return repository.commit(sha)
+        except github3.exceptions.NotFoundError:
+            self.log.warning("Commit %s of project %s returned None",
+                             sha, repository.name)
+            if retries <= 0:
+                raise
+            time.sleep(1)
+            return self._getCommit(repository, sha, retries - 1)
 
-        self.log.debug("Got commit statuses for sha %s on %s", sha, project)
-        log_rate_limit(self.log, github)
-        return statuses
+    def getCommitStatuses(self, project_name, sha, zuul_event_id=None):
+        log = get_annotated_logger(self.log, zuul_event_id)
+        github = self.getGithubClient(
+            project_name, zuul_event_id=zuul_event_id)
+        url = github.session.build_url('repos', project_name,
+                                       'commits', sha, 'statuses')
+        params = {'per_page': 100}
+        resp = github.session.get(url, params=params)
+        resp.raise_for_status()
+
+        log.debug("Got commit statuses for sha %s on %s", sha, project_name)
+        return resp.json()
 
     def setCommitStatus(self, project, sha, state, url='', description='',
-                        context=''):
-        github = self.getGithubClient(project)
+                        context='', zuul_event_id=None):
+        log = get_annotated_logger(self.log, zuul_event_id)
+        github = self.getGithubClient(project, zuul_event_id=zuul_event_id)
         owner, proj = project.split('/')
         repository = github.repository(owner, proj)
         repository.create_status(sha, state, url, description, context)
-        self.log.debug("Set commit status to %s for sha %s on %s",
-                       state, sha, project)
-        log_rate_limit(self.log, github)
+        log.debug("Set commit status to %s for sha %s on %s",
+                  state, sha, project)
 
-    def labelPull(self, project, pr_number, label):
-        github = self.getGithubClient(project)
+    def getCommitChecks(self, project_name, sha, zuul_event_id=None):
+        log = get_annotated_logger(self.log, zuul_event_id)
+        if not self._github_client_manager.usesAppAuthentication:
+            log.debug(
+                "Not authenticated as Github app. Unable to retrieve commit "
+                "checks for sha %s on %s",
+                sha, project_name
+            )
+            return []
+
+        github = self.getGithubClient(
+            project_name, zuul_event_id=zuul_event_id
+        )
+        self._append_accept_header(github, PREVIEW_CHECKS_ACCEPT)
+        url = github.session.build_url(
+            "repos", project_name, "commits", sha, "check-runs")
+        params = {"per_page": 100}
+        resp = github.session.get(url, params=params)
+        resp.raise_for_status()
+
+        log.debug("Got commit checks for sha %s on %s", sha, project_name)
+        return resp.json().get("check_runs", [])
+
+    def reviewPull(self, project, pr_number, sha, review, body,
+                   zuul_event_id=None):
+        github = self.getGithubClient(project, zuul_event_id=zuul_event_id)
+        owner, proj = project.split('/')
+        pull_request = github.pull_request(owner, proj, pr_number)
+        event = review.replace('-', '_')
+        event = event.upper()
+        pull_request.create_review(body=body, commit_id=sha, event=event)
+
+    def labelPull(self, project, pr_number, label, zuul_event_id=None):
+        log = get_annotated_logger(self.log, zuul_event_id)
+        github = self.getGithubClient(project, zuul_event_id=zuul_event_id)
         owner, proj = project.split('/')
         pull_request = github.issue(owner, proj, pr_number)
         pull_request.add_labels(label)
-        self.log.debug("Added label %s to %s#%s", label, proj, pr_number)
-        log_rate_limit(self.log, github)
+        log.debug("Added label %s to %s#%s", label, proj, pr_number)
 
-    def unlabelPull(self, project, pr_number, label):
-        github = self.getGithubClient(project)
+    def unlabelPull(self, project, pr_number, label, zuul_event_id=None):
+        log = get_annotated_logger(self.log, zuul_event_id)
+        github = self.getGithubClient(project, zuul_event_id=zuul_event_id)
         owner, proj = project.split('/')
         pull_request = github.issue(owner, proj, pr_number)
-        pull_request.remove_label(label)
-        self.log.debug("Removed label %s from %s#%s", label, proj, pr_number)
-        log_rate_limit(self.log, github)
+        try:
+            pull_request.remove_label(label)
+        except github3.exceptions.NotFoundError:
+            # The label is not existing, so everything ok
+            log.debug('Label %s not found on %s#%s', label, proj, pr_number)
+        log.debug("Removed label %s from %s#%s", label, proj, pr_number)
+
+    def _create_or_update_check(self, github, project_name, check_run_id,
+                                **kwargs):
+        if check_run_id:
+            # Update an existing check run
+            url = github.session.build_url(
+                'repos', project_name, 'check-runs', str(check_run_id))
+            resp = github.session.patch(url, json=kwargs)
+        else:
+            # Create a new check run
+            url = github.session.build_url(
+                'repos', project_name, 'check-runs')
+            resp = github.session.post(url, json=kwargs)
+        resp.raise_for_status()
+        return resp.json().get('id')
+
+    def updateCheck(self, project, pr_number, sha, status, completed, context,
+                    details_url, message, file_comments, external_id,
+                    zuul_event_id=None, check_run_id=None):
+        log = get_annotated_logger(self.log, zuul_event_id)
+        github = self.getGithubClient(project, zuul_event_id=zuul_event_id)
+        self._append_accept_header(github, PREVIEW_CHECKS_ACCEPT)
+
+        # Always provide an empty list of actions by default
+        actions = []
+
+        # Track a list of failed check run operations to report back to Github
+        errors = []
+
+        if not self._github_client_manager.usesAppAuthentication:
+            # We don't try to update check runs, if we aren't authenticated as
+            # Github app at all. If we are, we still have to ensure that we
+            # don't crash on missing permissions.
+            log.debug(
+                "Not authenticated as Github app. Unable to create or update "
+                "check run '%s' for sha %s on %s",
+                context, sha, project
+            )
+
+            errors.append(
+                "Unable to create or update check {}. Must be authenticated "
+                "as app integration.".format(
+                    context
+                )
+            )
+            return None, errors
+
+        output = {"title": "Summary", "summary": message}
+
+        if file_comments:
+            # Build the list of annotations to be applied on the check run
+            output["annotations"] = self._buildAnnotationsFromComments(
+                file_comments
+            )
+
+        # Currently, the GithubReporter only supports start and end reporting.
+        # During the build no further update will be reported.
+        if completed:
+            # As the buildset itself does not provide a proper end time, we
+            # use the current time instead. Otherwise, we would have to query
+            # all builds contained in the buildset and search for the latest
+            # build.end_time available.
+            completed_at = datetime.datetime.now(utc).isoformat()
+
+            # When reporting the completion of a check_run, we must set the
+            # conclusion, as the status will always be "completed".
+            conclusion = status
+
+            if not check_run_id:
+                log.debug("Could not find check run %s for %s#%s on sha %s. "
+                          "Creating a new one", context, project, pr_number,
+                          sha)
+                action = 'create'
+                arguments = dict(
+                    name=context,
+                    head_sha=sha,
+                    conclusion=conclusion,
+                    completed_at=completed_at,
+                    output=output,
+                    details_url=details_url,
+                    external_id=external_id,
+                    actions=actions,
+                )
+            else:
+                log.debug("Updating existing check run %s for %s#%s on sha %s "
+                          "with status %s", context, project, pr_number, sha,
+                          status)
+                action = 'update'
+                arguments = dict(
+                    conclusion=conclusion,
+                    completed_at=completed_at,
+                    output=output,
+                    details_url=details_url,
+                    external_id=external_id,
+                    actions=actions,
+                )
+        else:
+            # Add an abort/dequeue action to running check runs
+            actions.append(
+                {
+                    "label": "Abort",
+                    "description": "Abort this check run",
+                    # Usually Github wants us to provide an identifier for our
+                    # system here, so we can identify this action. But as zuul
+                    # is already identifying this event based on the check run
+                    # this shouldn't be necessary.
+                    "identifier": "abort",
+                }
+            )
+
+            action = 'create'
+            arguments = dict(
+                name=context,
+                head_sha=sha,
+                status=status,
+                output=output,
+                details_url=details_url,
+                external_id=external_id,
+                actions=actions,
+            )
+
+        # Create/update the check run
+        try:
+            check_run_id = self._create_or_update_check(
+                github,
+                project,
+                check_run_id,
+                **arguments,
+            )
+
+        except requests.exceptions.HTTPError as exc:
+            log.error("Failed to %s check run %s for %s#%s on sha %s: %s",
+                      action, context, project, pr_number, sha, str(exc))
+            errors.append("Failed to {} check run {}: {}".format(
+                action, context, str(exc)))
+
+        return check_run_id, errors
+
+    def _buildAnnotationsFromComments(self, file_comments):
+        annotations = []
+        for fn, comments in file_comments.items():
+            for comment in comments:
+
+                if "message" not in comment:
+                    # Github doesn't accept anntoations without a message.
+                    # Faking a message doesn't make munch sense to me.
+                    continue
+
+                start_column = None
+                end_column = None
+                start_line = None
+                end_line = None
+
+                if "line" in comment:
+                    start_line = comment.get("line")
+                    end_line = comment.get("line")
+
+                if "range" in comment:
+                    rng = comment["range"]
+                    # Look up the start_ and end_line from the range and use
+                    # the line as fallback
+                    start_line = rng.get("start_line")
+                    end_line = rng.get("end_line")
+
+                    # Github only accepts column parameters if they apply to
+                    # the same line.
+                    if start_line == end_line:
+                        start_column = rng.get("start_character")
+                        end_column = rng.get("end_character")
+
+                # Map the level coming from zuul_return to the ones Github
+                # expects. Each Github annotation must provide a level, so
+                # we fall back to "warning" in case no or an invalid level
+                # is provided.
+                annotation_level = ANNOTATION_LEVELS.get(
+                    comment.get("level"), "warning"
+                )
+
+                # A Github check annotation requires at least the following
+                # attributes: "path", "start_line", "end_line", "message" and
+                # "annotation_level"
+                raw_annotation = {
+                    "path": fn,
+                    "annotation_level": annotation_level,
+                    "message": comment["message"].encode(
+                        "utf8")[:ANNOTATION_MAX_MESSAGE_SIZE].decode(
+                            "utf8", "ignore"),
+                    "start_line": start_line,
+                    "end_line": end_line,
+                    "start_column": start_column,
+                    "end_column": end_column,
+                }
+
+                # Filter out None values from the annotation. Otherwise
+                # github will complain about column values being None:
+                # "For 'properties/start_column', nil is not an integer."
+                # "For 'properties/end_column', nil is not an integer."
+                annotation = {
+                    k: v for k, v in raw_annotation.items()
+                    if v is not None
+                }
+
+                # Don't provide an annotation without proper start_ and
+                # end_line as this will make the whole check run update fail.
+                if not {"start_line", "end_line"} <= set(annotation):
+                    continue
+
+                annotations.append(annotation)
+
+        def _sortUniqueness(annotations):
+            """
+            This method is intended to spread the annotations by uniqueness
+            so we have an as diverse as possible list of annotations.
+            """
+            # First group
+            per_message = defaultdict(list)
+            for annotation in annotations:
+                per_message[annotation['message']].append(annotation)
+
+            # Sort the lists by length. This way we get the messages that
+            # occur less frequently at first.
+            annotation_lists = sorted(list(per_message.values()),
+                                      key=lambda l: len(l))
+
+            return list(chain(*annotation_lists))
+
+        if len(annotations) > 50:
+            # We cannot report more than 50 file comments so sort them by
+            # uniqueness in order to give the user a diverse set of annotations
+            annotations = _sortUniqueness(annotations)
+
+        return annotations[:50]
 
     def getPushedFileNames(self, event):
         files = set()
+        # The payload for the push event is now limited to 2,048
+        # commits. If there are more than 2,048 commits, the event will
+        # not contain serialized diff information for each commit.
+        # In this case we need to get the files via the merger.
+        if len(event.commits) >= 2048:
+            return None
         for c in event.commits:
             for f in c.get('added') + c.get('modified') + c.get('removed'):
                 files.add(f)
@@ -1276,26 +2521,20 @@ class GithubConnection(BaseConnection):
     def _ghTimestampToDate(self, timestamp):
         return time.strptime(timestamp, '%Y-%m-%dT%H:%M:%SZ')
 
-    def _get_statuses(self, project, sha):
-        # A ref can have more than one status from each context,
-        # however the API returns them in order, newest first.
-        # So we can keep track of which contexts we've already seen
-        # and throw out the rest. Our unique key is based on
-        # the user and the context, since context is free form and anybody
-        # can put whatever they want there. We want to ensure we track it
-        # by user, so that we can require/trigger by user too.
-        seen = []
-        statuses = []
-        for status in self.getCommitStatuses(project.name, sha):
-            stuple = _status_as_tuple(status)
-            if "%s:%s" % (stuple[0], stuple[1]) not in seen:
-                statuses.append("%s:%s:%s" % stuple)
-                seen.append("%s:%s" % (stuple[0], stuple[1]))
-
-        return statuses
+    def _get_contexts(self, canmerge_data):
+        contexts = set(
+            _status_as_tuple(s) for s in canmerge_data["status"].values()
+        )
+        contexts.update(set(
+            _check_as_tuple(c) for c in canmerge_data["checks"].values()
+        ))
+        return contexts
 
     def getWebController(self, zuul_web):
         return GithubWebController(zuul_web, self)
+
+    def getEventQueue(self):
+        return getattr(self, "event_queue", None)
 
     def validateWebConfig(self, config, connections):
         if 'webhook_token' not in self.connection_config:
@@ -1308,10 +2547,15 @@ class GithubConnection(BaseConnection):
 class GithubWebController(BaseWebController):
 
     log = logging.getLogger("zuul.GithubWebController")
+    tracer = trace.get_tracer("zuul")
 
     def __init__(self, zuul_web, connection):
         self.connection = connection
         self.zuul_web = zuul_web
+        self.event_queue = ConnectionEventQueue(
+            self.zuul_web.zk_client,
+            self.connection.connection_name
+        )
         self.token = self.connection.connection_config.get('webhook_token')
 
     def _validate_signature(self, body, headers):
@@ -1335,6 +2579,7 @@ class GithubWebController(BaseWebController):
 
     @cherrypy.expose
     @cherrypy.tools.json_out(content_type='application/json; charset=utf-8')
+    @tracer.start_as_current_span("GithubEvent")
     def payload(self):
         # Note(tobiash): We need to normalize the headers. Otherwise we will
         # have trouble to get them from the dict afterwards.
@@ -1353,15 +2598,17 @@ class GithubWebController(BaseWebController):
             headers[key.lower()] = value
         body = cherrypy.request.body.read()
         self._validate_signature(body, headers)
-        # We cannot send the raw body through gearman, so it's easy to just
+        # We cannot send the raw body through zookeeper, so it's easy to just
         # encode it as json, after decoding it as utf-8
         json_body = json.loads(body.decode('utf-8'))
 
-        job = self.zuul_web.rpc.submitJob(
-            'github:%s:payload' % self.connection.connection_name,
-            {'headers': headers, 'body': json_body})
-
-        return json.loads(job.data[0])
+        data = {
+            'headers': headers,
+            'body': json_body,
+            'span_context': tracing.getSpanContext(trace.get_current_span()),
+        }
+        self.event_queue.put(data)
+        return data
 
 
 def _status_as_tuple(status):
@@ -1374,24 +2621,25 @@ def _status_as_tuple(status):
         user = creator.get('login')
     context = status.get('context')
     state = status.get('state')
+    # Normalize state to lowercase as the Graphql and REST API are not
+    # consistent in this regard.
+    state = state.lower() if state else state
     return (user, context, state)
 
 
-def log_rate_limit(log, github):
-    try:
-        rate_limit = github.rate_limit()
-        remaining = rate_limit['resources']['core']['remaining']
-        reset = rate_limit['resources']['core']['reset']
-    except Exception:
-        return
-    if github._zuul_user_id:
-        log.debug('GitHub API rate limit (%s, %s) remaining: %s reset: %s',
-                  github._zuul_project, github._zuul_user_id, remaining, reset)
+def _check_as_tuple(check):
+    """Translate a check into a tuple of app, name, conclusion"""
+
+    # A check_run does not contain any "creator" information like a status, but
+    # only the app for/by which it was created.
+    app = check.get("app")
+    if app:
+        slug = app.get("slug")
     else:
-        log.debug('GitHub API rate limit remaining: %s reset: %s',
-                  remaining, reset)
-
-
-def getSchema():
-    github_connection = v.Any(str, v.Schema(dict))
-    return github_connection
+        slug = "Unknown"
+    name = check.get("name")
+    conclusion = check.get("conclusion")
+    # Normalize conclusion to lowercase as the Graphql and REST API are not
+    # consistent in this regard.
+    conclusion = conclusion.lower() if conclusion else conclusion
+    return (slug, name, conclusion)

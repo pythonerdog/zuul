@@ -1,0 +1,7 @@
+---
+features:
+  - |
+    The tenant configuration may now specify the maximum number of
+    changes that should be enqueued in a pipeline in order to protect
+    Zuul from resource exhaustion.  This is not necessary in most
+    circumstances, so the default remains no limit.

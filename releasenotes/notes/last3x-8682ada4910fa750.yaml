@@ -1,0 +1,26 @@
+---
+prelude: |
+  This is expected to be the last 3.x release of Zuul (barring any
+  unanticipated bugfix releases).
+
+  The next release of Zuul, 4.0.0, will require the following
+  deployment changes:
+
+    * TLS ZooKeeper connections
+    * Network connectivity from all components to ZooKeeper
+    * A SQL database
+
+  These features are supported now, so it is important that you take
+  this time to :ref:`switch your ZooKeeper connection to use
+  TLS<zk-encrypted-connections>`, and :ref:`configure a SQL
+  connection<database>`.  Even though only some Zuul components
+  connect to ZooKeeper today, you should ensure that the
+  ``[zookeeper]`` section is present in ``zuul.conf`` for all
+  components, and that they have network connectivity to the ZooKeeper
+  servers.  Doing so will make the upgrade to 4.0.0 seamless.
+
+  These changes are in support of ongoing work to enable multiple
+  scheduler processes for scaling and availability.  After the 4.0.0
+  release, it is anticipated that further upgrades to Zuul made in
+  support of this work will be done with minimal disruption in the
+  course of normal releases.

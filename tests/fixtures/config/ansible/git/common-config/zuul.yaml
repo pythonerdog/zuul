@@ -74,20 +74,18 @@
     vars:
       base_var: 'base_var'
     parent: null
-
-- job:
-    name: base-urls
-    success-url: https://success.example.com/zuul-logs/{build.uuid}/
-    failure-url: https://failure.example.com/zuul-logs/{build.uuid}/
+    nodeset:
+      nodes:
+        - name: test_node
+          label: test_label
 
 - job:
     name: python27
-    parent: base-urls
     run: playbooks/python27.yaml
     pre-run: playbooks/pre.yaml
     post-run: playbooks/post.yaml
     vars:
-      flagpath: '{{zuul._test.test_root}}/{{zuul.build}}.flag'
+      flagpath: '{{zuul._test.test_root}}/builds/{{zuul.build}}.flag'
     roles:
       - zuul: bare-role
     secrets:
@@ -97,13 +95,26 @@
     parent: python27
     name: timeout
     run: playbooks/timeout.yaml
-    timeout: 1
+    # Give the job enough time to reach the run phase but less than 60s
+    # which is the time the run playbook waits to trigger a job timeout.
+    # It needs to reach the run phase since timeouting in the pre-run phase
+    # will lead to a job retry.
+    timeout: 20
+
+- job:
+    parent: python27
+    name: pre-timeout
+    pre-run: playbooks/timeout.yaml
+    # Unlike the prior job we want to check things have failed in pre-run.
+    # To avoid unnecessary retries we limit them here.
+    attempts: 1
+    pre-timeout: 5
 
 - job:
     parent: python27
     name: post-timeout
     post-run: playbooks/timeout.yaml
-    post-timeout: 1
+    post-timeout: 5
 
 - job:
     parent: python27
@@ -114,9 +125,13 @@
         - name: ubuntu-xenial
           label: ubuntu-xenial
     vars:
+      vartest_extra: vartest_job
       vartest_job: vartest_job
       vartest_secret: vartest_job
       vartest_site: vartest_job
+    extra-vars:
+      vartest_extra: vartest_extra
+      vartest_site: vartest_extra
     secrets:
       - vartest_site
       - vartest_secret
@@ -160,7 +175,70 @@
         name: renamed_secret
 
 - job:
-    parent: base-urls
+    name: multiple-parent
+    run: playbooks/multiple-parent.yaml
+    nodeset:
+      nodes:
+        - name: ubuntu-xenial
+          label: ubuntu-xenial
+      groups:
+        - name: foo
+          nodes:
+            - ubuntu-xenial
+        - name: bar
+          nodes:
+            - ubuntu-xenial
+
+- job:
+    name: multiple-child
+    parent: multiple-parent
+    run:
+      - playbooks/foo.yaml
+      - playbooks/bar.yaml
+    post-run: playbooks/foobar-post.yaml
+
+- job:
+    name: multiple-child-no-run
+    parent: multiple-parent
+    post-run: playbooks/multiple-parent-post.yaml
+
+- job:
+    name: multiple-run
+    run:
+      - playbooks/foo.yaml
+      - playbooks/bar.yaml
+    post-run: playbooks/foobar-post.yaml
+    nodeset:
+      nodes:
+        - name: ubuntu-xenial
+          label: ubuntu-xenial
+      groups:
+        - name: foo
+          nodes:
+            - ubuntu-xenial
+        - name: bar
+          nodes:
+            - ubuntu-xenial
+
+- job:
+    name: multiple-run-failure
+    run:
+      - playbooks/first-fail.yaml
+      - playbooks/bar.yaml
+    post-run: playbooks/first-fail-post.yaml
+    nodeset:
+      nodes:
+        - name: ubuntu-xenial
+          label: ubuntu-xenial
+      groups:
+        - name: foo
+          nodes:
+            - ubuntu-xenial
+        - name: bar
+          nodes:
+            - ubuntu-xenial
+
+- job:
     name: hello
     run: playbooks/hello-post.yaml
     post-run: playbooks/hello-post.yaml
@@ -170,3 +248,9 @@
     name: failpost
     run: playbooks/post-broken.yaml
     post-run: playbooks/post-broken.yaml
+
+- job:
+    name: bubblewrap
+    run: playbooks/bubblewrap.yaml
+    nodeset:
+      nodes: []

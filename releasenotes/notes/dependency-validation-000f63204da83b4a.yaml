@@ -1,0 +1,12 @@
+---
+fixes:
+  - |
+    Zuul now treats job dependencies that reference undefined jobs as
+    a configuration error.  Previously a job which depended on another
+    job which did not exist would pass initial syntax validation and
+    only cause a failure in freezing the job graph when Zuul attempted
+    to run the job.  Now incorrect or missing job dependencies are
+    detected during configuration.  This means that new config errors
+    may be prevented from merging.  It also means that existing
+    erroneous job or project configurations will be regarded as
+    configuration errors at startup.

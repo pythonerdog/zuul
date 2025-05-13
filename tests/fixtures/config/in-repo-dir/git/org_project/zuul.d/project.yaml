@@ -1,0 +1,13 @@
+- job:
+    name: project-test1
+
+- queue:
+    name: project-test-queue
+    allow-circular-dependencies: true
+
+- project:
+    name: org/project
+    queue: project-test-queue
+    check:
+      jobs:
+        - project-test1

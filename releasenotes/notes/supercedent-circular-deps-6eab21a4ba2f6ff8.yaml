@@ -1,0 +1,8 @@
+---
+fixes:
+  - |
+    In 10.0.0, supercedent pipelines could raise exceptions when
+    enqueing changes that were part of a dependency cycle (regardless
+    of whether the changes merged or not).  This has been corrected,
+    and the documentation has been updated to clarify that circular
+    dependencies are ignored in supercedent pipelines.

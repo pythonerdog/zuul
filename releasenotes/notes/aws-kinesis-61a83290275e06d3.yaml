@@ -1,0 +1,4 @@
+---
+features:
+  - |
+    Support for using AWS Kinesis as an event source has been added to the Gerrit driver.

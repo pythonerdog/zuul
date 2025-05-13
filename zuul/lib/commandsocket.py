@@ -1,6 +1,7 @@
 # Copyright 2014 OpenStack Foundation
 # Copyright 2014 Hewlett-Packard Development Company, L.P.
 # Copyright 2016 Red Hat
+# Copyright 2022 Acme Gating, LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may
 # not use this file except in compliance with the License. You may obtain
@@ -14,11 +15,56 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+import json
 import logging
 import os
 import socket
 import threading
-import queue
+
+from zuul.lib.queue import NamedQueue
+
+
+class Command:
+    name = None
+    help = None
+    args = []
+
+
+class Argument:
+    name = None
+    help = None
+    required = None
+    default = None
+
+
+class StopCommand(Command):
+    name = 'stop'
+    help = 'Stop the running process'
+
+
+class GracefulCommand(Command):
+    name = 'graceful'
+    help = 'Stop after completing existing work'
+
+
+class PauseCommand(Command):
+    name = 'pause'
+    help = 'Stop accepting new work'
+
+
+class UnPauseCommand(Command):
+    name = 'unpause'
+    help = 'Resume accepting new work'
+
+
+class ReplCommand(Command):
+    name = 'repl'
+    help = 'Enable the REPL for debugging'
+
+
+class NoReplCommand(Command):
+    name = 'norepl'
+    help = 'Disable the REPL'
 
 
 class CommandSocket(object):
@@ -27,7 +73,7 @@ class CommandSocket(object):
     def __init__(self, path):
         self.running = False
         self.path = path
-        self.queue = queue.Queue()
+        self.queue = NamedQueue('CommandSocketQueue')
 
     def start(self):
         self.running = True
@@ -53,7 +99,7 @@ class CommandSocket(object):
         # either handle '_stop' or just ignore the unknown command and
         # then check to see if they should continue to run before
         # re-entering their loop.
-        self.queue.put(b'_stop')
+        self.queue.put(('_stop', []))
         self.socket_thread.join()
 
     def _socketListener(self):
@@ -69,13 +115,25 @@ class CommandSocket(object):
                 buf = buf.strip()
                 self.log.debug("Received %s from socket" % (buf,))
                 s.close()
+
+                buf = buf.decode('utf8')
+                parts = buf.split(' ', 1)
                 # Because we use '_stop' internally to wake up a
                 # waiting thread, don't allow it to actually be
                 # injected externally.
-                if buf != b'_stop':
-                    self.queue.put(buf)
+                args = parts[1:]
+                if args:
+                    args = json.loads(args[0])
+                if parts[0] != '_stop':
+                    self.queue.put((parts[0], args))
             except Exception:
                 self.log.exception("Exception in socket handler")
+
+        # Unlink socket file within the thread so join works and we don't
+        # leak the socket file.
+        self.socket.close()
+        if os.path.exists(self.path):
+            os.unlink(self.path)
 
     def get(self):
         if not self.running:

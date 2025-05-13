@@ -1,0 +1,181 @@
+version: '2.1'
+
+services:
+  gerrit:
+    # This is a mirror of:
+    # image: docker.io/gerritcodereview/gerrit
+    image: quay.io/opendevmirror/gerrit
+    ports:
+      - "8080:8080"
+      - "29418:29418"
+    environment:
+      - CANONICAL_WEB_URL=http://localhost:8080/
+    networks:
+      - zuul
+    volumes:
+      - "gerrit-etc:/var/gerrit/etc"
+      - "gerrit-db:/var/gerrit/db"
+      - "gerrit-git:/var/gerrit/git"
+      - "gerrit-index:/var/gerrit/index"
+      - "gerrit-cache:/var/gerrit/cache"
+  gerritconfig:
+    image: quay.io/zuul-ci/zuul-executor
+    environment:
+      - http_proxy
+      - https_proxy
+      - no_proxy=${no_proxy},gerrit
+    depends_on:
+      - gerrit
+    volumes:
+      - "sshkey:/var/ssh:z"
+      - "nodessh:/var/node:z"
+      - "./playbooks/:/var/playbooks/:z"
+      - "certs:/var/certs:z"
+      - "../../../tools/:/var/zuul-tools/:z"
+      - "lib-zuul-executor:/var/lib/zuul:z"
+    # NOTE(pabelanger): Be sure to update this line each time we change the
+    # default version of ansible for Zuul.
+    command: "/usr/local/lib/zuul/ansible/8/bin/ansible-playbook /var/playbooks/setup.yaml"
+    networks:
+      - zuul
+  zk:
+    # This is a mirror of:
+    # image: docker.io/zookeeper
+    image: quay.io/opendevmirror/zookeeper
+    hostname: examples_zk_1.examples_default
+    volumes:
+      - "./playbooks/:/var/playbooks/:z"
+      - "certs:/var/certs:z"
+      - "./zoo.cfg:/conf/zoo.cfg:z"
+      - "zk-data:/data"
+      - "zk-datalog:/datalog"
+    command: "sh -c '/var/playbooks/wait-to-start-certs.sh && exec zkServer.sh start-foreground'"
+    networks:
+      - zuul
+  mysql:
+    # This is a mirror of:
+    # image: docker.io/mariadb
+    image: quay.io/opendevmirror/mariadb
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: zuul
+      MYSQL_USER: zuul
+      MYSQL_PASSWORD: secret
+      # Work around slow db startup when writing TZINFO data.
+      MYSQL_INITDB_SKIP_TZINFO: 1
+    volumes:
+      - "lib-mysql:/var/lib/mysql"
+    networks:
+      - zuul
+  scheduler:
+    environment:
+      - http_proxy
+      - https_proxy
+      - no_proxy=${no_proxy},gerrit
+      - ZUUL_MYSQL_PASSWORD=secret
+    command: |
+      sh -c '/var/playbooks/wait-to-start-certs.sh && \
+             /var/playbooks/wait-to-start.sh && \
+             exec zuul-scheduler -f'
+    # FIXME: The scheduler has no ansible anymore so use the executor image.
+    #        This needs to be changes such that ansible is not required for startup.
+    image: quay.io/zuul-ci/zuul-scheduler
+    volumes:
+      - "${ZUUL_TUTORIAL_CONFIG:-./etc_zuul/}:/etc/zuul/:z"
+      - "./playbooks/:/var/playbooks/:z"
+      - "sshkey:/var/ssh:z"
+      - "certs:/var/certs:z"
+      - "lib-zuul-scheduler:/var/lib/zuul"
+    networks:
+      - zuul
+  web:
+    command: |
+      sh -c '/var/playbooks/wait-to-start-certs.sh && \
+             exec zuul-web -f'
+    ports:
+      - "9000:9000"
+    image: quay.io/zuul-ci/zuul-web
+    environment:
+      ZUUL_MYSQL_PASSWORD: secret
+    volumes:
+      - "${ZUUL_TUTORIAL_CONFIG:-./etc_zuul/}:/etc/zuul/:z"
+      - "./playbooks/:/var/playbooks/:z"
+      - "certs:/var/certs:z"
+      - "lib-zuul-web:/var/lib/zuul"
+    networks:
+      - zuul
+  executor:
+    privileged: true
+    environment:
+      - http_proxy
+      - https_proxy
+      - no_proxy=${no_proxy},gerrit,scheduler
+      - ZUUL_MYSQL_PASSWORD=secret
+    image: quay.io/zuul-ci/zuul-executor
+    volumes:
+      - "${ZUUL_TUTORIAL_CONFIG:-./etc_zuul/}:/etc/zuul/:z"
+      - "./playbooks/:/var/playbooks/:z"
+      - "sshkey:/var/ssh:z"
+      - "logs:/srv/static/logs:z"
+      - "certs:/var/certs:z"
+      - "lib-zuul-executor:/var/lib/zuul:z"
+    command: "sh -c '/var/playbooks/wait-to-start-certs.sh && exec zuul-executor -f'"
+    networks:
+      - zuul
+  node:
+    build:
+      dockerfile: node-Dockerfile
+      context: ./
+      args:
+        http_proxy: "${http_proxy}"
+        https_proxy: "${http_proxy}"
+        no_proxy: "${no_proxy},gerrit"
+    volumes:
+      - "nodessh:/root/.ssh:z"
+    networks:
+      - zuul
+  launcher:
+    image: quay.io/zuul-ci/nodepool-launcher
+    volumes:
+      - "./playbooks/:/var/playbooks/:z"
+      - "./etc_nodepool/:/etc/nodepool/:z"
+      - "certs:/var/certs:z"
+    ports:
+      - "8005:8005"
+    command: "sh -c '/var/playbooks/wait-to-start-certs.sh && exec nodepool-launcher -f'"
+    networks:
+      - zuul
+  logs:
+    build:
+      dockerfile: logs-Dockerfile
+      context: ./
+      args:
+        http_proxy: "${http_proxy}"
+        https_proxy: "${http_proxy}"
+        no_proxy: "${no_proxy}"
+    ports:
+      - "8000:80"
+    volumes:
+      - "logs:/usr/local/apache2/htdocs:z"
+    networks:
+      - zuul
+
+volumes:
+  sshkey:
+  nodessh:
+  logs:
+  certs:
+  lib-zuul-scheduler:
+  lib-zuul-web:
+  lib-zuul-executor:
+  zk-data:
+  zk-datalog:
+  lib-mysql:
+  gerrit-etc:
+  gerrit-db:
+  gerrit-git:
+  gerrit-index:
+  gerrit-cache:
+
+networks:
+  zuul:

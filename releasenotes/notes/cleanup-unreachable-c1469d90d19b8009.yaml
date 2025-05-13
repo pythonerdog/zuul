@@ -1,0 +1,8 @@
+---
+fixes:
+  - |
+    The recent security fix to run cleanup-run playbooks interleaved
+    with post-run playbooks incorrectly caused jobs to retry if a
+    cleanup playbook encountered an unreachable host.  This has been
+    corrected and a cleanup playbook will never cause a job to retry
+    if it encounters an unreachable host.

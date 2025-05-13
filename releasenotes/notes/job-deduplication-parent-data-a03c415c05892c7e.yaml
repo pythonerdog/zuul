@@ -1,0 +1,5 @@
+---
+upgrade:
+  - |
+    Input data from a parent job (return data or artifacts) no longer
+    influences whether a child job can be deduplicated or not.

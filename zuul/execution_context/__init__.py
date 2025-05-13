@@ -38,3 +38,18 @@ class BaseExecutionContext(object, metaclass=abc.ABCMeta):
         :rtype: Callable
         """
         pass
+
+    @abc.abstractmethod
+    def getNamespacePids(self, proc):
+        """Given a Popen object, return the namespace and a list of host-side
+        process ids in proc's first child namespace.
+
+        :arg Popen proc: The Popen object that is the parent of the namespace.
+
+        :returns: A tuple of the namespace id and all of the process
+            ids in the namespace.  The namespace id is None if no namespace
+            was found.
+        :rtype: tuple(int, list[int])
+
+        """
+        pass

@@ -1,0 +1,4 @@
+- job:
+    name: project-vars-job
+    vars:
+      test_var: fail

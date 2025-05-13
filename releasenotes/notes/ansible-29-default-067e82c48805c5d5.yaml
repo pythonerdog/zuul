@@ -1,0 +1,4 @@
+---
+upgrade:
+  - |
+    Zuul now defaults to Ansible 2.9 if no version is specified.

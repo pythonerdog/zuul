@@ -1,0 +1,17 @@
+---
+features:
+  - |
+    GitHub pipeline triggers now support embedded require and reject
+    filters in order to match.  Any conditions set for the pipeline in
+    require or reject filters may also be set for event trigger
+    filters.
+
+    This can be used to construct pipelines which trigger based on
+    certain events but only if certain other conditions are met.  It
+    is distinct from pipeline requirements in that it only affects
+    items that are directly enqueued whereas pipeline requirements
+    affect dependencies as well.
+deprecations:
+  - |
+    The `require-status` GitHub trigger attribute is deprecated.
+    Use :attr:`pipeline.trigger.<github source>.require` instead.

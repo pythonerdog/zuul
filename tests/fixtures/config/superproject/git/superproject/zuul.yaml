@@ -1,0 +1,28 @@
+- job:
+    name: superproject-job
+
+- job:
+    name: integration-job
+
+- project-template:
+    name: submodule-jobs
+    check:
+      jobs:
+        - integration-job
+
+- project:
+    name: submodule1
+    templates: [submodule-jobs]
+- project:
+    name: othermodule
+    templates: [submodule-jobs]
+- project:
+    name: ^submodules/.*$
+    templates: [submodule-jobs]
+
+# This project
+- project:
+    templates: [submodule-jobs]
+    check:
+      jobs:
+        - superproject-job

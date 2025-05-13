@@ -1,0 +1,6 @@
+---
+features:
+  - |
+    Changes in dependent queues are now automatically dequeued if they
+    no longer meet the mergability requirements set by the upstream
+    code review system.

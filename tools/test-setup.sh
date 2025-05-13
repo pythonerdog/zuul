@@ -7,14 +7,19 @@
 # This setup needs to be run as a user that can run sudo.
 TOOLSDIR=$(dirname $0)
 
-# Be sure mysql and zookeeper are started.
+# Prepare a tmpfs for Zuul test root
+if [[ -n "${ZUUL_TEST_ROOT:-}" ]]; then
+    sudo mkdir -p "$ZUUL_TEST_ROOT"
+    sudo mount -t tmpfs -o noatime,nodev,nosuid,size=64M none "$ZUUL_TEST_ROOT"
+fi
+
+# Be sure mysql is started.
 sudo service mysql start
 sudo service postgresql start
-sudo service zookeeper start
 
 # The root password for the MySQL database; pass it in via
 # MYSQL_ROOT_PW.
-DB_ROOT_PW=${MYSQL_ROOT_PW:-insecure_slave}
+DB_ROOT_PW=${MYSQL_ROOT_PW:-insecure_worker}
 
 # This user and its password are used by the tests, if you change it,
 # your tests might fail.
@@ -29,8 +34,8 @@ sudo -H mysqladmin -u root password $DB_ROOT_PW
 sudo -H mysql -u root -p$DB_ROOT_PW -h localhost -e "
     DELETE FROM mysql.user WHERE User='';
     FLUSH PRIVILEGES;
-    GRANT ALL PRIVILEGES ON *.*
-        TO '$DB_USER'@'%' identified by '$DB_PW' WITH GRANT OPTION;"
+    CREATE USER '$DB_USER'@'%' IDENTIFIED BY '$DB_PW';
+    GRANT ALL PRIVILEGES ON *.* TO '$DB_USER'@'%' WITH GRANT OPTION;"
 
 # Now create our database.
 mysql -u $DB_USER -p$DB_PW -h 127.0.0.1 -e "
@@ -39,8 +44,8 @@ mysql -u $DB_USER -p$DB_PW -h 127.0.0.1 -e "
     CREATE DATABASE openstack_citest CHARACTER SET utf8;"
 
 # setup postgres user and database
-sudo -u postgres psql -c "CREATE ROLE $DB_USER WITH LOGIN SUPERUSER PASSWORD '$DB_PW';"
-sudo -u postgres psql -c "CREATE DATABASE openstack_citest OWNER $DB_USER TEMPLATE template0 ENCODING 'UTF8';"
+sudo -Hi -u postgres psql -c "CREATE ROLE $DB_USER WITH LOGIN SUPERUSER PASSWORD '$DB_PW';"
+sudo -Hi -u postgres psql -c "CREATE DATABASE openstack_citest OWNER $DB_USER TEMPLATE template0 ENCODING 'UTF8';"
 
 LSBDISTCODENAME=$(lsb_release -cs)
 if [ $LSBDISTCODENAME == 'xenial' ]; then

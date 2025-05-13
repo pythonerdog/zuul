@@ -1,0 +1,6 @@
+- project:
+    name: org/project
+    templates:
+      - files-template
+    check:
+      jobs: []

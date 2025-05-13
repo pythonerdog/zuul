@@ -1,0 +1,4 @@
+---
+features:
+  - |
+    Allow an authorized user to dequeue changes from the Web UI's status page.

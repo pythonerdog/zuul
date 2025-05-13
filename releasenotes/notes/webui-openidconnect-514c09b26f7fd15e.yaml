@@ -1,0 +1,5 @@
+---
+features:
+  - |
+    Add authentication in the web UI. Zuul's web UI can be configured to authenticate
+    users against an Identity Provider supporting the OpenID Connect protocol.

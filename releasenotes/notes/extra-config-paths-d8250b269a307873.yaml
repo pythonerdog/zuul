@@ -1,0 +1,12 @@
+---
+features:
+  - |
+    A new option,
+    :attr:`tenant.untrusted-projects.<project>.extra-config-paths` has
+    been added to allow an admin to indicate that Zuul should load
+    extra configuration data from a specific project in a tenant.
+
+    This feature may be useful to allow a project that primarily holds
+    shared jobs or roles to include additional in-repo configuration
+    for its own testing (which may not be relevant to other users of
+    the project).

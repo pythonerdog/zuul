@@ -1,0 +1,98 @@
+- pipeline:
+    name: check
+    manager: independent
+    post-review: true
+    trigger:
+      gerrit:
+        - event: patchset-created
+    success:
+      gerrit:
+        Verified: 1
+    failure:
+      gerrit:
+        Verified: -1
+
+- job:
+    name: base
+    parent: null
+    pre-run: playbooks/base-pre.yaml
+    post-run:
+      - playbooks/base-post.yaml
+      - name: playbooks/base-cleanup.yaml
+        cleanup: true
+    nodeset:
+      nodes:
+        - name: test_node
+          label: test_label
+
+- job:
+    name: python27
+    pre-run: playbooks/pre.yaml
+    post-run:
+      - playbooks/post.yaml
+      - name: playbooks/cleanup.yaml
+        cleanup: true
+    vars:
+      waitpath: '{{zuul._test.test_root}}/builds/{{zuul.build}}/test_wait'
+    run: playbooks/python27.yaml
+
+- job:
+    name: python27-failure
+    # Intentionally a list
+    post-run:
+      - name: playbooks/cleanup.yaml
+        cleanup: true
+    run: playbooks/failure.yaml
+
+- job:
+    name: python27-cleanup-timeout
+    # Intentionally a dict
+    post-timeout: 5
+    post-run:
+      name: playbooks/cleanup-timeout.yaml
+      cleanup: true
+    run: playbooks/python27.yaml
+
+- job:
+    name: child-cleanup-failure
+    description: |
+      A job that fails during the run playbook
+    parent: python27-failure
+    pre-run: playbooks/child-pre.yaml
+    post-run:
+      - playbooks/child-post.yaml
+      - name: playbooks/child-cleanup.yaml
+        cleanup: true
+
+- job:
+    name: child-cleanup-failure-unreachable
+    description: |
+      A job that fails during the run playbook but then also has an
+      unreachable cleanup playbook
+    parent: python27-failure
+    pre-run: playbooks/child-pre.yaml
+    post-run:
+      - playbooks/child-post.yaml
+      - name: playbooks/child-cleanup-unreachable.yaml
+        cleanup: true
+
+- job:
+    name: child-cleanup-failure-old-syntax
+    description: |
+      A job that fails during the run playbook
+    parent: python27-failure
+    pre-run: playbooks/child-pre.yaml
+    post-run: playbooks/child-post.yaml
+    # Backwards-compat syntax
+    cleanup-run: playbooks/child-cleanup.yaml
+
+- job:
+    name: child-cleanup-failure-unreachable-old-syntax
+    description: |
+      A job that fails during the run playbook but then also has an
+      unreachable cleanup playbook
+    parent: python27-failure
+    pre-run: playbooks/child-pre.yaml
+    post-run: playbooks/child-post.yaml
+    # Backwards-compat syntax
+    cleanup-run: playbooks/child-cleanup-unreachable.yaml

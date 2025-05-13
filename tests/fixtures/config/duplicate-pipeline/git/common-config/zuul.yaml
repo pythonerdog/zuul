@@ -36,11 +36,10 @@
 
 - project:
     name: org/project
+    queue: integrated
     dup1:
-      queue: integrated
       jobs:
         - project-test1
     dup2:
-      queue: integrated
       jobs:
         - project-test1

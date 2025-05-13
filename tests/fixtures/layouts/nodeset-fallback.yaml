@@ -1,0 +1,66 @@
+- pipeline:
+    name: check
+    manager: independent
+    trigger:
+      gerrit:
+        - event: patchset-created
+    success:
+      gerrit:
+        Verified: 1
+    failure:
+      gerrit:
+        Verified: -1
+
+- nodeset:
+    name: fast-nodeset
+    nodes:
+      - label: fast-label
+        name: controller
+
+- nodeset:
+    name: red-nodeset
+    nodes:
+      - label: red-label
+        name: controller
+
+- nodeset:
+    name: blue-nodeset
+    nodes:
+      - label: blue-label
+        name: controller
+
+# This adds an unused second level of alternatives to verify we are
+# able to flatten it.
+- nodeset:
+    name: red-or-blue-nodeset
+    alternatives:
+      - red-nodeset
+      - blue-nodeset
+
+# Test alternatives by name or anonymous nodeset
+- nodeset:
+    name: fast-or-slow
+    alternatives:
+      - fast-nodeset
+      - nodes:
+          label: slow-label
+          name: controller
+      - red-or-blue-nodeset
+
+- job:
+    name: base
+    parent: null
+    run: playbooks/base.yaml
+
+- job:
+    name: check-job
+    nodeset: fast-or-slow
+
+- project:
+    name: org/project
+    check:
+      jobs:
+        - check-job
+    gate:
+      jobs:
+        - check-job

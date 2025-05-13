@@ -1,0 +1,54 @@
+- pipeline:
+    name: check
+    manager: independent
+    trigger:
+      github:
+        # Valid
+        - event: pull_request
+          action: comment
+          comment: test me
+        # Valid
+        - event: pull_request
+          action:
+            - opened
+            - closed
+        # Valid
+        - event: pull_request
+          action: labeled
+          label: foobar
+        # Valid
+        - event: pull_request
+          action: unlabeled
+          label: barfoo
+        # Valid
+        - event: check_run
+          action: rerequested
+        # "extra keys not allowed @ data['check']"
+        - event: pull_request
+          action:
+            - opened
+            - closed
+          branch: ^master$
+          check: foo
+        # "extra keys not allowed @ data['branch']"
+        - event: check_run
+          branch: ^master$
+        # "as a list is deprecated"
+        - event:
+            - pull_request
+            - check_run
+        # "'require-status' trigger attribute"
+        # "extra keys not allowed @ data['require-status']"
+        - event: check_run
+          require-status: foo
+        # "'unlabel' trigger attribute"
+        # "extra keys not allowed @ data['unlabel']"
+        - event: check_run
+          unlabel: foo
+        # "Use 'rerequested' instead"
+        - event: check_run
+          action: requested
+    success:
+      github: {}
+    failure:
+      github: {}

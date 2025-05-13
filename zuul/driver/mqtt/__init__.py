@@ -23,7 +23,8 @@ class MQTTDriver(Driver, ConnectionInterface, ReporterInterface):
     def getConnection(self, name, config):
         return mqttconnection.MQTTConnection(self, name, config)
 
-    def getReporter(self, connection, pipeline, config=None):
+    def getReporter(self, connection, pipeline, config=None,
+                    parse_context=None):
         return mqttreporter.MQTTReporter(self, connection, config)
 
     def getReporterSchema(self):

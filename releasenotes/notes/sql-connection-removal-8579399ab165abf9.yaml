@@ -1,0 +1,7 @@
+---
+upgrade:
+  - |
+    Support for configuring the database as a `connection` in
+    ``zuul.conf`` was deprecated in Zuul version 4.0 and has now been
+    removed.  Refer to :ref:`database` how to configure the database
+    now.

@@ -1,0 +1,3 @@
+gate_timeout: 180
+pipeline_expected_result: ok
+change_id: "{{ changeinfo.id }}"

@@ -1,0 +1,7 @@
+- pipeline:
+    name: check
+    manager: independent
+    trigger:
+      zuul:
+        - event: parent-change-enqueued
+          pipeline: '(?!invalid)'

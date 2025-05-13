@@ -1,0 +1,5 @@
+---
+features:
+  - |
+    Support for global (cross-tenant) semaphores has been added.  See
+    :ref:`global_semaphore`.

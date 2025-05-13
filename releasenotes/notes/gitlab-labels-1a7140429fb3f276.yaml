@@ -1,0 +1,6 @@
+---
+features:
+  - |
+    Added support for adding and removing merge request labels in the
+    GitLab driver, as well as triggering pipelines on label removal
+    (label addition was already supported).

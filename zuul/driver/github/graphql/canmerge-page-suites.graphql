@@ -1,0 +1,41 @@
+query canMergeDataPageSuites(
+  $commit_node_id: ID!
+  $cursor: String
+) {
+  node(id: $commit_node_id) {
+    ... on Commit {
+      checkSuites(first: 100, after: $cursor) {
+        pageInfo {
+          endCursor
+          hasNextPage
+        }
+        nodes {
+	  id
+          app {
+            name
+            slug
+          }
+          checkRuns(first: 100) {
+            pageInfo {
+              endCursor
+              hasNextPage
+            }
+            nodes {
+              name
+              conclusion
+            }
+          }
+        }
+      }
+      status {
+        contexts {
+          creator {
+            login
+          }
+          state
+          context
+        }
+      }
+    }
+  }
+}

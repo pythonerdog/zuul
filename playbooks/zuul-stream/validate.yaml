@@ -1,0 +1,34 @@
+- name: Validate output - setupvar
+  shell: |
+    egrep "^.*\| {{ item.node }} \|\s+\"setupvar\": {" {{ item.filename }}
+
+- name: Validate output - shell task
+  shell: |
+    egrep "^.*\| {{ item.node }} \| 1: lo:" {{ item.filename }}
+
+- name: Validate output - loop with items
+  shell: |
+    egrep "^.+\| {{ item.node }} \| ok: Item: item1" {{ item.filename }}
+    egrep "^.+\| {{ item.node }} \| ok: Item: item2" {{ item.filename }}
+    egrep "^.+\| {{ item.node }} \| ok: Item: item3" {{ item.filename }}
+
+- name: Validate output - loop with complex items
+  shell: |
+    egrep "^.+\| {{ item.node }} \| ok: Item: Runtime" {{ item.filename }}
+
+- name: Validate output - failed shell task
+  shell: |
+    egrep "^.+\| {{ item.node }} \| Exception: Test module failure exception task" {{ item.filename }}
+
+- name: Validate output - item loop with exception
+  shell: |
+    egrep "^.+\| {{ item.node }} \| Exception: Test module failure exception loop" {{ item.filename }}
+
+- name: Validate output - binary data
+  shell: |
+    egrep "^.*\| {{ item.node }} \| \\\\x80abc" {{ item.filename }}
+
+- name: Validate output - no waiting on logger
+  shell: |
+    egrep -v "Waiting on logger" {{ item.filename }}
+    egrep -v "Log Stream did not terminate" {{ item.filename }}

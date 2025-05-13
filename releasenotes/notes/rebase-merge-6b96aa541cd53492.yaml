@@ -1,0 +1,5 @@
+---
+features:
+  - |
+    The :value:`project.merge-mode.rebase` merge-mode is now supported
+    for GitHub.

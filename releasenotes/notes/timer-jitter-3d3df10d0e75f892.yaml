@@ -1,0 +1,7 @@
+---
+features:
+  - |
+    Pipeline timer triggers with jitter now apply the jitter to each
+    project-branch individually (instead of to the pipeline as a
+    whole).  This can reduce the thundering herd effect on external
+    systems for periodic pipelines with many similar jobs.

@@ -1,0 +1,8 @@
+- project:
+    name: org/project
+    gate:
+      jobs:
+        - test1
+        - test2:
+            dependencies:
+              - test1

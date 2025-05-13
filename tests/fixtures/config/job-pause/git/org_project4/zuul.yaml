@@ -1,0 +1,15 @@
+- job:
+    name: compile-fail
+    run: playbooks/compile-fail.yaml
+
+- job:
+    name: after-compile
+    run: playbooks/after-compile.yaml
+
+- project:
+    check:
+      jobs:
+        - compile-fail
+        - after-compile:
+            dependencies:
+              - compile-fail

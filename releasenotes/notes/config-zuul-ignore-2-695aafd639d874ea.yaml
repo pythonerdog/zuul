@@ -1,0 +1,6 @@
+---
+features:
+  - |
+    Subdirectories of ``zuul.d`` or ``.zuul.d`` can be ignored when
+    reading configuration by placing a ``.zuul.ignore`` file inside
+    them.

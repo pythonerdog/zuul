@@ -1,0 +1,7 @@
+---
+features:
+  - |
+    Gerrit and GitHub repositories will now automatically use the
+    default branch as specified in their respective systems as the
+    project's default branch.  This may still be overridden in zuul
+    using the :attr:`project.default-branch` setting.

@@ -1,0 +1,4 @@
+---
+features:
+  - Artifacts may now include a metadata field for storing arbitrary
+    metadata about the artifacts in the SQL database.

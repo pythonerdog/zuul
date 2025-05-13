@@ -1,0 +1,7 @@
+---
+upgrade:
+  - |
+    If using the GitHub driver in app mode, you should consider
+    also generating and adding an ``api_token``.  The option is not
+    strictly required but will increase rate limits and add
+    functionality for projects the app is not installed in.

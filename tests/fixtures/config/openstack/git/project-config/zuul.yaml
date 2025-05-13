@@ -80,20 +80,20 @@
 
 - project:
     name: openstack/nova
+    queue: integrated
     templates:
       - python-jobs
     check:
       jobs:
         - dsvm
-    gate:
-      queue: integrated
+    gate: {}
 
 - project:
     name: openstack/keystone
+    queue: integrated
     templates:
       - python-jobs
     check:
       jobs:
         - dsvm
-    gate:
-      queue: integrated
+    gate: {}

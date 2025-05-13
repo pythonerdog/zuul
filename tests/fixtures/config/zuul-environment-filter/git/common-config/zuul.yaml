@@ -1,0 +1,21 @@
+- pipeline:
+    name: promote
+    manager: supercedent
+    post-review: true
+    trigger:
+      gerrit:
+        - event: change-merged
+
+- job:
+    name: zuul-environment-filter
+    parent: null
+    run: playbooks/zuul-environment-filter.yaml
+    nodeset:
+      nodes:
+        - name: ubuntu-xenial
+          label: ubuntu-xenial
+
+- project:
+    promote:
+      jobs:
+        - zuul-environment-filter

@@ -1,0 +1,5 @@
+---
+other:
+  - |
+    The --id option to both the autohold-delete and autohold-info zuul
+    CLI commands has been removed.

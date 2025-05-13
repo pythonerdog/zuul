@@ -15,11 +15,13 @@ handlers=console
 level=DEBUG
 handlers=debug,normal
 qualname=zuul
+propagate=0
 
 [logger_gerrit]
 level=DEBUG
 handlers=debug,normal
 qualname=gerrit
+propagate=0
 
 [handler_console]
 level=WARNING

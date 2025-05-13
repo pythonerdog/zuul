@@ -1,0 +1,5 @@
+---
+features:
+  - |
+    Zuul now supports the ``--validate-tenants`` switch which can be used to
+    validate the complete configuration of the listed tenants.

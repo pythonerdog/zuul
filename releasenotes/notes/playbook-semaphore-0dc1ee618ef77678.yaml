@@ -1,0 +1,11 @@
+---
+features:
+  - |
+    Individual playbooks may now be wrapped by a semaphore.  Zuul will
+    start the job and proceed up to the point of a playbook which
+    requires a semaphore and then wait until it is able to aquire the
+    semaphore before proceeding.  It releases the semaphore after the
+    end of that individual playbook.
+
+    The same semaphore may be used for both jobs and playbooks, but an
+    individual job may not use the same semaphore for both purposes.

@@ -1,0 +1,6 @@
+---
+upgrade:
+  - |
+    The `web.status_url` configuration option is no longer supported and using
+    the `status_url`, `change` and `changes` string substitutions in pipeline
+    reporter messages will result in an error.

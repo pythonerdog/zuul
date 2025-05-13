@@ -1,0 +1,29 @@
+- hosts: all
+  name: Prepare node for Zuul tests
+  roles:
+    - configure-swap
+    - ensure-dstat-graph
+    - run-dstat
+    - role: ensure-zookeeper
+      zookeeper_use_tls: true
+      zookeeper_use_tmpfs: false
+
+- hosts: all
+  name: Use eatmydata with ZooKeeper
+  tasks:
+    - name: Install eatmydata
+      package:
+        name: eatmydata
+        state: present
+      become: true
+    - name: Ensure Zookeeper is not running
+      command: pkill -f zookeeper
+      register: _pkill
+      # 0 is killed
+      # 1 is no process matched
+      # >1 is some sort of actual error
+      failed_when: _pkill.rc > 1
+      become: true
+    - name: Start Zookeeper
+      command: eatmydata /opt/zookeeper/bin/zkServer.sh start
+      become: true

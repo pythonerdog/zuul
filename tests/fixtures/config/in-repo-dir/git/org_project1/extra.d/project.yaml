@@ -1,0 +1,8 @@
+- job:
+    name: project1-test1
+
+- project:
+    name: org/project1
+    check:
+      jobs:
+        - project1-test1

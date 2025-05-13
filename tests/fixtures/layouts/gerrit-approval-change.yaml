@@ -1,0 +1,39 @@
+- pipeline:
+    name: check
+    manager: independent
+    trigger:
+      gerrit:
+        - event: comment-added
+          approval-change:
+            Code-Review: 2
+
+    require:
+      gerrit:
+        approval:
+          - Code-Review: 2
+    success:
+      gerrit:
+        Verified: 1
+    failure:
+      gerrit:
+        Verified: -1
+
+- job:
+    name: base
+    parent: null
+    run: playbooks/base.yaml
+    nodeset:
+      nodes:
+        - label: ubuntu-xenial
+          name: controller
+
+- job:
+    name: check-job
+    run: playbooks/check.yaml
+
+- project:
+    name: org/project
+    check:
+      jobs:
+        - check-job
+

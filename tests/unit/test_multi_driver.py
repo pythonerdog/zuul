@@ -20,8 +20,11 @@ class TestGerritAndGithub(ZuulTestCase):
     config_file = 'zuul-connections-gerrit-and-github.conf'
     tenant_config_file = 'config/multi-driver/main.yaml'
 
-    def setup_config(self):
-        super(TestGerritAndGithub, self).setup_config()
+    # Those tests are also using the fake github implementation which
+    # means that every scheduler gets a different fake github instance.
+    # Thus, assertions might fail depending on which scheduler did the
+    # interaction with Github.
+    scheduler_count = 1
 
     def test_multiple_project_gerrit_and_github(self):
         self.executor_server.hold_jobs_in_build = True

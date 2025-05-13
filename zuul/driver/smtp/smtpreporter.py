@@ -1,4 +1,5 @@
 # Copyright 2013 Rackspace Australia
+# Copyright 2024 Acme Gating, LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may
 # not use this file except in compliance with the License. You may obtain
@@ -15,6 +16,7 @@
 import logging
 import voluptuous as v
 
+from zuul.lib.logutil import get_annotated_logger
 from zuul.reporter import BaseReporter
 
 
@@ -24,12 +26,15 @@ class SMTPReporter(BaseReporter):
     name = 'smtp'
     log = logging.getLogger("zuul.SMTPReporter")
 
-    def report(self, item):
+    def report(self, item, phase1=True, phase2=True):
         """Send the compiled report message via smtp."""
+        if not phase1:
+            return
+        log = get_annotated_logger(self.log, item.event)
         message = self._formatItemReport(item)
 
-        self.log.debug("Report change %s, params %s, message: %s" %
-                       (item.change, self.config, message))
+        log.debug("Report %s, params %s, message: %s",
+                  item, self.config, message)
 
         from_email = self.config['from'] \
             if 'from' in self.config else None
@@ -38,11 +43,17 @@ class SMTPReporter(BaseReporter):
 
         if 'subject' in self.config:
             subject = self.config['subject'].format(
-                change=item.change)
+                change=item.changes[0],
+                changes=item.changes,
+                pipeline=item.manager.pipeline.getSafeAttributes())
         else:
-            subject = "Report for change %s" % item.change
+            subject = "Report for changes {changes} against {ref}".format(
+                changes=' '.join([str(c) for c in item.changes]),
+                ref=' '.join([c.ref for c in item.changes]))
 
-        self.connection.sendMail(subject, message, from_email, to_email)
+        self.connection.sendMail(subject, message, from_email, to_email,
+                                 zuul_event_id=item.event)
+        return []
 
 
 def getSchema():

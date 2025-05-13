@@ -1,0 +1,6 @@
+---
+features:
+  - |
+    Zuul will now begin the process of aborting following jobs and
+    re-ordering pipelines immediately after the first Ansible task
+    fails.

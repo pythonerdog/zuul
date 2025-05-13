@@ -1,0 +1,16 @@
+- tenant:
+    name: tenant-one
+    source:
+      gerrit:
+        config-projects:
+          - common-config
+        untrusted-projects:
+          - superproject:
+              configure-projects:
+                - submodule1
+                - othermodule
+                - ^submodules/.*$
+          - submodule1
+          - othermodule
+          - submodules/foo
+          - unrelated-project

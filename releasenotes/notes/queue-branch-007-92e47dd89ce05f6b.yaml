@@ -1,0 +1,8 @@
+---
+fixes:
+  - |
+    Duplicate :attr:`queue` configuration items are now permitted on
+    multiple branches of the same project as long as their
+    configuration is identical.  Similar to secrets and semaphores,
+    this can help avoid spurious configuration errors when branching a
+    project with in-repo configuration.

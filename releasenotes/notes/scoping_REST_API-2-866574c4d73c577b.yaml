@@ -1,0 +1,11 @@
+---
+features:
+  - |
+    REST API: authorizations: add a tenant-scoped endpoint at
+    '/api/tenant/{tenant}/authorizations'. Calling the endpoint will return
+    a list of admin tenants limited to the scoped tenant, if the user has admin
+    privileges on it.
+deprecations:
+  - |
+    REST API: authorizations: the /api/user/authorizations endpoint is deprecated
+    in favor of the tenant-scoped endpoint. It will be removed next release.

@@ -1,0 +1,34 @@
+- hosts: localhost
+  vars:
+    workspace: /tmp/tutorial-zuul
+    local: true
+    ssh_public_key: "{{ lookup('file', '~/.ssh/id_rsa.pub', errors='ignore') }}"
+    ssh_agent:
+      stdout: ''
+  environment:
+    GIT_SSH_COMMAND: "ssh -o UserKnownHostsFile={{ workspace }}/known_hosts"
+  tasks:
+    - block:
+        - name: Run tutorial
+          include_tasks: run-tutorial.yaml
+      always:
+        - name: Stop ssh-agent
+          when: stop_ssh_agent is defined
+          shell:
+            executable: /bin/bash
+            cmd: |
+              {{ ssh_agent.stdout }}
+              ssh-agent -k
+        - name: Print SSH command
+          debug:
+            msg:
+              - Use GIT_SSH_COMMAND='ssh -o UserKnownHostsFile={{ workspace }}/known_hosts'
+              - to make further test using /tmp/tutorial-zuul/test1
+              
+          when: stop_ssh_agent is not defined
+        - name: Print SSH command using temp id_rsa
+          debug:
+            msg:
+              - Use GIT_SSH_COMMAND='ssh -o UserKnownHostsFile={{ workspace }}/known_hosts -i {{ workspace }}/id_rsa'
+              - to make further test using /tmp/tutorial-zuul/test1
+          when: stop_ssh_agent is defined

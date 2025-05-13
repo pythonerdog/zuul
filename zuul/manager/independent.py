@@ -1,3 +1,5 @@
+# Copyright 2021-2024 Acme Gating, LLC
+#
 # Licensed under the Apache License, Version 2.0 (the "License"); you may
 # not use this file except in compliance with the License. You may obtain
 # a copy of the License at
@@ -11,6 +13,7 @@
 # under the License.
 
 from zuul import model
+from zuul.lib.logutil import get_annotated_logger
 from zuul.manager import PipelineManager, DynamicChangeQueueContextManager
 
 
@@ -18,90 +21,108 @@ class IndependentPipelineManager(PipelineManager):
     """PipelineManager that puts every Change into its own ChangeQueue."""
 
     changes_merge = False
+    type = 'independent'
 
-    def _postConfig(self, layout):
-        super(IndependentPipelineManager, self)._postConfig(layout)
+    def getChangeQueue(self, change, event, existing=None):
+        log = get_annotated_logger(self.log, event)
 
-    def getChangeQueue(self, change, existing=None):
-        # creates a new change queue for every change
+        # We ignore any shared change queues on the pipeline and
+        # instead create a new change queue for every change.
         if existing:
             return DynamicChangeQueueContextManager(existing)
-        change_queue = model.ChangeQueue(self.pipeline)
-        change_queue.addProject(change.project)
-        self.pipeline.addQueue(change_queue)
-        self.log.debug("Dynamically created queue %s", change_queue)
-        return DynamicChangeQueueContextManager(change_queue)
+        change_queue = model.ChangeQueue.new(
+            self.current_context,
+            manager=self,
+            dynamic=True)
+        change_queue.addProject(change.project, None)
+        self.state.addQueue(change_queue)
+        log.debug("Dynamically created queue %s", id(change_queue))
+        return DynamicChangeQueueContextManager(
+            change_queue, allow_delete=True)
 
-    def enqueueChangesAhead(self, change, quiet, ignore_requirements,
-                            change_queue, history=None):
-        if history and change in history:
-            # detected dependency cycle
-            self.log.warn("Dependency cycle detected")
+    def enqueueChangesAhead(self, changes, event, quiet, ignore_requirements,
+                            change_queue, history=None, dependency_graph=None,
+                            warnings=None):
+        log = get_annotated_logger(self.log, event)
+
+        history = history if history is not None else []
+        for change in changes:
+            if hasattr(change, 'number'):
+                history.append(change)
+            else:
+                # Don't enqueue dependencies ahead of a non-change ref.
+                return True
+
+        abort, needed_changes = self.getMissingNeededChanges(
+            changes, change_queue, event,
+            dependency_graph=dependency_graph)
+        if abort:
             return False
-        if hasattr(change, 'number'):
-            history = history or []
-            history = history + [change]
-        else:
-            # Don't enqueue dependencies ahead of a non-change ref.
-            return True
 
-        ret = self.checkForChangesNeededBy(change, change_queue)
-        if ret in [True, False]:
-            return ret
-        self.log.debug("  Changes %s must be merged ahead of %s" %
-                       (ret, change))
-        for needed_change in ret:
+        if not needed_changes:
+            return True
+        log.debug("  Changes %s must be merged ahead of %s" % (
+            needed_changes, change))
+        for needed_change in needed_changes:
             # This differs from the dependent pipeline by enqueuing
             # changes ahead as "not live", that is, not intended to
-            # have jobs run.  Also, pipeline requirements are always
-            # ignored (which is safe because the changes are not
-            # live).
-            r = self.addChange(needed_change, quiet=True,
-                               ignore_requirements=True,
-                               live=False, change_queue=change_queue,
-                               history=history)
-            if not r:
-                return False
+            # have jobs run.  Pipeline requirements are still in place
+            # in order to avoid unreviewed code being executed in
+            # pipelines that require review.
+            if needed_change not in history:
+                r = self.addChange(needed_change, event, quiet=True,
+                                   ignore_requirements=ignore_requirements,
+                                   live=False,
+                                   change_queue=change_queue,
+                                   history=history,
+                                   dependency_graph=dependency_graph,
+                                   warnings=warnings)
+                if not r:
+                    return False
         return True
 
-    def checkForChangesNeededBy(self, change, change_queue):
+    def getMissingNeededChanges(self, changes, change_queue, event,
+                                dependency_graph=None, item=None):
+        log = get_annotated_logger(self.log, event)
+
         if self.pipeline.ignore_dependencies:
-            return True
-        self.log.debug("Checking for changes needed by %s:" % change)
-        # Return true if okay to proceed enqueing this change,
-        # false if the change should not be enqueued.
-        if (hasattr(change, 'commit_needs_changes') and
-            (change.refresh_deps or change.commit_needs_changes is None)):
-            self.updateCommitDependencies(change, None)
-        if not hasattr(change, 'needs_changes'):
-            self.log.debug("  %s does not support dependencies" % type(change))
-            return True
-        if not change.needs_changes:
-            self.log.debug("  No changes needed")
-            return True
+            return False, []
         changes_needed = []
-        for needed_change in change.needs_changes:
-            self.log.debug("  Change %s needs change %s:" % (
-                change, needed_change))
-            if needed_change.is_merged:
-                self.log.debug("  Needed change is merged")
+        abort = False
+        for change in changes:
+            log.debug("Checking for changes needed by %s:" % change)
+            # Return true if okay to proceed enqueing this change,
+            # false if the change should not be enqueued.
+            if not isinstance(change, model.Change):
+                log.debug("  %s does not support dependencies" % type(change))
                 continue
-            if self.isChangeAlreadyInQueue(needed_change, change_queue):
-                self.log.debug("  Needed change is already ahead in the queue")
+            needed_changes = dependency_graph.get(change)
+            if not needed_changes:
+                log.debug("  No changes needed")
                 continue
-            self.log.debug("  Change %s is needed" % needed_change)
-            if needed_change not in changes_needed:
-                changes_needed.append(needed_change)
-                continue
-            # This differs from the dependent pipeline check in not
-            # verifying that the dependent change is mergable.
-        if changes_needed:
-            return changes_needed
-        return True
+            for needed_change in needed_changes:
+                log.debug("  Change %s needs change %s:" % (
+                    change, needed_change))
+                if needed_change.is_merged:
+                    log.debug("  Needed change is merged")
+                    continue
+                if needed_change in changes:
+                    log.debug("  Needed change is in cycle")
+                    continue
+                if self.isChangeAlreadyInQueue(needed_change, change_queue):
+                    log.debug("  Needed change is already ahead in the queue")
+                    continue
+                log.debug("  Change %s is needed" % needed_change)
+                if needed_change not in changes_needed:
+                    changes_needed.append(needed_change)
+                    continue
+                # This differs from the dependent pipeline check in not
+                # verifying that the dependent change is mergable.
+        return abort, changes_needed
 
-    def dequeueItem(self, item):
-        super(IndependentPipelineManager, self).dequeueItem(item)
+    def dequeueItem(self, item, quiet=False):
+        super(IndependentPipelineManager, self).dequeueItem(item, quiet)
         # An independent pipeline manager dynamically removes empty
         # queues
         if not item.queue.queue:
-            self.pipeline.removeQueue(item.queue)
+            self.state.removeQueue(item.queue)

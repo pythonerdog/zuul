@@ -1,0 +1,9 @@
+- job:
+    name: project6-extra-dir
+    run: playbooks/common.yaml
+
+- project:
+    check:
+      jobs:
+        - project6-extra-dir
+

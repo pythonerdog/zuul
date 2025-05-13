@@ -1,0 +1,7 @@
+---
+features:
+  - |
+    Read-level access to tenants or the tenant list may now be
+    restricted to authorized users using the
+    :attr:`tenant.access-rules` and :attr:`api-root.access-rules`
+    attributes.

@@ -1,0 +1,5 @@
+---
+fixes:
+  - |
+    A fix was made to mitigate an issue where a ZooKeeper disconnect
+    could cause too many threads to be spawned resulting in errors.

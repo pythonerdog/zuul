@@ -1,0 +1,32 @@
+- tenant:
+    name: tenant-one
+    exclude-unprotected-branches: true
+    source:
+      gerrit:
+        config-projects:
+          - common-config
+        untrusted-projects:
+          - org/project
+          - org/project1
+          - org/project2
+          - org/project3
+          - org/project5
+          - org/project6
+          - org/project7
+      github:
+        untrusted-projects:
+          - gh/project
+          - gh/project1
+          - gh/project2
+          - gh/project3
+
+- tenant:
+    name: tenant-two
+    source:
+      gerrit:
+        config-projects:
+          - common-tenant-two
+        untrusted-projects:
+          - org/project4
+          - org/project5
+          - org/project6

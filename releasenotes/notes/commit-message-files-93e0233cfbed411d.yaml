@@ -1,0 +1,10 @@
+---
+fixes:
+  - |
+    The pseudo-file "/COMMIT_MSG" is not considered at all when
+    determining whether a change matches files or irrelevant-files
+    matchers.  It was previously not considered in most cases, but in
+    the case of a negated regular expression in an irrelevant-files
+    stanza, it could still have an effect.  This has been corrected
+    and any regexes that explicitly mention "/COMMIT_MSG" may remove
+    it.

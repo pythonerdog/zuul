@@ -1,0 +1,5 @@
+---
+features:
+  - |
+    The :attr:`job.cleanup-run` attribute has been added to enable
+    a new cleanup phase to be performed after a job execution.

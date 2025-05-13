@@ -1,0 +1,6 @@
+---
+security:
+  - |
+    The add_host module attributes that can be used to bypass localhost
+    command execution are now also blacklisted using extra-vars to prevent
+    abuse through untrusted host_vars.

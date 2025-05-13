@@ -1,0 +1,107 @@
+- name: Init Test1
+  include_role:
+    name: init-repository
+  vars:
+    projectname: test1
+
+- name: Copy data to test1
+  copy:
+    src: ../../doc/source/examples/test1/
+    dest: "{{ workspace }}/test1/"
+
+- name: Commit and upload test change in test1
+  shell:
+    chdir: "{{ workspace }}/test1/"
+    executable: /bin/bash
+    cmd: |
+      {{ ssh_agent.stdout }}
+      mv zuul.yaml .zuul.yaml
+      git add .zuul.yaml playbooks
+      git commit -m "Add test Zuul job"
+      git review
+
+- import_role:
+    name: check-pipeline
+  vars:
+    title: "test job test1"
+    projectname: test1
+
+- name: Save test1 change info
+  set_fact:
+    changetest1: "{{ changeinfo }}"
+    json_query_finger: "messages[?contains(@.message, 'testjob http://')].message | [0]"
+
+- name: "Check build URL"
+  assert:
+    that:
+      - (result_json | to_json | from_json | json_query(json_query_finger) | regex_search('(http://[^ ]*)') | length > 0)
+
+- name: Configure a Base Job zuul-config
+  copy:
+    src: ../../doc/source/examples/zuul-config/playbooks/base/
+    dest: "{{ workspace }}/zuul-config/playbooks/base/"
+
+- name: Update the base job definition
+  copy:
+    src: ../../doc/source/examples/zuul-config/zuul.d/jobs2.yaml
+    dest: "{{ workspace }}/zuul-config/zuul.d/jobs.yaml"
+
+- name: Commit and upload zuul-config
+  shell:
+    chdir: "{{ workspace }}/zuul-config/"
+    executable: /bin/bash
+    cmd: |
+      {{ ssh_agent.stdout }}
+      git add playbooks zuul.d/jobs.yaml
+      git commit -m "Update Zuul base job"
+      git review
+
+- include_role:
+    name: change-merged
+  vars:
+    title: "Update Zuul base job"
+    projectname: zuul-config
+
+# Remove the label so Zuul will post again Verified+1 which is what
+# check-pipeline is looking for
+- include_role:
+    name: remove-verified
+  vars:
+    change_id: "{{ changetest1.id }}"
+
+- include_role:
+    name: recheck-change
+  vars:
+    change_id: "{{ changetest1.id }}"
+
+- include_role:
+    name: check-pipeline
+  vars:
+    title: "test job test1"
+    projectname: test1
+    check_number: 2
+
+- name: Find the build URL with regex
+  set_fact:
+    build_url: "{{ result_json | to_json | from_json | json_query(json_query_log_url) | regex_search('-.*(http://[^ ]*)') | regex_search('(http://[^ ]*)') }}"
+  vars:
+    json_query_log_url: "messages[?contains(@.message, 'http://')].message | [1]"
+
+- name: Extract build id from build url
+  set_fact:
+    build_uuid: "{{ build_url.split('/')[-1] }}"
+
+- name: Find log URL via Zuul API
+  uri:
+    url: "http://localhost:9000/api/tenant/example-tenant/build/{{ build_uuid }}"
+    method: GET
+    return_content: true
+  register: result
+
+- name: Fetch log URL
+  get_url:
+    url: "{{ result.json.log_url }}job-output.txt"
+    dest: "{{ workspace }}/job-output.txt"
+
+- name: Verify log contents
+  command: "grep 'Hello world!' {{ workspace }}/job-output.txt"

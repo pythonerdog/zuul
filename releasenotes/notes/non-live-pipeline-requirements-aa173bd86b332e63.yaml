@@ -1,0 +1,29 @@
+---
+features:
+  - |
+    A new pipeline attribute,
+    :attr:`pipeline.allow-other-connections`, has been added
+    to ensure that only changes from connections which
+    are mentioned in the pipeline configuration (such as triggers,
+    reporters, or pipeline requirements) are enqueued.
+security:
+  - |
+    Non-live items are now subject to pipeline requirements for
+    independent pipelines.
+
+    Previously, an optimization for independent pipelines skipped
+    checking that a change met the pipeline requirements.  If an
+    independent pipeline is intended only to run reviewed code, this
+    could allow running unreviewed code by updating dependent changes.
+
+    Now both non-live and live items are subject to pipeline
+    requirements in all pipeline managers.
+
+  - |
+    The new `allow-other-connections` pipeline configuration option
+    may now be used to ensure that only changes from connections which
+    are mentioned in the pipeline configuration (such as triggers,
+    reporters, or pipeline requirements) are enqueued.  This allows
+    the construction of a pipeline where, for example, code review
+    requirements are strictly enforced, even for dependencies which
+    are not normally directly enqueued.

@@ -1,0 +1,10 @@
+---
+features:
+  - |
+    The Zuul Executor has a new governor sensor that detects when the
+    Executor is nearing the limit on new processes. Running Zuul jobs
+    in the Executor requires a number of process including but not limited
+    to: Bubblewrap, Ansible, SSH, and SSH Agent. This new governor sensor
+    helps to avoid jobs failing due to an inability to fork one of these
+    many processes. Instead the Executor will pause its efforts until it
+    backs away from the process limit.

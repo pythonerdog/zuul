@@ -1,0 +1,15 @@
+---
+deprecations:
+  - |
+    Regular expressions using Python syntax are deprecated in favor of
+    RE2 syntax instead, for additional speed and safety.  Negative
+    lookahead assertions may be replaced using the `negate` keyword.
+    See :ref:`regex` for more information.
+
+    If Zuul detects a regular expression using Python syntax that is not
+    supported by RE2, it will register a configuration syntax warning.
+    These may be viewed on the configuration errors page in the web
+    interface.
+
+    A future version of Zuul will remove Python regex support
+    completely and these warnings will become errors.

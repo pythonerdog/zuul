@@ -1,0 +1,20 @@
+- hosts: all
+  tasks:
+    - zuul_console:
+        state: absent
+        port: "{{ test_console_port }}"
+      failed_when: false
+
+    - name: "first shell"
+      shell: "echo first shell"
+      when: false
+
+    - zuul_console:
+        port: "{{ test_console_port }}"
+
+    - name: "second shell"
+      shell: "echo second shell"
+      when: false
+
+    - name: "third shell"
+      shell: "echo third shell"

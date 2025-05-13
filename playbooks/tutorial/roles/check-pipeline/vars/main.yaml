@@ -1,0 +1,3 @@
+json_query_check_ko: "messages[?contains(@.message, 'Patch Set {{ patchset }}: Verified-1')]"
+json_query_check_ok: "messages[?contains(@.message, 'Patch Set {{ patchset }}: Verified+1')]"
+json_query_check: "{{ json_query_check_ok if pipeline_expected_result == 'ok' else json_query_check_ko }}"

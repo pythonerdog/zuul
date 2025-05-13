@@ -1,0 +1,24 @@
+---
+features:
+  - |
+    Live console log streaming is now available for ``win_shell` and
+    ``win_command`` tasks on Windows hosts.
+upgrade:
+  - |
+    Due to the addition of live console log streaming for Windows
+    hosts, one of the following is necessary:
+
+      * Add the ``zuul_win_console:`` task to the first pre-run
+        playbook in a base job for Windows hosts, and allow
+        connections to port 19886 on the hosts.  This will allow for
+        automatic live log streaming in the same manner as under Posix
+        systems.
+
+      * If the above is not practical on long-lived Windows hosts, set
+        ``zuul_console_disabled: True`` for those hosts.  This will
+        disable writing console output to spool files on the remote
+        hosts which would otherwise not be deleted.
+
+    Note that the Posix and Windows log streaming servers operate on
+    different ports (19885 and 19886 respectively) in order to allow
+    both to coexist on the same host.

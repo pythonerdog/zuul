@@ -1,0 +1,6 @@
+---
+features:
+  - |
+    Pipelines now provide a :attr:`pipeline.dequeue` reporter action so that
+    reporters may run whenever an item is dequeued. The dequeue reporters will
+    only apply if the item wasn't a success or failure.

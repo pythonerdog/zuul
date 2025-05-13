@@ -1,0 +1,18 @@
+- hosts: localhost
+  gather_facts: no
+  tasks:
+
+    - name: Ensure we handle string returns properly
+      return_strings:
+        an_arg: 'if you see this string, it is working'
+
+
+    - name: Ensure this never shows up
+      return_strings:
+        an_arg: 'this is a secret string'
+      no_log: '{{ item }}'
+      # If any loop iteration is no_log, they all are; see
+      # https://github.com/ansible/ansible/commit/bda074d34e46ee9862a48ed067ad42260d3f92ab
+      loop:
+        - true
+        - false

@@ -1,0 +1,11 @@
+---
+features:
+  - |
+    The optional prometheus service now also includes endpoints for
+    readiness and liveness checks.  See :ref:`prometheus_liveness` for
+    details.
+upgrade:
+  - |
+    The prometheus endpoint would previously serve metrics at any URI.
+    It now only returns metrics on the `/` and `/metrics` URI.  The
+    latter is recommended.

@@ -30,8 +30,10 @@
     trigger:
       another_gerrit:
         - event: patchset-created
+          branch: 'master'
       review_gerrit:
         - event: patchset-created
+          branch: 'develop'
     success:
       review_gerrit:
         Verified: 1

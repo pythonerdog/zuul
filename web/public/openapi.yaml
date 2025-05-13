@@ -1,0 +1,1081 @@
+info:
+  description: Incomplete (work in progress) list of the endpoints.
+  title: Zuul REST API
+  version: v1
+openapi: 3.0.0
+paths:
+  /api:
+    get:
+      operationId: index
+      parameters: []
+      responses:
+        '200':
+          description: Response not yet documented
+      summary: ''
+      tags:
+      - tenant
+  /api/authorizations:
+    get:
+      operationId: root_authorizations
+      parameters: []
+      responses:
+        '200':
+          description: Response not yet documented
+      summary: ''
+      tags:
+      - tenant
+  /api/components:
+    get:
+      operationId: components
+      parameters: []
+      responses:
+        '200':
+          description: Response not yet documented
+      summary: ''
+      tags:
+      - tenant
+  /api/connections:
+    get:
+      operationId: connections
+      parameters: []
+      responses:
+        '200':
+          description: Response not yet documented
+      summary: ''
+      tags:
+      - tenant
+  /api/info:
+    get:
+      operationId: info
+      parameters: []
+      responses:
+        '200':
+          description: Response not yet documented
+      summary: ''
+      tags:
+      - tenant
+  /api/tenant/{tenant_name}/authorizations:
+    get:
+      operationId: tenant_authorizations
+      parameters:
+      - in: path
+        name: tenant_name
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Response not yet documented
+      summary: ''
+      tags:
+      - tenant
+  /api/tenant/{tenant_name}/autohold:
+    get:
+      operationId: autohold_list
+      parameters:
+      - in: path
+        name: tenant_name
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Response not yet documented
+      summary: ''
+      tags:
+      - tenant
+  /api/tenant/{tenant_name}/autohold/{request_id}:
+    delete:
+      operationId: autohold_delete
+      parameters:
+      - in: path
+        name: tenant_name
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: request_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Response not yet documented
+      summary: ''
+      tags:
+      - tenant
+    get:
+      operationId: autohold_get
+      parameters:
+      - in: path
+        name: tenant_name
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: request_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Response not yet documented
+      summary: ''
+      tags:
+      - tenant
+  /api/tenant/{tenant_name}/badge:
+    get:
+      operationId: badge
+      parameters:
+      - description: The tenant name
+        in: path
+        name: tenant_name
+        required: true
+        schema:
+          type: string
+      - description: A project name
+        in: query
+        name: project
+        schema:
+          type: string
+      - description: A pipeline name
+        in: query
+        name: pipeline
+        schema:
+          type: string
+      - description: A branch name
+        in: query
+        name: branch
+        schema:
+          type: string
+      responses:
+        200:
+          content:
+            image/svg+xml:
+              schema:
+                type: object
+          description: Badge describing the result of the latest buildset found.
+        404:
+          description: No buildset found
+      summary: Get a badge describing the result of the latest buildset found.
+      tags:
+      - tenant
+  /api/tenant/{tenant_name}/build-times:
+    get:
+      operationId: build_times
+      parameters:
+      - in: path
+        name: tenant_name
+        required: true
+        schema:
+          type: string
+      - in: query
+        name: project
+        schema:
+          type: string
+      - in: query
+        name: pipeline
+        schema:
+          type: string
+      - in: query
+        name: branch
+        schema:
+          type: string
+      - in: query
+        name: ref
+        schema:
+          type: string
+      - in: query
+        name: job_name
+        schema:
+          type: string
+      - in: query
+        name: final
+        schema:
+          type: string
+      - in: query
+        name: start_time
+        schema:
+          type: string
+      - in: query
+        name: end_time
+        schema:
+          type: string
+      - in: query
+        name: limit
+        schema:
+          type: string
+      - in: query
+        name: skip
+        schema:
+          type: string
+      - in: query
+        name: exclude_result
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Response not yet documented
+      summary: ''
+      tags:
+      - tenant
+  /api/tenant/{tenant_name}/build/{uuid}:
+    get:
+      operationId: build
+      parameters:
+      - in: path
+        name: tenant_name
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: uuid
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Response not yet documented
+      summary: ''
+      tags:
+      - tenant
+  /api/tenant/{tenant_name}/builds:
+    get:
+      operationId: builds
+      parameters:
+      - in: path
+        name: tenant_name
+        required: true
+        schema:
+          type: string
+      - in: query
+        name: project
+        schema:
+          type: string
+      - in: query
+        name: pipeline
+        schema:
+          type: string
+      - in: query
+        name: change
+        schema:
+          type: string
+      - in: query
+        name: branch
+        schema:
+          type: string
+      - in: query
+        name: patchset
+        schema:
+          type: string
+      - in: query
+        name: ref
+        schema:
+          type: string
+      - in: query
+        name: newrev
+        schema:
+          type: string
+      - in: query
+        name: uuid
+        schema:
+          type: string
+      - in: query
+        name: job_name
+        schema:
+          type: string
+      - in: query
+        name: voting
+        schema:
+          type: string
+      - in: query
+        name: nodeset
+        schema:
+          type: string
+      - in: query
+        name: result
+        schema:
+          type: string
+      - in: query
+        name: final
+        schema:
+          type: string
+      - in: query
+        name: held
+        schema:
+          type: string
+      - in: query
+        name: complete
+        schema:
+          type: string
+      - in: query
+        name: limit
+        schema:
+          type: string
+      - in: query
+        name: skip
+        schema:
+          type: string
+      - in: query
+        name: idx_min
+        schema:
+          type: string
+      - in: query
+        name: idx_max
+        schema:
+          type: string
+      - in: query
+        name: exclude_result
+        schema:
+          type: string
+      responses:
+        200:
+          content:
+            application/json:
+              schema:
+                items:
+                  description: The build
+                  properties:
+                    _id:
+                      type: string
+                    artifacts:
+                      items:
+                        properties:
+                          metadata:
+                            type: object
+                          name:
+                            type: string
+                          url:
+                            type: string
+                        type: object
+                      type: array
+                    duration:
+                      type: string
+                    end_time:
+                      type: string
+                    error_detail:
+                      type: string
+                    final:
+                      type: string
+                    held:
+                      type: string
+                    job_name:
+                      type: string
+                    log_url:
+                      type: string
+                    nodeset:
+                      type: string
+                    provides:
+                      items:
+                        properties:
+                          name:
+                            type: string
+                        type: object
+                      type: array
+                    ref:
+                      description: The ref
+                      properties:
+                        branch:
+                          type: string
+                        change:
+                          type: string
+                        newrev:
+                          type: string
+                        oldrev:
+                          type: string
+                        patchset:
+                          type: string
+                        project:
+                          type: string
+                        ref:
+                          type: string
+                        ref_url:
+                          type: string
+                      type: object
+                    result:
+                      type: string
+                    start_time:
+                      type: string
+                    uuid:
+                      type: string
+                    voting:
+                      type: string
+                  type: object
+                type: array
+          description: Returns the list of builds
+        404:
+          description: Tenant not found
+      summary: List the executed builds
+      tags:
+      - tenant
+  /api/tenant/{tenant_name}/buildset/{uuid}:
+    get:
+      operationId: buildset
+      parameters:
+      - in: path
+        name: tenant_name
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: uuid
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Response not yet documented
+      summary: ''
+      tags:
+      - tenant
+  /api/tenant/{tenant_name}/buildsets:
+    get:
+      operationId: buildsets
+      parameters:
+      - in: path
+        name: tenant_name
+        required: true
+        schema:
+          type: string
+      - in: query
+        name: project
+        schema:
+          type: string
+      - in: query
+        name: pipeline
+        schema:
+          type: string
+      - in: query
+        name: change
+        schema:
+          type: string
+      - in: query
+        name: branch
+        schema:
+          type: string
+      - in: query
+        name: patchset
+        schema:
+          type: string
+      - in: query
+        name: ref
+        schema:
+          type: string
+      - in: query
+        name: newrev
+        schema:
+          type: string
+      - in: query
+        name: uuid
+        schema:
+          type: string
+      - in: query
+        name: result
+        schema:
+          type: string
+      - in: query
+        name: complete
+        schema:
+          type: string
+      - in: query
+        name: limit
+        schema:
+          type: string
+      - in: query
+        name: skip
+        schema:
+          type: string
+      - in: query
+        name: idx_min
+        schema:
+          type: string
+      - in: query
+        name: idx_max
+        schema:
+          type: string
+      responses:
+        200:
+          content:
+            application/json:
+              schema:
+                items:
+                  description: The buildset
+                  properties:
+                    _id:
+                      type: string
+                    event_id:
+                      type: string
+                    event_timestamp:
+                      type: string
+                    first_build_start_time:
+                      type: string
+                    last_build_end_time:
+                      type: string
+                    message:
+                      type: string
+                    pipeline:
+                      type: string
+                    refs:
+                      items:
+                        description: The ref
+                        properties:
+                          branch:
+                            type: string
+                          change:
+                            type: string
+                          newrev:
+                            type: string
+                          oldrev:
+                            type: string
+                          patchset:
+                            type: string
+                          project:
+                            type: string
+                          ref:
+                            type: string
+                          ref_url:
+                            type: string
+                        type: object
+                      type: array
+                    result:
+                      type: string
+                    uuid:
+                      type: string
+                  type: object
+                type: array
+          description: Returns the list of buildsets
+        404:
+          description: Tenant not found
+      summary: ''
+      tags:
+      - tenant
+  /api/tenant/{tenant_name}/config-errors:
+    get:
+      operationId: config_errors
+      parameters:
+      - in: path
+        name: tenant_name
+        required: true
+        schema:
+          type: string
+      - in: query
+        name: project
+        schema:
+          type: string
+      - in: query
+        name: branch
+        schema:
+          type: string
+      - in: query
+        name: severity
+        schema:
+          type: string
+      - in: query
+        name: name
+        schema:
+          type: string
+      - in: query
+        name: limit
+        schema:
+          type: string
+      - in: query
+        name: skip
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Response not yet documented
+      summary: ''
+      tags:
+      - tenant
+  /api/tenant/{tenant_name}/console-stream:
+    get:
+      operationId: console_stream_get
+      parameters:
+      - in: path
+        name: tenant_name
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Response not yet documented
+      summary: ''
+      tags:
+      - tenant
+  /api/tenant/{tenant_name}/info:
+    get:
+      operationId: tenant_info
+      parameters:
+      - in: path
+        name: tenant_name
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Response not yet documented
+      summary: ''
+      tags:
+      - tenant
+  /api/tenant/{tenant_name}/job/{job_name}:
+    get:
+      operationId: job
+      parameters:
+      - in: path
+        name: tenant_name
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: job_name
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Response not yet documented
+      summary: ''
+      tags:
+      - tenant
+  /api/tenant/{tenant_name}/jobs:
+    get:
+      operationId: jobs
+      parameters:
+      - in: path
+        name: tenant_name
+        required: true
+        schema:
+          type: string
+      responses:
+        200:
+          content:
+            application/json:
+              schema:
+                items:
+                  properties:
+                    description:
+                      type: string
+                    name:
+                      type: string
+                    tags:
+                      items:
+                        type: string
+                      type: array
+                    variants:
+                      items:
+                        properties:
+                          branches:
+                            items:
+                              type: string
+                            type: array
+                          parent:
+                            type: string
+                        type: object
+                      type: array
+                  type: object
+                type: array
+          description: Returns the list of jobs
+        404:
+          description: Tenant not found
+      summary: ''
+      tags:
+      - tenant
+  /api/tenant/{tenant_name}/key/{project_name}.pub:
+    get:
+      operationId: key
+      parameters:
+      - in: path
+        name: tenant_name
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: project_name
+        required: true
+        schema:
+          type: string
+      responses:
+        200:
+          content:
+            text/plain:
+              example: '-----BEGIN PUBLIC KEY-----
+
+                MIICI...
+
+                -----END PUBLIC KEY-----
+
+                '
+              schema:
+                type: string
+          description: Returns the project public key that is used to encrypt secrets
+        404:
+          description: Tenant or Project not found
+      summary: ''
+      tags:
+      - tenant
+  /api/tenant/{tenant_name}/labels:
+    get:
+      operationId: labels
+      parameters:
+      - in: path
+        name: tenant_name
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Response not yet documented
+      summary: ''
+      tags:
+      - tenant
+  /api/tenant/{tenant_name}/nodes:
+    get:
+      operationId: nodes
+      parameters:
+      - in: path
+        name: tenant_name
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Response not yet documented
+      summary: ''
+      tags:
+      - tenant
+  /api/tenant/{tenant_name}/pipeline/{pipeline_name}/project/{project_name}/branch/{branch_name}/freeze-job/{job_name}:
+    get:
+      operationId: project_freeze_job
+      parameters:
+      - in: path
+        name: tenant_name
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: pipeline_name
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: project_name
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: branch_name
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: job_name
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Response not yet documented
+      summary: ''
+      tags:
+      - tenant
+  /api/tenant/{tenant_name}/pipeline/{pipeline_name}/project/{project_name}/branch/{branch_name}/freeze-jobs:
+    get:
+      operationId: project_freeze_jobs
+      parameters:
+      - in: path
+        name: tenant_name
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: pipeline_name
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: project_name
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: branch_name
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Response not yet documented
+      summary: ''
+      tags:
+      - tenant
+  /api/tenant/{tenant_name}/pipelines:
+    get:
+      operationId: pipelines
+      parameters:
+      - in: path
+        name: tenant_name
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Response not yet documented
+      summary: ''
+      tags:
+      - tenant
+  /api/tenant/{tenant_name}/project-ssh-key/{project_name}.pub:
+    get:
+      operationId: project_ssh_key
+      parameters:
+      - in: path
+        name: tenant_name
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: project_name
+        required: true
+        schema:
+          type: string
+      responses:
+        200:
+          content:
+            text/plain:
+              example: ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACA
+              schema:
+                type: string
+          description: Returns the project public key that executor adds to SSH agent
+        404:
+          description: Tenant or Project not found
+      summary: ''
+      tags:
+      - tenant
+  /api/tenant/{tenant_name}/project/{project_name}:
+    get:
+      operationId: project
+      parameters:
+      - in: path
+        name: tenant_name
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: project_name
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Response not yet documented
+      summary: ''
+      tags:
+      - tenant
+  /api/tenant/{tenant_name}/project/{project_name}/autohold:
+    get:
+      operationId: autohold_project_get
+      parameters:
+      - in: path
+        name: tenant_name
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: project_name
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Response not yet documented
+      summary: ''
+      tags:
+      - tenant
+    post:
+      operationId: autohold_project_post
+      parameters:
+      - in: path
+        name: tenant_name
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: project_name
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Response not yet documented
+      summary: ''
+      tags:
+      - tenant
+  /api/tenant/{tenant_name}/project/{project_name}/dequeue:
+    get:
+      operationId: dequeue
+      parameters:
+      - in: path
+        name: tenant_name
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: project_name
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Response not yet documented
+      summary: ''
+      tags:
+      - tenant
+  /api/tenant/{tenant_name}/project/{project_name}/enqueue:
+    get:
+      operationId: enqueue
+      parameters:
+      - in: path
+        name: tenant_name
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: project_name
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Response not yet documented
+      summary: ''
+      tags:
+      - tenant
+  /api/tenant/{tenant_name}/projects:
+    get:
+      operationId: projects
+      parameters:
+      - in: path
+        name: tenant_name
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Response not yet documented
+      summary: ''
+      tags:
+      - tenant
+  /api/tenant/{tenant_name}/promote:
+    get:
+      operationId: promote
+      parameters:
+      - in: path
+        name: tenant_name
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Response not yet documented
+      summary: ''
+      tags:
+      - tenant
+  /api/tenant/{tenant_name}/semaphores:
+    get:
+      operationId: semaphores
+      parameters:
+      - in: path
+        name: tenant_name
+        required: true
+        schema:
+          type: string
+      responses:
+        200:
+          description: Returns the list of semaphores
+        404:
+          description: Tenant not found
+      summary: ''
+      tags:
+      - tenant
+  /api/tenant/{tenant_name}/status:
+    get:
+      operationId: status
+      parameters:
+      - in: path
+        name: tenant_name
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Response not yet documented
+      summary: 'Return the tenant status. Note: the output format is not currently
+        documented and subject to change without notice.'
+      tags:
+      - tenant
+  /api/tenant/{tenant_name}/status/change/{change}:
+    get:
+      operationId: status_change
+      parameters:
+      - in: path
+        name: tenant_name
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: change
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Response not yet documented
+      summary: 'Return the status for a single change. Note: the output format is
+        not currently documented and subject to change without notice.'
+      tags:
+      - tenant
+  /api/tenant/{tenant_name}/tenant-status:
+    get:
+      operationId: tenant_status
+      parameters:
+      - in: path
+        name: tenant_name
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Response not yet documented
+      summary: ''
+      tags:
+      - tenant
+  /api/tenants:
+    get:
+      operationId: tenants
+      parameters: []
+      responses:
+        200:
+          content:
+            application/json:
+              schema:
+                items:
+                  properties:
+                    name:
+                      description: Tenant name
+                      type: string
+                    projects:
+                      description: Tenant project count
+                      type: integer
+                    queue:
+                      description: Active changes count
+                      type: integer
+                  type: object
+                type: array
+          description: Returns the list of tenants
+        404:
+          description: Tenant not found
+      summary: ''
+      tags:
+      - tenant
+tags:
+- name: tenant

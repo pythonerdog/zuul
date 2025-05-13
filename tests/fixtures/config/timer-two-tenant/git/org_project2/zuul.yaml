@@ -1,0 +1,4 @@
+- project:
+    periodic:
+      jobs:
+        - test-job

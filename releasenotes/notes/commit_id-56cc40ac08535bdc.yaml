@@ -1,0 +1,8 @@
+---
+features:
+  - |
+    A new job variable, `zuul.commit_id` has been added.  This
+    provides a stable identifier for all types of pipeline queue items
+    (changes, refs, tags, or branches) from any driver to identify the
+    commit which triggered the queue item.  This can be used to
+    interface with external systems which identify changes by commit.

@@ -1,0 +1,4 @@
+- image:
+    name: debian
+    type: cloud
+    description: "Debian image for tenant-one"

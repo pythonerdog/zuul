@@ -1,0 +1,10 @@
+- hosts: all
+  tasks:
+    - debug:
+        var: lookup('env', 'ZUUL_TEST_VAR')
+    - assert:
+        that: lookup('env', 'ZUUL_TEST_VAR') == ""
+    - debug:
+        var: lookup('env', 'TEST_VAR')
+    - assert:
+        that: lookup('env', 'TEST_VAR') == "not-empty"

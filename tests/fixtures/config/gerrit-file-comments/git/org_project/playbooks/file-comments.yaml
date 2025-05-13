@@ -1,0 +1,40 @@
+- hosts: all
+  tasks:
+    - zuul_return:
+        data:
+          zuul:
+            file_comments:
+              path/to/file.py:
+                - line: 42
+                  message: line too long
+                - line: 82
+                  message: line too short
+                - line: 2
+                  message: levels are ignored by gerrit
+                  level: warning
+              missingfile.txt:
+                - line: 89
+                  message: does not exist
+              /COMMIT_MSG:
+                - line: 1
+                  message: commit message comment
+    - name: Another task using zuul_return
+      zuul_return:
+        data:
+          zuul:
+            file_comments:
+              otherfile.txt:
+                - line: 21
+                  message: |
+                    This is a much longer message.
+
+                    With multiple paragraphs.
+              path/to/file.py:
+                - line: 21
+                  message: |
+                    A second zuul return value using the same file should not
+                    override the first result, but both should be merged.
+                - line: 42
+                  message: |
+                    A second comment applied to the same line in the same file
+                    should also be added to the result.

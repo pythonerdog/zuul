@@ -1,0 +1,29 @@
+- authorization-rule:
+    name: tenant-admin
+    conditions:
+      - group: "{tenant.name}-admin"
+- authorization-rule:
+    name: tenant-admin-complex
+    conditions:
+      - path.to.group: "{tenant.name}-admin"
+- tenant:
+    name: tenant-one
+    admin-rules:
+      - tenant-admin
+    source:
+      gerrit:
+        config-projects:
+          - common-config
+        untrusted-projects:
+          - org/project1
+- tenant:
+    name: tenant-two
+    admin-rules:
+      - tenant-admin
+      - tenant-admin-complex
+    source:
+      gerrit:
+        config-projects:
+          - common-config
+        untrusted-projects:
+          - org/project2

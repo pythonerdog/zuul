@@ -1,0 +1,8 @@
+- hosts: localhost
+  tasks:
+    - debug:
+        msg: "hi"
+    - debug:
+        msg: "{{ goodsecret.alice }}"
+    - debug:
+        msg: "{{ badsecret }}"

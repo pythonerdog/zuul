@@ -1,0 +1,4 @@
+---
+fixes:
+  - |
+    Fixed Zuul dashboard not loading properly due to javascript dependencies missing.

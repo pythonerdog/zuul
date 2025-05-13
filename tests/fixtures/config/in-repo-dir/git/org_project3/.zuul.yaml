@@ -1,0 +1,11 @@
+- queue:
+    name: project3-test-queue
+    allow-circular-dependencies: true
+
+- project:
+    name: org/project3
+    queue: project3-test-queue
+    check:
+      jobs:
+        - project3-private-extra-file
+        - project3-private-extra-dir

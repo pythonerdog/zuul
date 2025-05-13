@@ -1,0 +1,5 @@
+---
+features:
+  - |
+    Zuul now supports whitelisting and configuring ansible callbacks with
+    :attr:`ansible_callback "<name>"`.

@@ -1,0 +1,6 @@
+---
+features:
+  - |
+    The Gerrit driver now supports the ``hashtags-changed`` event as a
+    trigger as well as using hashtags as trigger or pipeline
+    requirements.

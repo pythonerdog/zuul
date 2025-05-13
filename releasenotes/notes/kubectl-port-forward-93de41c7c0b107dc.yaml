@@ -1,0 +1,13 @@
+---
+upgrade:
+  - |
+    Kubectl and socat must now be installed on Zuul executors if using
+    Kubernetes or OpenShift `pod` resources from Nodepool.  Additionally,
+    Nodepool version 3.12.0 or later is required, and the
+    "start-zuul-console" role from zuul-jobs should be run in the
+    pre-playbook of your base job.
+fixes:
+  - |
+    Previously, no output from shell or command tasks on pods was placed
+    in the job output; that has been corrected and streaming output is
+    now available.

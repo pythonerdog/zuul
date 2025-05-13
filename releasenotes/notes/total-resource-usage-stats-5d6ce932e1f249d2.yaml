@@ -1,0 +1,25 @@
+---
+features:
+  - |
+    Zuul now reports total resource usage statistics.
+
+    The following statistic is emitted:
+
+    `zuul.nodepool.resources.total.tenant.{tenant}.{resource}`
+
+    Gauge with the currently used resources by tenant in total, i.e., all nodes
+    belonging to a tenant, regardles of their state.
+
+upgrade:
+  - |
+    Zuul now reports total and in-use resource usage statics separately.
+
+    To distinquish those, the following statistics have been renamed:
+
+    - `zuul.nodepool.resources.tenant.{tenant}.{resource}`
+      `->`
+      `zuul.nodepool.resources.in_use.tenant.{tenant}.{resource}`
+
+    - `zuul.nodepool.resources.project.{project}.{resource}`:
+      `->`
+      `zuul.nodepool.resources.in_use.project.{tenant}.{resource}`

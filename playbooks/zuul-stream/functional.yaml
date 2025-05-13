@@ -1,65 +1,128 @@
 - hosts: controller
   tasks:
+    - name: Set python path fact
+      set_fact:
+        # This value is used by Ansible to find the zuul.ansible code
+        # that Zuul's ansible plugins consume. It must be updated when
+        # the python version of the platform is changed.
+        python_path: "/usr/local/lib/python3.11/dist-packages"
 
-    - name: Run ansible that should succeed
-      command: ansible-playbook src/git.openstack.org/openstack-infra/zuul/playbooks/zuul-stream/fixtures/test-stream.yaml
+    - name: Run ansible that should succeed against testing console
+      command: >
+        /usr/lib/zuul/ansible/{{ zuul_ansible_version }}/bin/ansible-playbook
+        -vvv
+        -e "new_console=true"
+        src/opendev.org/zuul/zuul/playbooks/zuul-stream/fixtures/test-stream.yaml
+      environment:
+        # Setup by test-stream.yaml so we start a new zuul_console
+        # from this checkout.
+        ZUUL_CONSOLE_PORT: 19887
+        ZUUL_JOB_LOG_CONFIG: "{{ ansible_user_dir}}/logging.json"
+        ZUUL_JOBDIR: "{{ ansible_user_dir}}"
+        ZUUL_ANSIBLE_SPLIT_STREAMS: False
+        ZUUL_OUTPUT_MAX_BYTES: 1073741824
+        PYTHONPATH: "{{ python_path }}"
+      register: _success_output
+
+    - name: Save raw output to file
+      copy:
+        content: '{{ _success_output.stdout }}'
+        dest: 'console-job-output-success-19887.txt'
+
+    - name: Save output
+      shell: |
+          mv job-output.txt job-output-success-19887.txt
+          mv job-output.json job-output-success-19887.json
+
+    # Streamer puts out a line like
+    #  [node1] Starting to log 916b2084-4bbb-80e5-248e-000000000016-1-node1 for task TASK: Print binary data
+    # One of the tasks in job-output shows find: results;
+    # the console file for this task should not be there.
+    - name: Validate temporary files removed
+      shell: |
+        for f in $(grep 'Starting to log' console-job-output-success-19887.txt | awk '{print $5}'); do
+          echo "Checking ${f}"
+          if grep -q '"path": "/tmp/console-'${f}'.log"' job-output-success-19887.txt; then
+            echo "*** /tmp/${f}.log still exists"
+            exit 1
+          fi
+        done
+
+    # NOTE(ianw) 2022-07 : we deliberatly have this second step to run
+    # against the console setup by the infrastructure executor in the
+    # job pre playbooks as a backwards compatability sanity check.
+    # The py27 container job (node3) is not running an existing
+    # console streamer, so that will not output anything -- limit this
+    # out.
+    - name: Run ansible that should succeed against extant console
+      command: >
+        /usr/lib/zuul/ansible/{{ zuul_ansible_version }}/bin/ansible-playbook
+        -e "new_console=false" --limit="node1,node2"
+        src/opendev.org/zuul/zuul/playbooks/zuul-stream/fixtures/test-stream.yaml
       environment:
         ZUUL_JOB_LOG_CONFIG: "{{ ansible_user_dir}}/logging.json"
-        ARA_LOG_CONFIG: "{{ ansible_user_dir}}/logging.json"
+        ZUUL_JOBDIR: "{{ ansible_user_dir}}"
+        ZUUL_ANSIBLE_SPLIT_STREAMS: False
+        ZUUL_OUTPUT_MAX_BYTES: 1073741824
+        PYTHONPATH: "{{ python_path }}"
+      register: _success_output
+
+    - name: Save raw output to file
+      copy:
+        content: '{{ _success_output.stdout }}'
+        dest: 'console-job-output-success-19885.txt'
+
+    - name: Save output
+      shell: |
+          mv job-output.txt job-output-success-19885.txt
+          mv job-output.json job-output-success-19885.json
+
+    - name: Validate text outputs
+      include_tasks: validate.yaml
+      loop:
+        - { node: 'node1', filename: 'job-output-success-19887.txt' }
+        - { node: 'node2', filename: 'job-output-success-19887.txt' }
+        - { node: 'node1', filename: 'job-output-success-19885.txt' }
+        - { node: 'node2', filename: 'job-output-success-19885.txt' }
+        # node3 only listen on 19887
+        - { node: 'node3', filename: 'job-output-success-19887.txt' }
+
+    # This shows that zuul_console_disabled has activated and set the
+    # UUID to "skip"
+    - name: Validate json output
+      shell: |
+        egrep 'zuul_log_id": "skip"' job-output-success-19885.json
+        egrep 'zuul_log_id": "skip"' job-output-success-19887.json
+
+    # failure case
 
     - name: Run ansible playbook that should fail
-      command: ansible-playbook src/git.openstack.org/openstack-infra/zuul/playbooks/zuul-stream/fixtures/test-stream-failure.yaml
+      command: >
+        /usr/lib/zuul/ansible/{{ zuul_ansible_version }}/bin/ansible-playbook
+        src/opendev.org/zuul/zuul/playbooks/zuul-stream/fixtures/test-stream-failure.yaml
       register: failed_results
       failed_when: "failed_results.rc != 2"
       environment:
+        ZUUL_CONSOLE_PORT: 19887
         ZUUL_JOB_LOG_CONFIG: "{{ ansible_user_dir}}/logging.json"
-        ARA_LOG_CONFIG: "{{ ansible_user_dir}}/logging.json"
+        ZUUL_JOBDIR: "{{ ansible_user_dir}}"
+        ZUUL_ANSIBLE_SPLIT_STREAMS: False
+        ZUUL_OUTPUT_MAX_BYTES: 1073741824
+        PYTHONPATH: "{{ python_path }}"
 
-    - name: Validate output - setupvar
+    - name: Save output
       shell: |
-        egrep "^.*\| node1 \|\s+\"setupvar\": {" job-output.txt
-        egrep "^.*\| node2 \|\s+\"setupvar\": {" job-output.txt
-
-    - name: Validate output - shell task
-      shell: |
-        egrep "^.*\| node1 \|     link/loopback" job-output.txt
-        egrep "^.*\| node2 \|     link/loopback" job-output.txt
-
-    - name: Validate output - loop with items
-      shell: |
-        egrep "^.+\| node1 \| ok: Item: item1" job-output.txt
-        egrep "^.+\| node1 \| ok: Item: item2" job-output.txt
-        egrep "^.+\| node1 \| ok: Item: item3" job-output.txt
-        egrep "^.+\| node2 \| ok: Item: item1" job-output.txt
-        egrep "^.+\| node2 \| ok: Item: item2" job-output.txt
-        egrep "^.+\| node2 \| ok: Item: item3" job-output.txt
-
-    - name: Validate output - loop with complex items
-      shell: |
-        egrep "^.+\| node1 \| ok: Item: Runtime" job-output.txt
-        egrep "^.+\| node2 \| ok: Item: Runtime" job-output.txt
-
-    - name: Validate output - shell task with exception
-      shell: |
-        egrep "^.+\| node1 \| OSError.+\/shelltask\/" job-output.txt
-        egrep "^.+\| node2 \| OSError.+\/shelltask\/" job-output.txt
-
-    - name: Validate output - item loop with exception
-      shell: |
-        egrep "^.+\| node1 \| OSError.+\/itemloop\/" job-output.txt
-        egrep "^.+\| node2 \| OSError.+\/itemloop\/" job-output.txt
+          mv job-output.txt job-output-failure.txt
+          mv job-output.json job-output-failure.json
 
     - name: Validate output - failure shell task with exception
       shell: |
-        egrep "^.+\| node1 \| OSError.+\/failure-shelltask\/" job-output.txt
-        egrep "^.+\| node2 \| OSError.+\/failure-shelltask\/" job-output.txt
+        egrep "^.+\| node1 \| Exception: Test module failure exception fail-task" job-output-failure.txt
+        egrep "^.+\| node2 \| Exception: Test module failure exception fail-task" job-output-failure.txt
+        egrep "^.+\| node3 \| Exception: Test module failure exception fail-task" job-output-failure.txt
 
     - name: Validate output - failure item loop with exception
       shell: |
-        egrep "^.+\| node1 \| OSError.+\/failure-itemloop\/" job-output.txt
-        egrep "^.+\| node2 \| OSError.+\/failure-itemloop\/" job-output.txt
-
-    - name: Validate output - binary data
-      shell: |
-        egrep "^.*\| node1 \| \\\\x80abc" job-output.txt
-        egrep "^.*\| node2 \| \\\\x80abc" job-output.txt
+        egrep "^.+\| node1 \| Exception: Test module failure exception fail-loop" job-output-failure.txt
+        egrep "^.+\| node2 \| Exception: Test module failure exception fail-loop" job-output-failure.txt
+        egrep "^.+\| node3 \| Exception: Test module failure exception fail-loop" job-output-failure.txt

@@ -1,0 +1,90 @@
+- queue:
+    name: integrated
+    allow-circular-dependencies: true
+
+- pipeline:
+    name: check
+    manager: independent
+    trigger:
+      gerrit:
+        - event: patchset-created
+      github:
+        - event: pull_request
+          action:
+            - opened
+            - changed
+            - reopened
+            - edited
+    success:
+      gerrit:
+        Verified: 1
+      github:
+        status: success
+        check: success
+    failure:
+      gerrit:
+        Verified: -1
+      github:
+        status: failure
+        check: failure
+    start:
+      github:
+        check: in_progress
+        comment: false
+    dequeue:
+      github:
+        check: cancelled
+        comment: false
+
+- job:
+    name: base
+    parent: null
+    run: playbooks/run.yaml
+
+- job:
+    name: common-job
+    deduplicate: true
+
+- job:
+    name: project-job
+
+- job:
+    name: project1-job
+
+- job:
+    name: project2-job
+
+- job:
+    name: project3-job
+
+- project:
+    name: gh/project
+    queue: integrated
+    check:
+      jobs:
+        - project-job
+        - common-job
+
+- project:
+    name: gh/project1
+    queue: integrated
+    check:
+      jobs:
+        - project1-job
+        - common-job
+
+- project:
+    name: gh/project2
+    queue: integrated
+    check:
+      jobs:
+        - project2-job
+        - common-job
+
+- project:
+    name: gh/project3
+    queue: integrated
+    check:
+      jobs:
+        - project3-job
+        - common-job

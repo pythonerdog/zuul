@@ -1,0 +1,6 @@
+---
+features:
+  - |
+    Executors configured with :attr:`executor.zone` now can also be configured
+    to also process jobs without a zone by enabling
+    :attr:`executor.allow_unzoned`.

@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 # Copyright (c) 2017 IBM Corp.
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -15,12 +14,13 @@
 
 import time
 
-from tests.base import ZuulTestCase, simple_layout
+from tests.base import ZuulGithubAppTestCase, ZuulTestCase, simple_layout
 
 
 class TestGithubRequirements(ZuulTestCase):
     """Test pipeline and trigger requirements"""
     config_file = 'zuul-github-driver.conf'
+    scheduler_count = 1
 
     @simple_layout('layouts/requirements-github.yaml', driver='github')
     def test_pipeline_require_status(self):
@@ -93,6 +93,11 @@ class TestGithubRequirements(ZuulTestCase):
         project = 'org/project2'
         A = self.fake_github.openFakePullRequest(project, 'master', 'A')
 
+        # Create second PR which contains the head of A in its history. Zuul
+        # should not get disturbed by the existence of this one.
+        self.fake_github.openFakePullRequest(
+            project, 'master', 'A', base_sha=A.head_sha)
+
         # An error status should not cause it to be enqueued
         self.fake_github.setCommitStatus(project, A.head_sha, 'error',
                                          context='tenant-one/check')
@@ -135,6 +140,37 @@ class TestGithubRequirements(ZuulTestCase):
         self.waitUntilSettled()
         self.assertEqual(len(self.history), 2)
         self.assertEqual(self.history[1].name, 'project2-trigger')
+
+    @simple_layout("layouts/requirements-github.yaml", driver="github")
+    def test_trigger_on_check_run(self):
+        """Test trigger on: check_run"""
+        project = "org/project15"
+        A = self.fake_github.openFakePullRequest(project, "master", "A")
+
+        # A check_run request with a different name should not cause it to be
+        # enqueued.
+        self.fake_github.emitEvent(
+            A.getCheckRunRequestedEvent("tenant-one/different-check")
+        )
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 0)
+
+        # A check_run request with the correct name, but for a different app
+        # should not cause it to be enqueued.
+        self.fake_github.emitEvent(
+            A.getCheckRunRequestedEvent("tenant-one/check", app="other-ci")
+        )
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 0)
+
+        # A check_run request with the correct name for the correct app should
+        # cause it to be enqueued.
+        self.fake_github.emitEvent(
+            A.getCheckRunRequestedEvent("tenant-one/check"))
+
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 1)
+        self.assertEqual(self.history[0].name, "project15-check-run")
 
     @simple_layout('layouts/requirements-github.yaml', driver='github')
     def test_pipeline_require_review_username(self):
@@ -467,6 +503,46 @@ class TestGithubRequirements(ZuulTestCase):
         self.assertEqual(len(self.history), 1)
 
     @simple_layout('layouts/requirements-github.yaml', driver='github')
+    def test_require_draft(self):
+
+        A = self.fake_github.openFakePullRequest('org/project17', 'master',
+                                                 'A', draft=True)
+        # A sync event that we will keep submitting to trigger
+        sync = A.getPullRequestSynchronizeEvent()
+        self.fake_github.emitEvent(sync)
+        self.waitUntilSettled()
+
+        # PR is a draft, should enqueue
+        self.assertEqual(len(self.history), 1)
+
+        # Make the PR not a draft
+        A.draft = False
+        self.fake_github.emitEvent(sync)
+        self.waitUntilSettled()
+        # PR is not a draft, should not enqueue
+        self.assertEqual(len(self.history), 1)
+
+    @simple_layout('layouts/requirements-github.yaml', driver='github')
+    def test_reject_draft(self):
+
+        A = self.fake_github.openFakePullRequest('org/project18', 'master',
+                                                 'A', draft=True)
+        # A sync event that we will keep submitting to trigger
+        sync = A.getPullRequestSynchronizeEvent()
+        self.fake_github.emitEvent(sync)
+        self.waitUntilSettled()
+
+        # PR is a draft, should not enqueue
+        self.assertEqual(len(self.history), 0)
+
+        # Make the PR not a draft
+        A.draft = False
+        self.fake_github.emitEvent(sync)
+        self.waitUntilSettled()
+        # PR is not a draft, should enqueue
+        self.assertEqual(len(self.history), 1)
+
+    @simple_layout('layouts/requirements-github.yaml', driver='github')
     def test_pipeline_require_label(self):
         "Test pipeline requirement: label"
         A = self.fake_github.openFakePullRequest('org/project10', 'master',
@@ -558,3 +634,225 @@ class TestGithubRequirements(ZuulTestCase):
         self.waitUntilSettled()
         self.assertEqual(len(self.history), 2)
         self.assertEqual(self.history[1].name, 'project12-status')
+
+
+class TestGithubAppRequirements(ZuulGithubAppTestCase):
+    """Test pipeline and trigger requirements with app authentication"""
+    config_file = 'zuul-github-driver.conf'
+    scheduler_count = 1
+
+    @simple_layout("layouts/requirements-github.yaml", driver="github")
+    def test_pipeline_require_check_run(self):
+        "Test pipeline requirement: status (reported via a check run)"
+        project = "org/project16"
+        github = self.fake_github.getGithubClient()
+        repo = github.repo_from_project(project)
+
+        A = self.fake_github.openFakePullRequest(project, "master", "A")
+        # A comment event that we will keep submitting to trigger
+        comment = A.getCommentAddedEvent("trigger me")
+        self.fake_github.emitEvent(comment)
+        self.waitUntilSettled()
+
+        # No status from zuul, so nothing should be enqueued
+        self.assertEqual(len(self.history), 0)
+
+        # An error check run should also not cause it to be enqueued
+        repo.create_check_run(
+            A.head_sha,
+            "tenant-one/check",
+            conclusion="failure",
+            app="check-run",
+        )
+        self.fake_github.emitEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 0)
+
+        # A success check run goes in, ready to be enqueued
+        repo.create_check_run(
+            A.head_sha,
+            "tenant-one/check",
+            conclusion="success",
+            app="check-run",
+        )
+        self.fake_github.emitEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 1)
+
+
+class TestGithubTriggerRequirements(ZuulTestCase):
+    """Test pipeline and trigger requirements"""
+    config_file = 'zuul-github-driver.conf'
+    scheduler_count = 1
+
+    @simple_layout('layouts/github-trigger-requirements.yaml', driver='github')
+    def test_require_status(self):
+        # Test trigger require-status
+        jobname = 'require-status'
+        project = 'org/project'
+        A = self.fake_github.openFakePullRequest(project, 'master', 'A')
+        # A comment event that we will keep submitting to trigger
+        comment = A.getCommentAddedEvent(f'test {jobname}')
+
+        # No status from zuul so should not be enqueued
+        self.fake_github.emitEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 0)
+
+        # An error status should not cause it to be enqueued
+        self.fake_github.setCommitStatus(project, A.head_sha, 'error',
+                                         context='tenant-one/check')
+        self.fake_github.emitEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 0)
+
+        # A success status goes in
+        self.fake_github.setCommitStatus(project, A.head_sha, 'success',
+                                         context='tenant-one/check')
+        self.fake_github.emitEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 1)
+        self.assertEqual(self.history[0].name, jobname)
+
+    @simple_layout('layouts/github-trigger-requirements.yaml', driver='github')
+    def test_reject_status(self):
+        # Test trigger reject-status
+        jobname = 'reject-status'
+        project = 'org/project'
+        A = self.fake_github.openFakePullRequest(project, 'master', 'A')
+        # A comment event that we will keep submitting to trigger
+        comment = A.getCommentAddedEvent(f'test {jobname}')
+
+        # No status from zuul so should be enqueued
+        self.fake_github.emitEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 1)
+        self.assertEqual(self.history[0].name, jobname)
+
+        # A failure status should not cause it to be enqueued
+        self.fake_github.setCommitStatus(project, A.head_sha, 'failure',
+                                         context='tenant-one/check')
+        self.fake_github.emitEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 1)
+
+        # A success status goes in
+        self.fake_github.setCommitStatus(project, A.head_sha, 'success',
+                                         context='tenant-one/check')
+        self.fake_github.emitEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 2)
+        self.assertEqual(self.history[1].name, jobname)
+
+    @simple_layout('layouts/github-trigger-requirements.yaml', driver='github')
+    def test_require_review(self):
+        # Test trigger require-review
+        jobname = 'require-review'
+        project = 'org/project'
+        A = self.fake_github.openFakePullRequest(project, 'master', 'A')
+        A.writers.extend(('maintainer',))
+        # A comment event that we will keep submitting to trigger
+        comment = A.getCommentAddedEvent(f'test {jobname}')
+
+        # No review so should not be enqueued
+        self.fake_github.emitEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 0)
+
+        # An changes requested review should not cause it to be enqueued
+        A.addReview('maintainer', 'CHANGES_REQUESTED')
+        self.fake_github.emitEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 0)
+
+        # A positive review goes in
+        A.addReview('maintainer', 'APPROVED')
+        self.fake_github.emitEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 1)
+        self.assertEqual(self.history[0].name, jobname)
+
+    @simple_layout('layouts/github-trigger-requirements.yaml', driver='github')
+    def test_reject_review(self):
+        # Test trigger reject-review
+        jobname = 'reject-review'
+        project = 'org/project'
+        A = self.fake_github.openFakePullRequest(project, 'master', 'A')
+        A.writers.extend(('maintainer',))
+        # A comment event that we will keep submitting to trigger
+        comment = A.getCommentAddedEvent(f'test {jobname}')
+
+        # No review so should be enqueued
+        self.fake_github.emitEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 1)
+        self.assertEqual(self.history[0].name, jobname)
+
+        # An changes requested review should not cause it to be enqueued
+        A.addReview('maintainer', 'CHANGES_REQUESTED')
+        self.fake_github.emitEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 1)
+
+        # A positive review goes in
+        A.addReview('maintainer', 'APPROVED')
+        self.fake_github.emitEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 2)
+        self.assertEqual(self.history[1].name, jobname)
+
+    @simple_layout('layouts/github-trigger-requirements.yaml', driver='github')
+    def test_require_label(self):
+        # Test trigger require-label
+        jobname = 'require-label'
+        project = 'org/project'
+        A = self.fake_github.openFakePullRequest(project, 'master', 'A')
+        # A comment event that we will keep submitting to trigger
+        comment = A.getCommentAddedEvent(f'test {jobname}')
+
+        # No label so should not be enqueued
+        self.fake_github.emitEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 0)
+
+        # A random should not cause it to be enqueued
+        A.addLabel('foobar')
+        self.fake_github.emitEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 0)
+
+        # An approved label goes in
+        A.addLabel('approved')
+        self.fake_github.emitEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 1)
+        self.assertEqual(self.history[0].name, jobname)
+
+    @simple_layout('layouts/github-trigger-requirements.yaml', driver='github')
+    def test_reject_label(self):
+        # Test trigger reject-label
+        jobname = 'reject-label'
+        project = 'org/project'
+        A = self.fake_github.openFakePullRequest(project, 'master', 'A')
+        # A comment event that we will keep submitting to trigger
+        comment = A.getCommentAddedEvent(f'test {jobname}')
+
+        # No label so should be enqueued
+        self.fake_github.emitEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 1)
+        self.assertEqual(self.history[0].name, jobname)
+
+        # A rejected label should not cause it to be enqueued
+        A.addLabel('rejected')
+        self.fake_github.emitEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 1)
+
+        # Any other label, it goes in
+        A.removeLabel('rejected')
+        A.addLabel('okay')
+        self.fake_github.emitEvent(comment)
+        self.waitUntilSettled()
+        self.assertEqual(len(self.history), 2)
+        self.assertEqual(self.history[1].name, jobname)

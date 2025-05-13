@@ -1,0 +1,11 @@
+- hosts: all
+  roles:
+    - revoke-sudo
+    - role: checkout
+      ref: 'origin/{{ zuul.branch }}'
+    - role: nox
+      nox_extra_args: '-v -- tests.upgrade.test_upgrade_old'
+    - role: checkout
+      ref: '{{ zuul.branch }}'
+    - role: nox
+      nox_extra_args: '-v -- tests.upgrade.test_upgrade_new'

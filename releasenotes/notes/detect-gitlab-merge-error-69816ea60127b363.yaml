@@ -1,0 +1,4 @@
+---
+fixes:
+  - |
+    Fix detection of the failed merge in gitlab driver.

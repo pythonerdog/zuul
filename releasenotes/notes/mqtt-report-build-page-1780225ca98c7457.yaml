@@ -1,0 +1,13 @@
+---
+fixes:
+  - |
+    Although the documentation states that the MQTT reporter reports the build's
+    log_url, this was only true as long as ``tenant.report-build-page`` was
+    disabled. As soon as the setting was enabled, the MQTT reporter reported the
+    url to the build's result page in Zuul. As MQTT is meant to be consumed by
+    machines, this broke use cases like log post processing.
+
+    This was fixed so that the :attr:`<mqtt schema>.buildset.builds.log_url` now
+    always contains the log url, while an additional field
+    :attr:`<mqtt schema>.buildset.builds.web_url` contains the url to the
+    build's result page if ``tenant.report-build-page`` is enabled.

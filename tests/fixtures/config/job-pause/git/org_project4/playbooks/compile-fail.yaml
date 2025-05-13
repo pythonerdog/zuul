@@ -1,0 +1,12 @@
+- hosts: all
+  tasks:
+    - name: Pause and let child run
+      zuul_return:
+        data:
+          zuul:
+            pause: true
+
+    # Fail the playbook AFTER we have set zuul_return
+    - name: Fail
+      fail:
+        msg: This shall fail

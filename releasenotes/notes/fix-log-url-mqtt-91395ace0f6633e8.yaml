@@ -1,0 +1,6 @@
+---
+fixes:
+  - |
+    The MQTT reporter now sets the log_url for retried builds correctly.
+    The link to the build result page is reported in a dedicated web_url
+    field.

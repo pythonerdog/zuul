@@ -1,0 +1,3 @@
+- name: Include echo role
+  include_role:
+    name: echo-role

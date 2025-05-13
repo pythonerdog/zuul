@@ -1,0 +1,8 @@
+- project:
+    name: org/project
+    check:
+      jobs:
+        - test-job
+    gate:
+      jobs:
+        - test-job

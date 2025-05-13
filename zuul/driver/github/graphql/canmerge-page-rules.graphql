@@ -1,0 +1,26 @@
+query canMergeDataPageRules(
+  $owner: String!
+  $repo: String!
+  $cursor: String
+  $ref_name: String!
+) {
+  repository(owner: $owner, name: $repo) {
+    branchProtectionRules(first: 100, after: $cursor) {
+      pageInfo {
+        endCursor
+        hasNextPage
+      }
+      nodes {
+        pattern
+        requiredStatusCheckContexts
+        requiresApprovingReviews
+        requiresCodeOwnerReviews
+        matchingRefs(first: 100, query: $ref_name) {
+          nodes {
+            name
+          }
+        }
+      }
+    }
+  }
+}

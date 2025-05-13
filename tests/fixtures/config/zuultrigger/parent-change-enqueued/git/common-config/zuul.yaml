@@ -4,7 +4,7 @@
     require:
       gerrit:
         approval:
-          - Verified: -1
+          - email: for-check@example.com
     trigger:
       gerrit:
         - event: patchset-created
@@ -24,7 +24,7 @@
     require:
       gerrit:
         approval:
-          - Verified: 1
+          - email: for-gate@example.com
     trigger:
       gerrit:
         - event: comment-added

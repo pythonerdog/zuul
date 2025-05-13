@@ -13,12 +13,12 @@
 # under the License.
 
 import logging
-import voluptuous as v
 import smtplib
 
 from email.mime.text import MIMEText
 
 from zuul.connection import BaseConnection
+from zuul.lib.logutil import get_annotated_logger
 
 
 class SMTPConnection(BaseConnection):
@@ -36,8 +36,16 @@ class SMTPConnection(BaseConnection):
             'default_from', 'zuul')
         self.smtp_default_to = self.connection_config.get(
             'default_to', 'zuul')
+        self.smtp_user = self.connection_config.get('user')
+        self.smtp_pass = self.connection_config.get('password')
+        starttls = self.connection_config.get('use_starttls', 'false')
+        if starttls.lower() == 'false':
+            self.smtp_starttls = False
+        else:
+            self.smtp_starttls = True
 
-    def sendMail(self, subject, message, from_email=None, to_email=None):
+    def sendMail(self, subject, message, from_email=None, to_email=None,
+                 zuul_event_id=None):
         # Create a text/plain email message
         from_email = from_email \
             if from_email is not None else self.smtp_default_from
@@ -50,13 +58,13 @@ class SMTPConnection(BaseConnection):
 
         try:
             s = smtplib.SMTP(self.smtp_server, self.smtp_port)
+            if self.smtp_starttls:
+                s.starttls()
+                s.ehlo()
+            if self.smtp_user is not None and self.smtp_pass is not None:
+                s.login(self.smtp_user, self.smtp_pass)
             s.sendmail(from_email, to_email.split(','), msg.as_string())
             s.quit()
-        except Exception:
-            return "Could not send email via SMTP"
-        return
-
-
-def getSchema():
-    smtp_connection = v.Any(str, v.Schema(dict))
-    return smtp_connection
+        except Exception as e:
+            log = get_annotated_logger(self.log, zuul_event_id)
+            log.warning("Error sending mail via SMTP: %s", e)

@@ -1,0 +1,8 @@
+---
+fixes:
+  - |
+    Project name regex handling has been updated to return all possible
+    matches. Previously if there were collisions with short names it was an
+    error. The point of the regex system is to simplify configuration and
+    apply configs to all projects that match. Collisions don't impact this
+    behavior so we don't need to raise an error in these cases.

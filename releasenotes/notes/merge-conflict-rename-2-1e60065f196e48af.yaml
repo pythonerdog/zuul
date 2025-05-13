@@ -1,0 +1,6 @@
+upgrade:
+  - |
+    The previously deprecated ``merge-failure`` and
+    ``merge-failure-message`` pipeline configuration options have been
+    removed.  Use ``merge-conflict`` and ``merge-conflict-message``
+    respectively instead.

@@ -1,0 +1,7 @@
+---
+features:
+  - |
+    Monitoring stats for builds are now emitted for more results.
+    Previously they were emitted for some build results such as
+    `SUCCESS`, `FAILURE`, and `ERROR` but now include `NODE_FAILURE`
+    and other result values.

@@ -1,0 +1,19 @@
+query canMergeDataPageRuns(
+  $suite_node_id: ID!
+  $cursor: String
+) {
+  node(id: $suite_node_id) {
+    ... on CheckSuite {
+      checkRuns(first: 100, after: $cursor) {
+        pageInfo {
+          endCursor
+          hasNextPage
+        }
+        nodes {
+          name
+          conclusion
+        }
+      }
+    }
+  }
+}

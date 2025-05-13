@@ -10,9 +10,6 @@
         state: directory
       delegate_to: localhost
 
-    - name: Rename job-output.txt
-      command: mv job-output.txt stream-job-output.txt
-
     - name: Fetch files
       synchronize:
         src: "{{ ansible_user_dir }}/{{ item }}"
@@ -21,5 +18,10 @@
       with_items:
         - logging.json
         - ansible.cfg
-        - stream-job-output.txt
-        - job-output.json
+        - console-job-output-success-19887.txt
+        - job-output-success-19887.txt
+        - job-output-success-19887.json
+        - job-output-success-19885.txt
+        - job-output-success-19885.json
+        - job-output-failure.txt
+        - job-output-failure.json

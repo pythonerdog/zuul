@@ -1,0 +1,101 @@
+- queue:
+    name: integrated
+    allow-circular-dependencies: true
+
+- pipeline:
+    name: gate
+    manager: dependent
+    success-message: Build succeeded (gate).
+    require:
+      gerrit:
+        approval:
+          - Approved: 1
+      github:
+        label: approved
+    trigger:
+      gerrit:
+        - event: comment-added
+          approval:
+            - Approved: 1
+      github:
+        - event: pull_request
+          action: edited
+        - event: pull_request
+          action: labeled
+          label: approved
+    success:
+      gerrit:
+        Verified: 2
+        submit: true
+      github:
+        merge: true
+        check: success
+    failure:
+      gerrit:
+        Verified: -2
+      github:
+        check: failure
+    start:
+      gerrit:
+        Verified: 0
+      github:
+        check: in_progress
+        comment: false
+    dequeue:
+      github:
+        check: cancelled
+        comment: false
+    precedence: high
+
+- job:
+    name: base
+    parent: null
+    run: playbooks/run.yaml
+
+- job:
+    name: common-job
+    deduplicate: true
+
+- job:
+    name: project-job
+
+- job:
+    name: project1-job
+
+- job:
+    name: project2-job
+
+- job:
+    name: project3-job
+
+- project:
+    name: gh/project
+    queue: integrated
+    gate:
+      jobs:
+        - project-job
+        - common-job
+
+- project:
+    name: gh/project1
+    queue: integrated
+    gate:
+      jobs:
+        - project1-job
+        - common-job
+
+- project:
+    name: gh/project2
+    queue: integrated
+    gate:
+      jobs:
+        - project2-job
+        - common-job
+
+- project:
+    name: gh/project3
+    queue: integrated
+    gate:
+      jobs:
+        - project3-job
+        - common-job

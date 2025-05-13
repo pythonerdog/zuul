@@ -1,0 +1,6 @@
+---
+features:
+  - |
+    The GitHub driver now supports specifying the `draft` status of a
+    PR as a pipeline requirement.
+    See :attr:`pipeline.require.<github source>.draft`.

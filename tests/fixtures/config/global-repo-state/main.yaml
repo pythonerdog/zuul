@@ -1,0 +1,20 @@
+- tenant:
+    name: tenant-one
+    exclude-unprotected-branches: true
+    source:
+      gerrit:
+        config-projects:
+          - common-config
+          - org/implicit-role
+        untrusted-projects:
+          - org/dependentproject
+          - org/project
+          - org/requiredproject
+          - org/requiringproject
+          - org/roles
+      github:
+        config-projects:
+          - org/requiringproject-github
+        untrusted-projects:
+          - org/requiredproject-github
+          - org/project-branches

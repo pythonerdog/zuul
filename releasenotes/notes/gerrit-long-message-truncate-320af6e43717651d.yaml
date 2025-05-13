@@ -1,0 +1,7 @@
+---
+fixes:
+  - |
+    Gerrit driver: Zuul error responses could overflow the default
+    message length with large configurations leading to Gerrit
+    rejecting the comment (and hence no notification from Zuul on the
+    change).  Such messages are now truncated to a safe length.

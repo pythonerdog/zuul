@@ -1,5 +1,6 @@
 - job:
     name: project2-job
+    run: playbooks/common.yaml
 
 - job:
     name: project2-job

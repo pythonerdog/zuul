@@ -1,0 +1,11 @@
+- queue:
+    name: project2-test-queue
+    allow-circular-dependencies: true
+
+- project:
+    name: org/project2
+    queue: project2-test-queue
+    check:
+      jobs:
+        - project2-private-extra-file
+        - project2-private-extra-dir

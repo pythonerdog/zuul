@@ -1,0 +1,49 @@
+- pipeline:
+    name: check
+    manager: independent
+    trigger:
+      github:
+        - event: pull_request_review
+          action: submitted
+          state: approved
+    start:
+      github: {}
+    success:
+      github: {}
+    failure:
+      github: {}
+
+- job:
+    name: base
+    parent: null
+    run: playbooks/base.yaml
+
+- job:
+    name: project1-test
+    run: playbooks/project1-test.yaml
+
+- job:
+    name: project2-test
+    run: playbooks/project2-test.yaml
+
+- job:
+    name: project3-test
+    run: playbooks/project3-test.yaml
+
+- project:
+    name: org/project1
+    check:
+      jobs:
+        - project1-test
+
+- project:
+    name: org/project2
+    check:
+      jobs:
+        - project2-test
+
+- project:
+    name: org/project3
+    check:
+      jobs:
+        - project3-test

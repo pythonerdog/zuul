@@ -1,0 +1,3 @@
+---
+features:
+  - gitlab driver now handles the merge request 'close' action.

@@ -1,0 +1,12 @@
+---
+upgrade:
+  - |
+    The components zuul-scheduler and zuul-web now require database
+    configuration. There is now only one supported database connection. If
+    multiple sql connections have been configured only the first one will be
+    used.
+
+deprecations:
+  - |
+    Defining database connections using sql connection is now
+    deprecated. Refer to :ref:`database` how to configure the database now.

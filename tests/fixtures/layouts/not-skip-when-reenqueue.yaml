@@ -1,0 +1,47 @@
+- pipeline:
+    name: check
+    manager: independent
+    trigger:
+      gerrit:
+        - event: patchset-created
+    success:
+      gerrit:
+        Verified: 1
+    failure:
+      gerrit:
+        Verified: -1
+
+- job:
+    name: base
+    parent: null
+    run: playbooks/base.yaml
+
+- job:
+    name: grand-parent
+
+- job:
+    name: parent1
+
+- job:
+    name: parent2
+
+- job:
+    name: child
+
+- project:
+    name: org/project
+    check:
+      jobs:
+        - grand-parent
+        - parent1:
+            dependencies:
+              - grand-parent
+        - parent2:
+            dependencies:
+              - grand-parent
+        - child:
+            dependencies:
+              - name: parent1
+                soft: true
+              - name: parent2
+                soft: true

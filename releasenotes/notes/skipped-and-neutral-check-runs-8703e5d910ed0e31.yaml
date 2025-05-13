@@ -1,0 +1,6 @@
+---
+features:
+  - |
+    The Github driver can now use 'skipped' and 'neutral' status for
+    :attr:`pipeline.<reporter>.<github source>.check` attribute on the
+    Github reporter.

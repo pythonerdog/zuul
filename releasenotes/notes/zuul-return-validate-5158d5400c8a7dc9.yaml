@@ -1,0 +1,33 @@
+---
+features:
+  - |
+    Several job attributes may now have their inheritance behavior
+    changed through "override control".  This introduces two new YAML
+    tags, ``!override`` and ``!inherit`` which may be used to
+    explicitly specify whether certain job attributes should inherit
+    values from parent jobs or override them.
+
+    See the general job documentation at :ref:`job` and also
+    documentation for the following individual attributes:
+
+      * :attr:`job.dependencies`
+      * :attr:`job.extra-vars`
+      * :attr:`job.failure-output`
+      * :attr:`job.files`
+      * :attr:`job.group-vars`
+      * :attr:`job.host-vars`
+      * :attr:`job.irrelevant-files`
+      * :attr:`job.provides`
+      * :attr:`job.required-projects`
+      * :attr:`job.requires`
+      * :attr:`job.tags`
+      * :attr:`job.vars`
+fixes:
+  - |
+    The zuul_return Ansible plugin will now validate the schema of the
+    data supplied to it; particularly the data for warnings and
+    artifacts.  Previously the behavior on incorrectly structured data
+    was undefined and ranged from being silently ignorred to causing
+    exceptions in pipeline processing.  Data format errors will now be
+    detected while the job is running and will cause Ansible errors
+    and (if not ignored) job failures.

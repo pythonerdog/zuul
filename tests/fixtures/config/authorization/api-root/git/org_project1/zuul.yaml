@@ -1,0 +1,10 @@
+- job:
+    name: project1-testjob
+
+- project:
+    check:
+      jobs:
+        - project1-testjob
+    gate:
+      jobs:
+        - project1-testjob

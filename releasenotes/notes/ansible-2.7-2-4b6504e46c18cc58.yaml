@@ -1,0 +1,4 @@
+---
+upgrade:
+  - |
+    Support for Ansible 2.7 has been removed.

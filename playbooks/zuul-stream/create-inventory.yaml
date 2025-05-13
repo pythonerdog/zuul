@@ -1,0 +1,38 @@
+- name: Copy inventory
+  copy:
+    src: "{{ zuul.executor.log_root }}/zuul-info/inventory.yaml"
+    dest: "{{ ansible_user_dir }}/inventory.yaml"
+
+- name: Slurp inventory
+  slurp:
+    path: "{{ ansible_user_dir }}/inventory.yaml"
+  register: _inventory_yaml
+
+- name: Extract inventory
+  set_fact:
+    _new_inventory: "{{ _inventory_yaml['content'] | b64decode | from_yaml }}"
+
+- name: Setup new facts
+  set_fact:
+    _docker_inventory:
+      all:
+        children:
+          node:
+            hosts:
+              node3: null
+        hosts:
+          node3:
+            ansible_connection: ssh
+            ansible_host: 127.0.0.2
+            ansible_port: 2022
+            ansible_user: root
+            ansible_python_interpreter: /usr/local/bin/python2.7
+
+- name: Merge all facts
+  set_fact:
+    _new_inventory: '{{ _new_inventory | combine(_docker_inventory, recursive=True) }}'
+
+- name: Write out inventory
+  copy:
+    content: '{{ _new_inventory | to_nice_yaml }}'
+    dest: '{{ ansible_user_dir }}/inventory.yaml'

@@ -1,0 +1,25 @@
+- global-semaphore:
+    name: global-semaphore
+    max: 1
+
+- tenant:
+    name: tenant-one
+    semaphores:
+      - global-semaphore
+    source:
+      gerrit:
+        config-projects:
+          - common-config
+        untrusted-projects:
+          - org/project1
+
+- tenant:
+    name: tenant-two
+    semaphores:
+      - global-semaphore
+    source:
+      gerrit:
+        config-projects:
+          - common-config
+        untrusted-projects:
+          - org/project2

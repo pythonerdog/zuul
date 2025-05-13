@@ -1,0 +1,15 @@
+---
+features:
+  - |
+    Project secrets keys and SSH keys are now stored in Zookeeper. All private
+    data will be encrypted at rest, which requires a new mandatory setting
+    :attr:`keystore.password` in ``zuul.conf``.
+
+    For backup purposes the secrets keys and SSH keys will still exist on the
+    local filesystem of the scheduler as before.
+upgrade:
+  - |
+    As project secrets keys and SSH keys are stored encrypted in Zookeeper the
+    new :attr:`keystore.password` option in ``zuul.conf`` is
+    required. Please add it to your configuration for both the scheduler and
+    executor.

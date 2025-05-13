@@ -1,0 +1,11 @@
+---
+features:
+  - |
+    Allow users to perform tenant-scoped, privileged actions either through
+    zuul-web's REST API or zuul's client, based on the JWT standard. The users
+    need a valid bearer token to perform such actions; the scope is set by matching
+    conditions on tokens' claims; these conditions can be defined in zuul's tenant
+    configuration file.
+    Zuul supports token signing and validation using the HS256 or RS256 algorithms.
+    External JWKS are also supported for token validation only.
+    Current tenant-scoped actions are "autohold", "enqueue" and "dequeue".

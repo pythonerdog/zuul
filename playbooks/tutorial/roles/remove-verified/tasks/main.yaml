@@ -1,0 +1,7 @@
+- name: "Delete Verified"
+  uri:
+    url: "http://localhost:8080/a/changes/{{ change_id }}/reviewers/zuul/votes/Verified"
+    method: DELETE
+    user: user
+    password: secret
+    status_code: 204

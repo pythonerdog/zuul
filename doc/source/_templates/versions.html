@@ -1,0 +1,15 @@
+{# Based on versions.html from sphinx_rtd_theme, Licensed under ASL2 #}
+  <div class="rst-versions" data-toggle="rst-versions" role="note" aria-label="{{ _('Versions') }}">
+    <span class="rst-current-version" data-toggle="rst-current-version">
+      <span class="fa fa-book">{{ _('Versions') }}</span>
+      v: {{ current_version }}
+      <span class="fa fa-caret-down"></span>
+    </span>
+    <div class="rst-other-versions">
+      <dl>
+        {% for slug, url in versions %}
+          <dd><a href="{{ url }}">{{ slug }}</a></dd>
+        {% endfor %}
+      </dl>
+    </div>
+  </div>

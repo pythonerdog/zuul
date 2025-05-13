@@ -1,0 +1,37 @@
+- pipeline:
+    name: gate
+    manager: dependent
+    start-message: "Jobs started in {pipeline.name}: {item_url}."
+    trigger:
+      gerrit:
+        - event: comment-added
+          approval:
+            - Approved: 1
+    start:
+      smtp:
+        to: you@example.com
+      gerrit:
+        Verified: 0
+    success:
+      gerrit:
+        Verified: 2
+        submit: true
+    failure:
+      gerrit:
+        Verified: -2
+    precedence: high
+
+- job:
+    name: base
+    parent: null
+    run: playbooks/base.yaml
+
+- job:
+    name: project-test1
+    run: playbooks/project-test1.yaml
+
+- project:
+    name: org/project
+    gate:
+      jobs:
+        - project-test1

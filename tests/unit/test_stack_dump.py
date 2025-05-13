@@ -33,3 +33,6 @@ class TestStackDump(testtools.TestCase):
         self.assertIn("Thread", self.log_fixture.output)
         self.assertIn("MainThread", self.log_fixture.output)
         self.assertIn("test_stack_dump_logs", self.log_fixture.output)
+        # Call it again in case yappi or objgraph are installed in the
+        # venv so that we turn them back off.
+        zuul.cmd.stack_dump_handler(signal.SIGUSR2, None)

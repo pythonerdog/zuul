@@ -1,0 +1,5 @@
+---
+features:
+  - Jobs may specify the new ``intermediate`` flag to note they may only
+    be inherited by abstract jobs.  This can be useful if building a job
+    hierarchy where wish to limit where a base job is instantiated.

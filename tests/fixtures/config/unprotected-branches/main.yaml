@@ -8,3 +8,5 @@
           - org/project1
           - org/project2:
               exclude-unprotected-branches: true
+          - org/project3:
+              exclude-unprotected-branches: true

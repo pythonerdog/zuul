@@ -1,0 +1,25 @@
+- authorization-rule:
+    name: tenant-group
+    conditions:
+      - groups: "{tenant.name}-admin"
+- authorization-rule:
+    name: admin-user
+    conditions:
+      - preferred_username: admin
+- tenant:
+    name: example-tenant
+    admin-rules:
+      - tenant-group
+      - admin-user
+    source:
+      gerrit:
+        config-projects:
+          - zuul-config
+        untrusted-projects:
+          - test1
+          - test2
+      opendev.org:
+        untrusted-projects:
+          - zuul/zuul-jobs:
+              include:
+                - job

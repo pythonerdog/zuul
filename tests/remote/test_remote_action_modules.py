@@ -15,25 +15,20 @@
 import os
 import textwrap
 
-from tests.base import AnsibleZuulTestCase, FIXTURE_DIR
-
-ERROR_ACCESS_OUTSIDE = "Accessing files from outside the working dir"
+from tests.base import AnsibleZuulTestCase
 
 
-class TestActionModules(AnsibleZuulTestCase):
+class FunctionalActionModulesMixIn:
     tenant_config_file = 'config/remote-action-modules/main.yaml'
+    # This should be overriden in child classes.
+    ansible_version = 'X'
+    wait_timeout = 120
 
-    def setUp(self):
-        super(TestActionModules, self).setUp()
+    def _setUp(self):
         self.fake_nodepool.remote_ansible = True
 
         ansible_remote = os.environ.get('ZUUL_REMOTE_IPV4')
         self.assertIsNotNone(ansible_remote)
-
-        # inject some files as forbidden sources
-        fixture_dir = os.path.join(FIXTURE_DIR, 'bwrap-mounts')
-        self.executor_server.execution_wrapper.bwrap_command.extend(
-            ['--ro-bind', fixture_dir, '/opt'])
 
     def _run_job(self, job_name, result, expect_error=None):
         # Keep the jobdir around so we can inspect contents if an
@@ -48,6 +43,7 @@ class TestActionModules(AnsibleZuulTestCase):
             - job:
                 name: {job_name}
                 run: playbooks/{job_name}.yaml
+                ansible-version: {version}
                 roles:
                   - zuul: org/common-config
                 nodeset:
@@ -59,7 +55,7 @@ class TestActionModules(AnsibleZuulTestCase):
                 check:
                   jobs:
                     - {job_name}
-            """.format(job_name=job_name))
+            """.format(job_name=job_name, version=self.ansible_version))
 
         file_dict = {'zuul.yaml': conf}
         A = self.fake_gerrit.addFakeChange('org/project', 'master', 'A',
@@ -73,107 +69,35 @@ class TestActionModules(AnsibleZuulTestCase):
             self.assertEqual(build.result, result)
 
             if expect_error:
-                path = os.path.join(self.test_root, build.uuid,
+                path = os.path.join(self.jobdir_root, build.uuid,
                                     'work', 'logs', 'job-output.txt')
                 with open(path, 'r') as f:
                     self.assertIn(expect_error, f.read())
 
-    def test_assemble_module(self):
-        self._run_job('assemble-good', 'SUCCESS')
-
-        # assemble-delegate does multiple tests with various delegates and
-        # safe and non-safe paths. It asserts by itself within ansible so we
-        # expect SUCCESS here.
-        self._run_job('assemble-delegate', 'SUCCESS')
-        self._run_job('assemble-localhost', 'SUCCESS')
-
-        self._run_job('assemble-bad', 'FAILURE', ERROR_ACCESS_OUTSIDE)
-        self._run_job('assemble-bad-symlink', 'FAILURE', ERROR_ACCESS_OUTSIDE)
-        self._run_job('assemble-bad-dir-with-symlink', 'FAILURE',
-                      ERROR_ACCESS_OUTSIDE)
-
     def test_command_module(self):
         self._run_job('command-good', 'SUCCESS')
 
-    def test_copy_module(self):
-        self._run_job('copy-good', 'SUCCESS')
+    def test_zuul_return_module(self):
+        self._run_job('zuul_return-good', 'SUCCESS')
 
-        # copy-delegate does multiple tests with various delegates and
-        # safe and non-safe paths. It asserts by itself within ansible so we
-        # expect SUCCESS here.
-        self._run_job('copy-delegate', 'SUCCESS')
-        self._run_job('copy-localhost', 'SUCCESS')
-
-        self._run_job('copy-bad', 'FAILURE', ERROR_ACCESS_OUTSIDE)
-        self._run_job('copy-bad-symlink', 'FAILURE', ERROR_ACCESS_OUTSIDE)
-        self._run_job('copy-bad-dir-with-symlink', 'FAILURE',
-                      ERROR_ACCESS_OUTSIDE)
-
-    def test_includevars_module(self):
-        self._run_job('includevars-good', 'SUCCESS')
-        self._run_job('includevars-good-dir', 'SUCCESS')
-
-        self._run_job('includevars-bad', 'FAILURE', ERROR_ACCESS_OUTSIDE)
-        self._run_job('includevars-bad-symlink', 'FAILURE',
-                      ERROR_ACCESS_OUTSIDE)
-        self._run_job('includevars-bad-dir', 'FAILURE', ERROR_ACCESS_OUTSIDE)
-        self._run_job('includevars-bad-dir-symlink', 'FAILURE',
-                      ERROR_ACCESS_OUTSIDE)
-        self._run_job('includevars-bad-dir-with-symlink', 'FAILURE',
-                      ERROR_ACCESS_OUTSIDE)
-        self._run_job('includevars-bad-dir-with-double-symlink', 'FAILURE',
-                      ERROR_ACCESS_OUTSIDE)
-
-    def test_patch_module(self):
-        self._run_job('patch-good', 'SUCCESS')
-
-        # patch-delegate does multiple tests with various delegates and
-        # safe and non-safe paths. It asserts by itself within ansible so we
-        # expect SUCCESS here.
-        self._run_job('patch-delegate', 'SUCCESS')
-        self._run_job('patch-localhost', 'SUCCESS')
-
-        self._run_job('patch-bad', 'FAILURE', ERROR_ACCESS_OUTSIDE)
-        self._run_job('patch-bad-symlink', 'FAILURE', ERROR_ACCESS_OUTSIDE)
-
-    def test_raw_module(self):
-        self._run_job('raw-good', 'SUCCESS')
-
-    def test_script_module(self):
-        self._run_job('script-good', 'SUCCESS')
-
-        # script-delegate does multiple tests with various delegates. It
-        # asserts by itself within ansible so we
-        # expect SUCCESS here.
-        self._run_job('script-delegate', 'SUCCESS')
-        self._run_job('script-localhost', 'SUCCESS')
-
-        self._run_job('script-bad', 'FAILURE', ERROR_ACCESS_OUTSIDE)
-        self._run_job('script-bad-symlink', 'FAILURE', ERROR_ACCESS_OUTSIDE)
+    def test_zuul_return_module_delegate_to(self):
+        self._run_job('zuul_return-good-delegate', 'SUCCESS')
 
     def test_shell_module(self):
         self._run_job('shell-good', 'SUCCESS')
 
-    def test_template_module(self):
-        self._run_job('template-good', 'SUCCESS')
 
-        # template-delegate does multiple tests with various delegates and
-        # safe and non-safe paths. It asserts by itself within ansible so we
-        # expect SUCCESS here.
-        self._run_job('template-delegate', 'SUCCESS')
-        self._run_job('template-localhost', 'SUCCESS')
+class TestActionModules8(AnsibleZuulTestCase, FunctionalActionModulesMixIn):
+    ansible_version = '8'
 
-        self._run_job('template-bad', 'FAILURE', ERROR_ACCESS_OUTSIDE)
-        self._run_job('template-bad-symlink', 'FAILURE', ERROR_ACCESS_OUTSIDE)
+    def setUp(self):
+        super().setUp()
+        self._setUp()
 
-    def test_unarchive_module(self):
-        self._run_job('unarchive-good', 'SUCCESS')
 
-        # template-delegate does multiple tests with various delegates and
-        # safe and non-safe paths. It asserts by itself within ansible so we
-        # expect SUCCESS here.
-        self._run_job('unarchive-delegate', 'SUCCESS')
-        self._run_job('unarchive-localhost', 'SUCCESS')
+class TestActionModules9(AnsibleZuulTestCase, FunctionalActionModulesMixIn):
+    ansible_version = '9'
 
-        self._run_job('unarchive-bad', 'FAILURE', ERROR_ACCESS_OUTSIDE)
-        self._run_job('unarchive-bad-symlink', 'FAILURE', ERROR_ACCESS_OUTSIDE)
+    def setUp(self):
+        super().setUp()
+        self._setUp()

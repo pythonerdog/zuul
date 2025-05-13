@@ -1,0 +1,10 @@
+- name: "Set recheck"
+  uri:
+    url: "http://localhost:8080/a/changes/{{ change_id }}/revisions/current/review"
+    method: POST
+    user: user
+    password: secret
+    status_code: 200
+    body_format: json
+    body:
+      message: "recheck"

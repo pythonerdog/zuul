@@ -1,0 +1,7 @@
+---
+features:
+  - |
+    Add new statsd gauge metrics of current open node requests exported as
+    ``zuul.nodepool.tenant.<tenant>.current_requests``. This metric tracks the
+    currently open node requests per tenant. It drills down the overall
+    ``zuul.nodepool.current_requests`` metric.

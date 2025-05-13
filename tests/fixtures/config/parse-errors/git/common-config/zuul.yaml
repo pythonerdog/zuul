@@ -1,0 +1,38 @@
+- pipeline:
+    name: check
+    manager: independent
+    post-review: true
+    trigger:
+      gerrit:
+        - event: patchset-created
+    success:
+      gerrit:
+        Verified: 1
+    failure:
+      gerrit:
+        Verified: -1
+
+- secret:
+    name: goodsecret
+    data:
+      alice: bob
+      secret: xyzzy
+
+- secret:
+    name: badsecret
+    data:
+      recurse: "{{ badsecret.recurse }}"
+
+- job:
+    name: test-job
+    parent: null
+    run: playbooks/base.yaml
+    secrets:
+      - goodsecret
+      - badsecret
+
+- project:
+    name: org/project
+    check:
+      jobs:
+        - test-job

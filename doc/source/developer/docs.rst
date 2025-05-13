@@ -206,20 +206,20 @@ the directives above.  Use these roles for the first appearance of an
 object within a subsection, but use the ````literal```` role in
 subsequent uses.
 
-:zuul:attr:
-~~~~~~~~~~~
+\:zuul:attr:
+~~~~~~~~~~~~
 
 This creates a reference to the named attribute.  Provide the fully
 qualified name (e.g., ``:attr:`pipeline.manager```)
 
-:zuul:value:
-~~~~~~~~~~~~
+\:zuul:value:
+~~~~~~~~~~~~~
 
 This creates a reference to the named value.  Provide the fully
 qualified name (e.g., ``:attr:`pipeline.manager.dependent```)
 
-:zuul:var:
-~~~~~~~~~~
+\:zuul:var:
+~~~~~~~~~~~
 
 This creates a reference to the named variable.  Provide the fully
 qualified name (e.g., ``:var:`zuul.executor.name```)

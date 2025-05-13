@@ -1,0 +1,40 @@
+- job:
+    name: parent-job
+    description: Returns data to test precedence
+
+- job:
+    name: same-project
+    include-vars: project1-vars.yaml
+    vars:
+      job_var_precedence: job-vars
+
+- job:
+    name: same-project-no-ref
+    include-vars:
+      - name: project1-vars.yaml
+        use-ref: false
+
+- job:
+    name: other-project
+    include-vars:
+      - project: org/project2
+        name: project2-vars.yaml
+
+- project:
+    vars:
+      project_var_precedence: project-vars
+    check:
+      jobs:
+        - parent-job
+        - same-project:
+            dependencies:
+              - parent-job
+        - other-project
+    tag:
+      jobs:
+        - parent-job
+        - same-project:
+            dependencies:
+              - parent-job
+        - other-project
+        - same-project-no-ref

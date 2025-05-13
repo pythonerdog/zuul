@@ -1,0 +1,7 @@
+- hosts: localhost
+  tasks:
+    - zuul_return:
+        data:
+          build_id: "{{ zuul.build }}"
+          zuul:
+            pause: true

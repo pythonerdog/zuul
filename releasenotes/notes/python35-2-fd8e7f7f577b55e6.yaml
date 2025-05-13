@@ -1,0 +1,4 @@
+---
+upgrade:
+  - |
+    Support for running Zuul under Python 3.5 has been dropped.

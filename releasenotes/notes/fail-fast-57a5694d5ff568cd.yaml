@@ -1,0 +1,5 @@
+---
+features:
+  - |
+    Zuul now supports :attr:`project.<pipeline>.fail-fast` to immediately
+    report and cancel builds on the first failure in a buildset.

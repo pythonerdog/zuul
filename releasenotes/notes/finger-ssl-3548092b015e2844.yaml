@@ -1,0 +1,22 @@
+---
+features:
+  - |
+    The finger gateway and executor log streaming system now supports TLS
+    connections.
+
+    Normally zuul-web makes a direct connection to an executor in
+    order to stream logs.  With this new option, that connection can
+    be encrypted if it crosses an untrusted network.
+
+    The ability to route log streaming connections through finger
+    gateway servers was recently added; these will also use TLS if
+    required.
+
+    The finger gateway server can also be used by end-users; in that
+    case it may need a TLS certificate to use if it is required to
+    connect to an encrypted executor or finger gateway to stream logs.
+    An option to disable using TLS when acting as a server is provided
+    for this case, since there are no TLS-enable finger clients.
+
+    See :attr:`fingergw.tls_cert` and related options to enable
+    encrypted connections for all three components.

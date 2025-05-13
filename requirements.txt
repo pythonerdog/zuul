@@ -1,29 +1,61 @@
 pbr>=1.1.0
+# Early virtualenv 20 had bad file location assumptions
+virtualenv!=20.0.0,!=20.0.1,>20
 
+python-dateutil
 github3.py>=1.1.0
-PyYAML>=3.1.0
+PyYAML>=5.1.0
 paramiko>=2.0.1
 GitPython>=2.1.8
-python-daemon>=2.0.4,<2.1.0
+python-daemon>=2.0.4
 extras
 statsd>=3.0
+prometheus-client
 voluptuous>=0.10.2
-gear>=0.9.0,<1.0.0
 apscheduler>=3.0
-PrettyTable>=0.6,<0.8
+tzlocal<3.0  # https://github.com/agronholm/apscheduler/discussions/570
+PrettyTable
 babel>=1.0
-ansible>=2.5.1,<2.6
 netaddr
-kazoo
-sqlalchemy
+# Pinned due to increase in unit test timeouts related to connection issues
+kazoo==2.9.0
+sqlalchemy>=2.0.0
 alembic
-cryptography>=1.6
+cryptography>=39.0.0
 cachecontrol
-pyjwt
-iso8601
+cachetools
+pyjwt>=2.5.0
 psutil
-fb-re2>=1.0.6
-paho-mqtt
+google-re2>=1.1
+paho-mqtt<2.0.0
 cherrypy
 ws4py
 routes
+jsonpath-rw
+urllib3!=1.25.4,!=1.25.5  # https://github.com/urllib3/urllib3/pull/1684
+cheroot!=8.1.*,!=8.2.*,!=8.3.0 # https://github.com/cherrypy/cheroot/issues/263
+elasticsearch<8.0.0
+PyMySQL
+psycopg2-binary
+opentelemetry-sdk>=1.25.0
+# TODO: remove grpcio pinning below; 1.71.0rc2 is messing with pip installing opentelemetry-exporter-otlp-proto-grpc
+grpcio==1.69.0
+opentelemetry-exporter-otlp-proto-grpc>=1.25.0
+opentelemetry-exporter-otlp-proto-http>=1.25.0
+# TODO: remove version pin; 2.8.1 cannot build wheel in opendev
+confluent-kafka<2.8.1
+google-cloud-pubsub
+# For openstack driver
+openstacksdk>=0.103.0,!=2.0.0
+rackspaceauth
+# For openshift driver
+openshift
+# For AWS driver
+boto3>=1.20.0
+# For gcloud driver
+google-api-python-client
+# For ibmvpc driver
+ibm-vpc
+ibm-platform-services
+ibm-cos-sdk>=2.11.0
+mmh3

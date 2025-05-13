@@ -1,0 +1,12 @@
+- job:
+    name: test-job2
+    run: playbooks/test-job.yaml
+
+- project:
+    name: org/project2
+    check:
+      jobs:
+        - test-job2:
+            branches:
+              - regex: stable
+                negate: true

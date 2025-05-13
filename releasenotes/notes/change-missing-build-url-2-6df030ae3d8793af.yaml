@@ -1,0 +1,7 @@
+---
+upgrade:
+  - |
+    Previously the SqlReporter would record the job name in the database in
+    place of the url if the url was empty. This has now been updated to store
+    a null in the database for that case. Zuul will automatically run a
+    database migration to correct old values.

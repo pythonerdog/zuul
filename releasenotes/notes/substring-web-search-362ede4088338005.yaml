@@ -1,0 +1,7 @@
+---
+features:
+  - |
+    Zuul now supports substring searches on the Builds and Buildsets pages on
+    its web UI. This is supported by placing asterisk (*) placeholders anywhere
+    in the search term, representing any characters. This is enabled for job
+    name, branch, project, and pipeline filters.

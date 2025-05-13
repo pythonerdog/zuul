@@ -13,6 +13,7 @@
 import fixtures
 import logging
 import subprocess
+import sys
 import tempfile
 import testtools
 import time
@@ -21,6 +22,7 @@ import os
 from zuul.driver import bubblewrap
 from zuul.executor.server import SshAgent
 from tests.base import iterate_timeout
+from unittest import skipIf
 
 
 class TestBubblewrap(testtools.TestCase):
@@ -31,7 +33,7 @@ class TestBubblewrap(testtools.TestCase):
         self.useFixture(fixtures.NestedTempfile())
 
     def test_bubblewrap_wraps(self):
-        bwrap = bubblewrap.BubblewrapDriver()
+        bwrap = bubblewrap.BubblewrapDriver(check_bwrap=True)
         context = bwrap.getExecutionContext()
         work_dir = tempfile.mkdtemp()
         ssh_agent = SshAgent()
@@ -53,8 +55,9 @@ class TestBubblewrap(testtools.TestCase):
         # Make sure the _r's are closed
         self.assertEqual([], po.fds)
 
+    @skipIf(sys.platform == 'darwin', 'Not supported on MacOS')
     def test_bubblewrap_leak(self):
-        bwrap = bubblewrap.BubblewrapDriver()
+        bwrap = bubblewrap.BubblewrapDriver(check_bwrap=True)
         context = bwrap.getExecutionContext()
         work_dir = tempfile.mkdtemp()
         ansible_dir = tempfile.mkdtemp()
@@ -71,9 +74,13 @@ class TestBubblewrap(testtools.TestCase):
         cmdline = "sleep\x000x%X\x00" % leak_time
         for x in iterate_timeout(30, "process to exit"):
             try:
-                sleep_proc = [pid for pid in os.listdir("/proc") if
-                              os.path.isfile("/proc/%s/cmdline" % pid) and
-                              open("/proc/%s/cmdline" % pid).read() == cmdline]
+                sleep_proc = []
+                for pid in os.listdir("/proc"):
+                    if os.path.isfile("/proc/%s/cmdline" % pid):
+                        with open("/proc/%s/cmdline" % pid) as f:
+                            if f.read() == cmdline:
+                                sleep_proc.append(pid)
+
                 if not sleep_proc:
                     break
             except FileNotFoundError:

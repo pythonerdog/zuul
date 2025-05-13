@@ -1,0 +1,4 @@
+- name: Checkout a ref
+  command: 'git checkout {{ ref }}'
+  args:
+    chdir: '{{ zuul.project.src_dir }}'

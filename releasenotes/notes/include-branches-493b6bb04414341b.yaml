@@ -1,0 +1,9 @@
+---
+features:
+  - |
+    Added new tenant project configuration options
+    attr:`tenant.untrusted-projects.<project>.include-branches` and
+    attr:`tenant.untrusted-projects.<project>.exclude-branches`.
+    Similar to *exclude-unprotected-branches*, these may be used to
+    reduce the set of branches from which Zuul will load
+    configuration.

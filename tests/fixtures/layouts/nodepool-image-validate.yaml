@@ -1,0 +1,87 @@
+- pipeline:
+    name: image-build
+    manager: independent
+    trigger:
+      zuul:
+        - event: image-build
+    success:
+      zuul:
+        image-built: true
+
+- pipeline:
+    name: image-validate
+    manager: independent
+    trigger:
+      zuul:
+        - event: image-validate
+    success:
+      zuul:
+        image-validated: true
+
+- job:
+    name: base
+    parent: null
+    run: playbooks/base.yaml
+    nodeset:
+      nodes:
+        - label: ubuntu-xenial
+          name: controller
+
+- job:
+    name: build-debian-local-image
+    image-build-name: debian-local
+
+- job:
+    name: validate-debian-local-image
+    image-build-name: debian-local
+    nodeset:
+      nodes:
+        - name: node
+          label: debian-local
+
+- project:
+    name: org/common-config
+    image-build:
+      jobs:
+        - build-debian-local-image
+    image-validate:
+      jobs:
+        - validate-debian-local-image
+
+- image:
+    name: debian-local
+    type: zuul
+
+- flavor:
+    name: normal
+
+- label:
+    name: debian-local-normal
+    image: debian-local
+    flavor: normal
+
+- section:
+    name: aws-base
+    abstract: true
+    connection: aws
+    host-key-checking: false
+    boot-timeout: 120
+    launch-timeout: 600
+    object-storage:
+      bucket-name: zuul
+    flavors:
+      - name: normal
+        instance-type: t3.medium
+    images:
+      - name: debian-local
+
+- section:
+    name: aws-us-east-1
+    parent: aws-base
+    region: us-east-1
+
+- provider:
+    name: aws-us-east-1-main
+    section: aws-us-east-1
+    labels:
+      - debian-local-normal

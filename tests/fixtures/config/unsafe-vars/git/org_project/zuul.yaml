@@ -1,0 +1,30 @@
+- secret:
+    name: project_secret
+    data:
+      secret: "yoyo"
+      secretsub: "{{ subtext }}"
+
+- job:
+    name: testjob
+    vars:
+      latesub: "{{ latefact | default('undefined') }}"
+      jobvar: "{{ base_secret.secret | default('undefined') }}"
+      # Make sure we have a top level variable that is undefined to
+      # ensure that it doesn't cause all values to be omitted.
+      undefvar: "{{ undefinedvar }}"
+    run: playbooks/testjob-run.yaml
+
+- job:
+    name: testjob-secret
+    run: playbooks/testjob-run.yaml
+    vars:
+      latesub: "{{ latefact | default('undefined') }}"
+      jobvar: "{{ base_secret.secret | default('undefined') }}"
+    secrets:
+      - project_secret
+
+- project:
+    check:
+      jobs:
+        - testjob
+        - testjob-secret

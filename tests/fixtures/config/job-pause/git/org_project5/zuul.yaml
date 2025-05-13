@@ -1,0 +1,31 @@
+- job:
+    name: skip-upload
+    run: playbooks/skip-upload.yaml
+
+- job:
+    name: cache
+    parent: just-pause
+
+- job:
+    name: prepare-upload
+    parent: test
+
+- job:
+    name: upload
+    parent: test
+
+- project:
+    check:
+      jobs:
+        - cache
+        - skip-upload
+        - test:
+            dependencies:
+              - cache
+        - prepare-upload:
+            dependencies:
+              - skip-upload
+        - upload:
+            dependencies:
+              - prepare-upload
+              - test

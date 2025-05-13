@@ -1,0 +1,6 @@
+---
+fixes:
+  - |
+    The :attr:`job.files` and :attr:`job.irrelevant-files` attributes
+    now fully support the new :ref:`regular expression <regex>`
+    syntax, including negation.

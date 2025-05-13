@@ -1,0 +1,28 @@
+- pipeline:
+    name: check
+    manager: independent
+    post-review: true
+    trigger:
+      github:
+        - event: pull_request
+          action: opened
+    start:
+      github:
+        check: in_progress
+        comment: false
+    success:
+      github:
+        check: success
+        comment: false
+    failure:
+      github:
+        check: failure
+        comment: false
+
+- job:
+    name: base
+    parent: null
+    nodeset:
+      nodes:
+        - name: test_node
+          label: test_label

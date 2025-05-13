@@ -9,3 +9,13 @@
       github:
         untrusted-projects:
           - github/project2
+
+- tenant:
+    name: tenant-two
+    source:
+      gerrit:
+        config-projects:
+          - common-config:
+              exclude: project
+        untrusted-projects:
+          - gerrit/project2

@@ -1,0 +1,7 @@
+---
+upgrade:
+  - The Gerrit driver will now perform query actions over HTTP if an
+    HTTP password is configured.  In this situation, the SSH
+    connection is now only used for receiving events.  The HTTP
+    password is not required, but it is recommended since it provides
+    more reporting options (including line comments).

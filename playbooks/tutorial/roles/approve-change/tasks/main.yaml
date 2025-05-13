@@ -1,0 +1,13 @@
+- name: "Approve changes: {{ projectname }}"
+  uri:
+    url: "http://localhost:8080/a/changes/{{ change_id }}/revisions/{{ change_revision }}/review"
+    method: POST
+    user: admin
+    password: secret
+    status_code: 200
+    body_format: json
+    body:
+      labels:
+        Code-Review: "+2"
+        Workflow: "+1"
+

@@ -6,3 +6,12 @@
           - common-config
         untrusted-projects:
           - org/project
+          - org/project1
+          - org/project2
+          - org/project3
+          - org/project4
+          - org/project5
+          - org/project6
+          - org/project7
+          - org/project-soft
+          - org/project-skip-retry

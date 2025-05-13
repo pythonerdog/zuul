@@ -1,0 +1,41 @@
+- pipeline:
+    name: check
+    manager: independent
+    trigger:
+      gerrit:
+        - event: patchset-created
+    success:
+      gerrit:
+        Verified: 1
+    failure:
+      gerrit:
+        Verified: -1
+
+- project:
+    name: '^org/regex-empty.*'
+
+- project:
+    name: '^org/regex-cherry.*'
+    merge-mode: cherry-pick
+
+- project:
+    # This should be the driver default
+    name: org/project-empty
+
+- project:
+    # This should be the driver default
+    name: org/regex-empty-project-empty
+
+- project:
+    # This should be squash because the regex doesn't specify
+    name: org/regex-empty-project-squash
+    merge-mode: squash-merge
+
+- project:
+    # This should be cherry-pick because of the regex
+    name: org/regex-cherry-project-empty
+
+- project:
+    # This should be squash because it is more specific than the regex
+    name: org/regex-cherry-project-squash
+    merge-mode: squash-merge

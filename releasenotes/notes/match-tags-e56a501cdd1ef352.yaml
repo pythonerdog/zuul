@@ -1,0 +1,6 @@
+---
+features:
+  - |
+    Zuul now matches tag items against their containing branches. This makes
+    it simpler to have release jobs in-tree. See :attr:`job.branches` for
+    details.

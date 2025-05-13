@@ -1,0 +1,19 @@
+# Not actually the global semaphore -- this will be overridden
+- semaphore:
+    name: global-semaphore
+    max: 2
+
+- semaphore:
+    name: project1-semaphore
+    max: 11
+
+- job:
+    name: test-project1-semaphore
+    semaphores: project1-semaphore
+
+- project:
+    check:
+      jobs:
+        - test-global-semaphore
+        - test-common-semaphore
+        - test-project1-semaphore

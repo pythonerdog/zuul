@@ -1,4 +1,5 @@
 # Copyright 2017 Red Hat, Inc.
+# Copyright 2023 Acme Gating, LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may
 # not use this file except in compliance with the License. You may obtain
@@ -16,20 +17,27 @@ import logging
 import voluptuous as v
 from zuul.trigger import BaseTrigger
 from zuul.driver.git.gitmodel import GitEventFilter
-from zuul.driver.util import scalar_or_list, to_list
+from zuul.driver.util import scalar_or_list, to_list, make_regex, ZUUL_REGEX
 
 
 class GitTrigger(BaseTrigger):
     name = 'git'
     log = logging.getLogger("zuul.GitTrigger")
 
-    def getEventFilters(self, trigger_conf):
+    def getEventFilters(self, connection_name, trigger_conf,
+                        parse_context):
         efilters = []
+        pcontext = parse_context
         for trigger in to_list(trigger_conf):
+            with pcontext.confAttr(trigger, 'ref') as attr:
+                refs = [make_regex(x, pcontext)
+                        for x in to_list(attr)]
+
             f = GitEventFilter(
+                connection_name=connection_name,
                 trigger=self,
                 types=to_list(trigger['event']),
-                refs=to_list(trigger.get('ref')),
+                refs=refs,
                 ignore_deletes=trigger.get(
                     'ignore-deletes', True)
             )
@@ -42,7 +50,7 @@ def getSchema():
     git_trigger = {
         v.Required('event'):
             scalar_or_list(v.Any('ref-updated')),
-        'ref': scalar_or_list(str),
+        'ref': scalar_or_list(v.Any(ZUUL_REGEX, str)),
         'ignore-deletes': bool,
     }
 

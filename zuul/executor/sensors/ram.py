@@ -13,10 +13,13 @@
 # under the License.
 
 import logging
+import math
 import psutil
 
 from zuul.executor.sensors import SensorInterface
 from zuul.lib.config import get_default
+
+CGROUP_STATS_FILE = '/sys/fs/cgroup/memory/memory.stat'
 
 
 def get_avail_mem_pct():
@@ -27,21 +30,67 @@ def get_avail_mem_pct():
 class RAMSensor(SensorInterface):
     log = logging.getLogger("zuul.executor.sensor.ram")
 
-    def __init__(self, config=None):
+    def __init__(self, statsd, base_key, config=None):
+        super().__init__(statsd, base_key)
         self.min_avail_mem = float(get_default(config, 'executor',
                                                'min_avail_mem', '5.0'))
+        self.cgroup_stats_file = CGROUP_STATS_FILE
+
+    def _read_cgroup_stat(self):
+        stat = {}
+        try:
+            with open(self.cgroup_stats_file) as f:
+                for line in f.readlines():
+                    key, value = line.split(' ')
+                    stat[key] = int(value.strip())
+        except Exception:
+            pass
+        return stat
+
+    def _get_cgroup_limit(self):
+        stat = self._read_cgroup_stat()
+        limit = stat.get('hierarchical_memory_limit', math.inf)
+        mem_total = psutil.virtual_memory().total
+        if limit < mem_total:
+            return limit
+        else:
+            return math.inf
+
+    def _get_avail_mem_pct_cgroup(self):
+        stat = self._read_cgroup_stat()
+        limit = stat.get('hierarchical_memory_limit', math.inf)
+        usage = stat.get('total_rss', math.inf)
+
+        if math.isinf(limit) or math.isinf(usage):
+            # pretend we have all memory available if we got infs
+            return 100
+
+        return 100.0 - usage / limit * 100
 
     def isOk(self):
         avail_mem_pct = get_avail_mem_pct()
+        avail_mem_pct_cgroup = self._get_avail_mem_pct_cgroup()
+
+        if self.statsd:
+            self.statsd.gauge(self.base_key + '.pct_used_ram',
+                              int((100.0 - avail_mem_pct) * 100))
+            if math.isfinite(self._get_cgroup_limit()):
+                self.statsd.gauge(self.base_key + '.pct_used_ram_cgroup',
+                                  int((100.0 - avail_mem_pct_cgroup) * 100))
 
         if avail_mem_pct < self.min_avail_mem:
             return False, "low memory {:3.1f}% < {}".format(
                 avail_mem_pct, self.min_avail_mem)
 
-        return True, "{:3.1f}% <= {}".format(avail_mem_pct, self.min_avail_mem)
+        if math.isinf(self._get_cgroup_limit()):
+            # we have no cgroup defined limit so we're done now
+            return True, "memory {:3.1f}% >= {}%".format(
+                avail_mem_pct, self.min_avail_mem)
 
-    def reportStats(self, statsd, base_key):
-        avail_mem_pct = get_avail_mem_pct()
+        if avail_mem_pct_cgroup < self.min_avail_mem:
+            return False, "low memory cgroup {:3.1f}% < {}%".format(
+                avail_mem_pct_cgroup, self.min_avail_mem)
 
-        statsd.gauge(base_key + '.pct_used_ram',
-                     int((100.0 - avail_mem_pct) * 100))
+        return True, "memory cgroup {:3.1f}% >= {}%, {:3.1f}% >= {}%".format(
+            avail_mem_pct, self.min_avail_mem,
+            avail_mem_pct_cgroup, self.min_avail_mem)

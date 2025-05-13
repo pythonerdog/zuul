@@ -1,0 +1,31 @@
+- job:
+    name: branch-job
+    run: playbooks/run.yaml
+    override-checkout: test-branch
+    required-projects:
+      - name: org/project1
+      - name: org/project2
+    roles:
+      - zuul: org/project1
+      - zuul: org/project2
+    files:
+      - branch
+
+- job:
+    name: tag-job
+    run: playbooks/run.yaml
+    override-checkout: test-tag
+    required-projects:
+      - name: org/project1
+      - name: org/project2
+    roles:
+      - zuul: org/project1
+      - zuul: org/project2
+    files:
+      - tag
+
+- project:
+    check:
+      jobs:
+        - branch-job
+        - tag-job

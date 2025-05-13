@@ -1,16 +1,16 @@
-===========================
-Testing Your OpenStack Code
-===========================
+============
+Testing Zuul
+============
 ------------
 A Quickstart
 ------------
 
-This is designed to be enough information for you to run your first tests.
-Detailed information on testing can be found here: https://wiki.openstack.org/wiki/Testing
+This is designed to be enough information for you to run your first tests on
+an Ubuntu 20.04 (or later) host.
 
 *Install pip*::
 
-  [apt-get | yum] install python-pip
+  sudo apt-get install python3-pip
 
 More information on pip here: http://www.pip-installer.org/en/latest/
 
@@ -18,15 +18,13 @@ More information on pip here: http://www.pip-installer.org/en/latest/
 
   pip install tox
 
-As of zuul v3, a running zookeeper is required to execute tests.
+A running zookeeper is required to execute tests, but it also needs to be
+configured for TLS and a certificate authority set up to handle socket
+authentication. Because of these complexities, it's recommended to use a
+helper script to set up these dependencies, as well as a database servers::
 
-*Install zookeeper*::
-
-  [apt-get | yum] install zookeeperd
-
-*Start zookeeper*::
-
-  service zookeeper start
+  sudo apt-get install docker-compose  # or podman-compose if preferred
+  ROOTCMD=sudo tools/test-setup-docker.sh
 
 .. note:: Installing and bulding javascript is not required, but tests that
           depend on the javascript assets having been built will be skipped
@@ -38,11 +36,15 @@ As of zuul v3, a running zookeeper is required to execute tests.
 
 *Install javascript dependencies*::
 
+  pushd web
   yarn install
+  popd
 
 *Build javascript assets*::
 
-  npm run build:dev
+  pushd web
+  yarn build
+  popd
 
 Run The Tests
 -------------
@@ -87,7 +89,7 @@ For example, to *run a single Zuul test*::
 To *run one test in the foreground* (after previously having run tox
 to set up the virtualenv)::
 
-  .tox/py35/bin/stestr run -t tests.unit.test_scheduler.TestScheduler.test_jobs_executed
+  .tox/py35/bin/stestr run tests.unit.test_scheduler.TestScheduler.test_jobs_executed
 
 List Failing Tests
 ------------------

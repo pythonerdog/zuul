@@ -37,13 +37,13 @@
     parent: null
     pre-run: playbooks/base-pre.yaml
     secrets:
-      - base-secret
+      - base_secret
 
 - job:
     name: trusted-secrets
     run: playbooks/trusted-secrets.yaml
     secrets:
-      - trusted-secret
+      - trusted_secret
 
 - job:
     name: trusted-secrets-trusted-child
@@ -62,14 +62,9 @@
         - trusted-secrets
         - trusted-secrets-trusted-child
         - trusted-secrets-untrusted-child
-    gate:
-      jobs:
-        - untrusted-secrets
-        - untrusted-secrets-trusted-child
-        - untrusted-secrets-untrusted-child
 
 - secret:
-    name: trusted-secret
+    name: trusted_secret
     data:
       username: test-username
       longpassword: !encrypted/pkcs1-oaep
@@ -109,6 +104,6 @@
         vIs=
 
 - secret:
-    name: base-secret
+    name: base_secret
     data:
       username: base-username

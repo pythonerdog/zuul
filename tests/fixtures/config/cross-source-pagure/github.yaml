@@ -1,0 +1,11 @@
+- tenant:
+    name: tenant-one
+    source:
+      github:
+        config-projects:
+          - github/common-config
+        untrusted-projects:
+          - github/project1
+      pagure:
+        untrusted-projects:
+          - pagure/project2

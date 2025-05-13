@@ -1,0 +1,21 @@
+- pipeline:
+    name: promote
+    manager: supercedent
+    post-review: true
+    trigger:
+      gerrit:
+        - event: change-merged
+
+- job:
+    name: callback-test
+    parent: null
+    run: playbooks/callback.yaml
+    nodeset:
+      nodes:
+        - name: ubuntu-xenial
+          label: ubuntu-xenial
+
+- project:
+    promote:
+      jobs:
+        - callback-test

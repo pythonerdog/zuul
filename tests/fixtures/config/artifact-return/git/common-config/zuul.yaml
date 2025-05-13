@@ -1,0 +1,46 @@
+- pipeline:
+    name: check
+    manager: independent
+    post-review: true
+    trigger:
+      gerrit:
+        - event: patchset-created
+    success:
+      gerrit:
+        Verified: 1
+    failure:
+      gerrit:
+        Verified: -1
+
+- job:
+    name: base
+    parent: null
+
+- job:
+    name: ok
+    run: playbooks/ok.yaml
+    files: ['ok']
+
+- job:
+    name: no-url
+    run: playbooks/no-url.yaml
+    files: ['no-url']
+
+- job:
+    name: no-name
+    run: playbooks/no-name.yaml
+    files: ['no-name']
+
+- job:
+    name: bad-metadata
+    run: playbooks/bad-metadata.yaml
+    files: ['bad-metadata']
+
+- project:
+    name: org/project
+    check:
+      jobs:
+        - ok
+        - no-url
+        - no-name
+        - bad-metadata

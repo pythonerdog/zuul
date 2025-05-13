@@ -1,0 +1,132 @@
+- pipeline:
+    name: check
+    manager: independent
+    trigger:
+      gitlab:
+        - event: gl_merge_request
+          action: comment
+          comment: (?i)^\s*recheck\s*$
+        - event: gl_merge_request
+          action:
+            - opened
+            - changed
+    start:
+      gitlab:
+        comment: True
+        approval: False
+    success:
+      gitlab:
+        comment: True
+        approval: True
+    failure:
+      gitlab:
+        comment: True
+        approval: False
+
+- pipeline:
+    name: check-approval
+    manager: independent
+    trigger:
+      gitlab:
+        - event: gl_merge_request
+          action:
+            - approved
+            - unapproved
+
+- pipeline:
+    name: check-labeled
+    manager: independent
+    trigger:
+      gitlab:
+        - event: gl_merge_request
+          action:
+            - labeled
+          labels:
+            - gateit
+        - event: gl_merge_request
+          action:
+            - labeled
+          unlabels:
+            - verified
+
+- pipeline:
+    name: promote
+    manager: independent
+    trigger:
+      gitlab:
+        - event: gl_merge_request
+          action:
+            - merged
+
+- pipeline:
+    name: post
+    post-review: true
+    manager: independent
+    trigger:
+      gitlab:
+        - event: gl_push
+          ref: ^refs/heads/.*$
+
+- pipeline:
+    name: tag
+    post-review: true
+    manager: independent
+    trigger:
+      gitlab:
+        - event: gl_push
+          ref: ^refs/tags/.*$
+
+- job:
+    name: base
+    parent: null
+    run: playbooks/base.yaml
+
+- job:
+    name: project-test1
+    run: playbooks/project-test1.yaml
+
+- job:
+    name: project-test2
+    run: playbooks/project-test2.yaml
+
+- job:
+    name: project-post-job
+    run: playbooks/project-post.yaml
+
+- job:
+    name: project-tag-job
+    run: playbooks/project-tag.yaml
+
+- job:
+    name: project-test-approval
+    run: playbooks/project-test-approval.yaml
+
+- job:
+    name: project-test-labeled
+    run: playbooks/project-test-labeled.yaml
+
+- job:
+    name: project-promote
+    run: playbooks/project-promote.yaml
+
+- project:
+    name: org/project
+    check:
+      jobs:
+        - project-test1
+        - project-test2
+    check-approval:
+      jobs:
+        - project-test-approval
+    check-labeled:
+      jobs:
+        - project-test-labeled
+    promote:
+      jobs:
+        - project-promote
+    post:
+      jobs:
+        - project-post-job
+    tag:
+      jobs:
+        - project-tag-job

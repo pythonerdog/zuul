@@ -1,0 +1,19 @@
+query ruleProtectedBranches(
+  $rule_node_id: ID!
+  $cursor: String
+) {
+  node(id: $rule_node_id) {
+    ... on BranchProtectionRule {
+      matchingRefs(first: 100, after: $cursor) {
+        pageInfo {
+          endCursor
+          hasNextPage
+          hasPreviousPage
+        }
+        nodes {
+          name
+        }
+      }
+    }
+  }
+}

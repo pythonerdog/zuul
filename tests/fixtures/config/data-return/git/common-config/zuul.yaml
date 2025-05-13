@@ -21,13 +21,109 @@
     run: playbooks/data-return.yaml
 
 - job:
+    name: data-return-child-jobs
+    run: playbooks/data-return-child-jobs.yaml
+
+- job:
+    name: data-return-invalid-child-job
+    run: playbooks/data-return-invalid-child-job.yaml
+
+- job:
+    name: data-return-skip-all
+    run: playbooks/data-return-skip-all.yaml
+
+- job:
     name: data-return-relative
-    success-url: docs/index.html
     run: playbooks/data-return-relative.yaml
 
 - job:
+    name: data-return-child-jobs-failure
+    run:
+      - playbooks/data-return-child-jobs.yaml
+      - playbooks/failure.yaml
+
+- job:
+    name: paused-data-return-child-jobs
+    run:
+      - playbooks/paused-data-return-child-jobs.yaml
+
+- job:
+    name: paused-data-return-vars
+    run:
+      - playbooks/paused-data-return-vars.yaml
+
+- job:
+    name: print-data-return-vars
+    run: playbooks/print-data-return-vars.yaml
+
+- job:
+    name: data-return-a
+    run: playbooks/data-return-a.yaml
+
+- job:
+    name: data-return-b
+    run: playbooks/data-return-b.yaml
+
+- job:
+    name: data-return-c
+    run: playbooks/data-return-c.yaml
+
+- job:
+    name: data-return-d
+    run: playbooks/data-return-d.yaml
+
+- job:
+    name: data-return-cd
+    run: playbooks/data-return-cd.yaml
+
+# Used to test returned secret data precedence.
+- secret:
+    name: test_secret
+    data:
+      password: fromsecret
+
+# This child job will be skipped in the test case test_data_return_child_jobs.
+# In order to verify that this doesn't lead to node leaks attach a nodeset to
+# it. Each test case automatically verifies that there are no open node
+# requests and no locked nodes left behind.
+- job:
     name: child
     run: playbooks/child.yaml
+    nodeset:
+      nodes:
+        - name: node
+          label: test
+      groups:
+        - name: group1
+          nodes: node
+    # Include a bunch of variables + secret to test returned secret
+    # data precedence.
+    secrets:
+      - test_secret
+    vars:
+      jobvar: job
+    host-vars:
+      node:
+        hostvar: host
+    group-vars:
+      group1:
+        groupvar: group
+    extra-vars:
+      extravar: extra
+
+- job:
+    name: several-zuul-return-parent
+    post-run: playbooks/several-zuul-return-parent-post.yaml
+
+- job:
+    name: several-zuul-return-child
+    parent: several-zuul-return-parent
+    run: playbooks/several-zuul-return-child.yaml
+
+- job:
+    name: skip-retry-return
+    pre-run: playbooks/skip-retry-return.yaml
+    run: playbooks/pass.yaml
 
 - project:
     name: org/project
@@ -39,3 +135,103 @@
             dependencies:
               - data-return
               - data-return-relative
+
+- project:
+    name: org/project1
+    check:
+      jobs:
+        - data-return-child-jobs
+        - data-return:
+            dependencies:
+              - data-return-child-jobs
+        - child:
+            dependencies:
+              - data-return-child-jobs
+
+- project:
+    name: org/project2
+    check:
+      jobs:
+        - data-return-invalid-child-job
+        - data-return:
+            dependencies:
+              - data-return-invalid-child-job
+
+- project:
+    name: org/project3
+    check:
+      jobs:
+        - data-return-skip-all
+        - data-return:
+            dependencies:
+              - data-return-skip-all
+        - child:
+            dependencies:
+              - data-return-skip-all
+
+- project:
+    name: org/project4
+    check:
+      jobs:
+        - several-zuul-return-child
+        - data-return:
+            dependencies:
+              - several-zuul-return-child
+
+- project:
+    name: org/project5
+    check:
+      jobs:
+        - data-return-child-jobs-failure
+        - data-return:
+            dependencies:
+              - data-return-child-jobs-failure
+
+
+- project:
+    name: org/project6
+    check:
+      jobs:
+        - paused-data-return-child-jobs
+        - data-return:
+            dependencies:
+              - paused-data-return-child-jobs
+        - child:
+            dependencies:
+              - paused-data-return-child-jobs
+
+- project:
+    name: org/project7
+    check:
+      jobs:
+        - paused-data-return-vars
+        - print-data-return-vars:
+            dependencies:
+              - paused-data-return-vars
+
+- project:
+    name: org/project-soft
+    check:
+      jobs:
+        - data-return-cd
+        - data-return-a:
+            dependencies:
+              - data-return-cd
+        - data-return-b:
+            dependencies:
+              - data-return-cd
+        - data-return-c:
+            dependencies:
+              - data-return-cd
+        - data-return-d:
+            dependencies:
+              - name: data-return-b
+                soft: true
+              - name: data-return-c
+                soft: true
+
+- project:
+    name: org/project-skip-retry
+    check:
+      jobs:
+        - skip-retry-return

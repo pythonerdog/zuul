@@ -1,0 +1,7 @@
+---
+deprecations:
+  - |
+    Authentication: the JWT driver "RS256withJWKS" is deprecated in favor of the
+    "OpenIDConnect" driver. The "OpenIDConnect" driver simplifies configuration
+    for administrators and is better aligned with OIDC configuration discovery
+    conventions.

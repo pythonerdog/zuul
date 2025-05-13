@@ -1,0 +1,5 @@
+---
+features:
+  - |
+    A new prometheus_port option for the services can be used to start the
+    prometheus python client and exposes metrics.

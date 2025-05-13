@@ -1,22 +1,79 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!-- Generator: Adobe Illustrator 22.0.1, SVG Export Plug-In . SVG Version: 6.00 Build 0)  -->
-<svg version="1.1" id="Layer_1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" x="0px" y="0px"
-	 viewBox="0 0 144 144" style="enable-background:new 0 0 144 144;" xml:space="preserve">
-<style type="text/css">
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   xmlns:dc="http://purl.org/dc/elements/1.1/"
+   xmlns:cc="http://creativecommons.org/ns#"
+   xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+   xmlns:svg="http://www.w3.org/2000/svg"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   version="1.1"
+   id="Layer_1"
+   x="0px"
+   y="0px"
+   viewBox="0 0 1999.9989 533.33301"
+   xml:space="preserve"
+   sodipodi:docname="Zuul_Logo_Full_Horizontal_RGB_DarkBlue.svg"
+   width="1999.9988"
+   height="533.33301"
+   inkscape:version="1.0.2 (e86c870879, 2021-01-15)"><metadata
+   id="metadata1646"><rdf:RDF><cc:Work
+       rdf:about=""><dc:format>image/svg+xml</dc:format><dc:type
+         rdf:resource="http://purl.org/dc/dcmitype/StillImage" /><dc:title></dc:title></cc:Work></rdf:RDF></metadata><defs
+   id="defs1644" /><sodipodi:namedview
+   pagecolor="#ffffff"
+   bordercolor="#666666"
+   borderopacity="1"
+   objecttolerance="10"
+   gridtolerance="10"
+   guidetolerance="10"
+   inkscape:pageopacity="0"
+   inkscape:pageshadow="2"
+   inkscape:window-width="1983"
+   inkscape:window-height="845"
+   id="namedview1642"
+   showgrid="false"
+   fit-margin-top="0"
+   fit-margin-left="0"
+   fit-margin-right="0"
+   fit-margin-bottom="0"
+   inkscape:zoom="0.2545462"
+   inkscape:cx="107.94999"
+   inkscape:cy="28.799999"
+   inkscape:window-x="235"
+   inkscape:window-y="67"
+   inkscape:window-maximized="0"
+   inkscape:current-layer="Layer_1" />
+<style
+   type="text/css"
+   id="style1625">
 	.st0{fill:#071D49;}
 </style>
-<g>
-	<path class="st0" d="M12.8,102.6h118.5L106,58.8v-15l7-9.2H92L72,0L52,34.7H31.1l7,9.2v15L12.8,102.6z M38,96.6H23.1L38,70.8V96.6z
-		 M48.4,96.6H44V61.3h4.3V96.6z M48.4,55.3H44V51h4.3V55.3z M69,96.6H54.3V61.3H69V96.6z M89.7,96.6H75V61.3h14.7V96.6z M89.7,55.3
-		H54.3V51h35.3V55.3z M100,96.6h-4.3V61.3h4.3V96.6z M100,55.3h-4.3V51h4.3V55.3z M106,70.8l14.9,25.8H106V70.8z M72,12l13.1,22.7
-		H58.9L72,12z M100.9,40.7l-0.9,1.2V45H44v-3.2l-0.9-1.2H100.9z"/>
-	<polygon class="st0" points="138.2,137.3 125.1,137.3 125.1,114.6 119.1,118.1 119.1,137.3 119.1,139.6 119.1,143.3 141.6,143.3 	
-		"/>
-	<path class="st0" d="M99.1,131.5L99.1,131.5L99.1,131.5c0,3.6-2.9,6.5-6.5,6.5c-3.6,0-6.5-2.9-6.5-6.5v0h0v-16.9l-6,3.5v13.5v0
-		c0,6.9,5.6,12.5,12.5,12.5c6.9,0,12.5-5.6,12.5-12.5v0v-16.9l-6,3.5V131.5z"/>
-	<path class="st0" d="M60.2,131.5L60.2,131.5L60.2,131.5c0,3.6-2.9,6.5-6.5,6.5c-3.6,0-6.5-2.9-6.5-6.5v0h0v-16.9l-6,3.5v13.5v0
-		c0,6.9,5.6,12.5,12.5,12.5c6.9,0,12.5-5.6,12.5-12.5v0v-16.9l-6,3.5V131.5z"/>
-	<polygon class="st0" points="25.8,114.6 25.4,114.6 18.9,114.6 5.8,114.6 2.4,120.6 15.5,120.6 2.4,143.3 23.8,143.3 27.3,137.3 
-		12.7,137.3 	"/>
+<g
+   id="g1639"
+   transform="matrix(9.2592535,0,0,9.2592535,-316.66647,-399.99975)">
+	<path
+   class="st0"
+   d="m 34.2,100.8 h 66.5 L 86.5,76.2 v -8.4 l 3.9,-5.1 H 78.6 L 67.4,43.2 56.2,62.7 H 44.4 l 3.9,5.1 v 8.4 z M 48.4,97.4 H 40 l 8.4,-14.5 z m 5.7,0 H 51.7 V 77.6 h 2.4 z m 0,-23.1 h -2.4 v -2.4 h 2.4 z M 65.7,97.4 H 57.5 V 77.6 h 8.2 z m 11.6,0 H 69.1 V 77.6 h 8.2 z m 0,-23.1 H 57.5 v -2.4 h 19.8 z m 5.8,23.1 H 80.7 V 77.6 h 2.4 z m 0,-23.1 h -2.4 v -2.4 h 2.4 z m 3.4,8.6 8.4,14.5 h -8.4 z m -19.1,-33 7.4,12.7 H 60 Z M 83.6,66 83.1,66.7 v 1.8 H 51.7 V 66.7 L 51.2,66 Z"
+   id="path1627" />
+	<g
+   id="g1637">
+		<polygon
+   class="st0"
+   points="227.5,86 250.2,86 246.7,80 233.5,80 233.5,57.2 227.5,60.7 "
+   id="polygon1629" />
+		<path
+   class="st0"
+   d="m 207.5,74.2 v 0 0 c 0,3.6 -2.9,6.5 -6.5,6.5 -3.6,0 -6.5,-2.9 -6.5,-6.5 v 0 0 -17 l -6,3.5 v 13.5 0 c 0,6.9 5.6,12.5 12.5,12.5 6.9,0 12.5,-5.6 12.5,-12.5 v 0 -17 l -6,3.5 z"
+   id="path1631" />
+		<path
+   class="st0"
+   d="m 168.4,74.2 v 0 0 c 0,3.6 -2.9,6.5 -6.5,6.5 -3.6,0 -6.5,-2.9 -6.5,-6.5 v 0 0 -17 l -6,3.5 v 13.5 0 c 0,6.9 5.6,12.5 12.5,12.5 6.9,0 12.5,-5.6 12.5,-12.5 v 0 -17 l -6,3.5 z"
+   id="path1633" />
+		<polygon
+   class="st0"
+   points="110.4,86 131.9,86 135.4,80 120.8,80 133.9,57.2 113.8,57.2 110.4,63.3 123.5,63.3 "
+   id="polygon1635" />
+	</g>
 </g>
 </svg>

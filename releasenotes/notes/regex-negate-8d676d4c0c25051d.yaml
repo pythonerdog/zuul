@@ -1,0 +1,7 @@
+---
+features:
+  - |
+    Configuration options which accept :ref:`regular expressions
+    <regex>` have been updated to accept a new syntax which allows
+    specifying that the regular expression should be treated as a
+    negative match.

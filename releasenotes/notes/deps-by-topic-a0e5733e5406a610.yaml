@@ -1,0 +1,6 @@
+---
+features:
+  - |
+    The :attr:`queue.dependencies-by-topic` setting is added for Zuul
+    users who wish to emulate the Gerrit ``submitWholeTopic`` behavior
+    for some projects without enabling it site-wide in Gerrit.

@@ -1,0 +1,12 @@
+---
+features:
+  - |
+    The change message (commit message, or pull request message
+    depending on the driver) is now available in plain text form
+    annotated with the Ansible `!unsafe` tag as
+    :var:`zuul.change_message`.
+deprecations:
+  - |
+    The base64 encoded version of the change message available as
+    :var:`zuul.message` is deprecated and will be removed in a future
+    version of Zuul.  Use :var:`zuul.change_message` instead.

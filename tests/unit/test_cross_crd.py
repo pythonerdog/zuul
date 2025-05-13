@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-
 # Copyright 2012 Hewlett-Packard Development Company, L.P.
 # Copyright 2018 Red Hat, Inc.
 #
@@ -15,9 +13,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-from tests.base import (
-    ZuulTestCase,
-)
+from tests.base import ZuulTestCase, skipIfMultiScheduler
 
 
 class TestGerritToGithubCRD(ZuulTestCase):
@@ -57,8 +53,8 @@ class TestGerritToGithubCRD(ZuulTestCase):
         self.assertEqual(A.data['status'], 'NEW')
         self.assertFalse(B.is_merged)
 
-        for connection in self.connections.connections.values():
-            connection.maintainCache([])
+        for connection in self.scheds.first.connections.connections.values():
+            connection.maintainCache([], max_age=0)
 
         self.executor_server.hold_jobs_in_build = True
         B.addLabel('approved')
@@ -185,7 +181,12 @@ class TestGerritToGithubCRD(ZuulTestCase):
         self.fake_gerrit.addEvent(A.addApproval('Approved', 1))
         self.waitUntilSettled()
 
-        self.assertEqual(A.reported, 0)
+        self.assertEqual(A.reported, 1)
+        self.assertEqual(
+            A.messages[0],
+            "Build failed.\n\n\nWarning:\n  "
+            "Dependency cycle detected and project github/project2 "
+            "doesn't allow circular dependencies\n")
         self.assertEqual(len(B.comments), 0)
         self.assertEqual(A.data['status'], 'NEW')
         self.assertFalse(B.is_merged)
@@ -193,6 +194,9 @@ class TestGerritToGithubCRD(ZuulTestCase):
     def test_crd_gate_unknown(self):
         "Test unknown projects in dependent pipeline"
         self.init_repo("github/unknown", tag='init')
+        # We also need make the repo known to the fake github as a
+        # side-effect of getting the project.
+        self.fake_github.source.getProject("github/unknown")
         A = self.fake_gerrit.addFakeChange('gerrit/project1', 'master', 'A')
         B = self.fake_github.openFakePullRequest('github/unknown', 'master',
                                                  'B')
@@ -206,13 +210,14 @@ class TestGerritToGithubCRD(ZuulTestCase):
         self.fake_gerrit.addEvent(A.addApproval('Approved', 1))
         self.waitUntilSettled()
 
-        # Unknown projects cannot share a queue with any other
-        # since they don't have common jobs with any other (they have no jobs).
-        # Changes which depend on unknown project changes
-        # should not be processed in dependent pipeline
+        # Unknown projects cannot share a queue with any other since
+        # they don't have common jobs with any other (they have no
+        # jobs).  Changes which depend on unknown project changes
+        # should only report an error.
         self.assertEqual(A.data['status'], 'NEW')
         self.assertFalse(B.is_merged)
-        self.assertEqual(A.reported, 0)
+        self.assertEqual(A.reported, 1)
+        self.assertIn("does not share a change queue", A.messages[-1])
         self.assertEqual(len(B.comments), 0)
         self.assertEqual(len(self.history), 0)
 
@@ -231,14 +236,14 @@ class TestGerritToGithubCRD(ZuulTestCase):
         self.waitUntilSettled()
 
         self.assertEqual(A.data['status'], 'MERGED')
-        self.assertEqual(A.reported, 2)
+        self.assertEqual(A.reported, 3)
         self.assertTrue(B.is_merged)
         self.assertEqual(len(B.comments), 0)
 
     def test_crd_check(self):
         "Test cross-repo dependencies in independent pipelines"
         self.executor_server.hold_jobs_in_build = True
-        self.gearman_server.hold_jobs_in_queue = True
+        self.hold_jobs_in_queue = True
         A = self.fake_gerrit.addFakeChange('gerrit/project1', 'master', 'A')
         B = self.fake_github.openFakePullRequest(
             'github/project2', 'master', 'B')
@@ -250,8 +255,8 @@ class TestGerritToGithubCRD(ZuulTestCase):
         self.fake_gerrit.addEvent(A.getPatchsetCreatedEvent(1))
         self.waitUntilSettled()
 
-        self.gearman_server.hold_jobs_in_queue = False
-        self.gearman_server.release()
+        self.hold_jobs_in_queue = False
+        self.executor_api.release()
         self.waitUntilSettled()
 
         self.executor_server.release('.*-merge')
@@ -273,8 +278,9 @@ class TestGerritToGithubCRD(ZuulTestCase):
         self.assertEqual(changes, '1,%s 1,1' %
                          (B.head_sha,))
 
-        tenant = self.sched.abide.tenants.get('tenant-one')
-        self.assertEqual(len(tenant.layout.pipelines['check'].queues), 0)
+        tenant = self.scheds.first.sched.abide.tenants.get('tenant-one')
+        self.assertEqual(
+            len(tenant.layout.pipeline_managers['check'].state.queues), 0)
 
     def test_crd_check_duplicate(self):
         "Test duplicate check in independent pipelines"
@@ -282,27 +288,26 @@ class TestGerritToGithubCRD(ZuulTestCase):
         A = self.fake_gerrit.addFakeChange('gerrit/project1', 'master', 'A')
         B = self.fake_github.openFakePullRequest(
             'github/project2', 'master', 'B')
+        self.waitUntilSettled()
 
         # A Depends-On: B
         A.data['commitMessage'] = '%s\n\nDepends-On: %s\n' % (
             A.subject, B.url)
-        tenant = self.sched.abide.tenants.get('tenant-one')
-        check_pipeline = tenant.layout.pipelines['check']
 
         # Add two dependent changes...
         self.fake_gerrit.addEvent(A.getPatchsetCreatedEvent(1))
         self.waitUntilSettled()
-        self.assertEqual(len(check_pipeline.getAllItems()), 2)
+        self.assertEqual(len(self.getAllItems('tenant-one', 'check')), 2)
 
         # ...make sure the live one is not duplicated...
         self.fake_gerrit.addEvent(A.getPatchsetCreatedEvent(1))
         self.waitUntilSettled()
-        self.assertEqual(len(check_pipeline.getAllItems()), 2)
+        self.assertEqual(len(self.getAllItems('tenant-one', 'check')), 2)
 
         # ...but the non-live one is able to be.
         self.fake_github.emitEvent(B.getPullRequestEditedEvent())
         self.waitUntilSettled()
-        self.assertEqual(len(check_pipeline.getAllItems()), 3)
+        self.assertEqual(len(self.getAllItems('tenant-one', 'check')), 3)
 
         # Release jobs in order to avoid races with change A jobs
         # finishing before change B jobs.
@@ -325,17 +330,16 @@ class TestGerritToGithubCRD(ZuulTestCase):
             'project-merge', 'github/project2').changes
         self.assertEqual(changes, '1,%s' %
                          (B.head_sha,))
-        self.assertEqual(len(tenant.layout.pipelines['check'].queues), 0)
+        self.assertEqual(len(self.getAllQueues('tenant-one', 'check')), 0)
 
         self.assertIn('Build succeeded', A.messages[0])
 
     def _test_crd_check_reconfiguration(self, project1, project2):
         "Test cross-repo dependencies re-enqueued in independent pipelines"
 
-        self.gearman_server.hold_jobs_in_queue = True
-        A = self.fake_gerrit.addFakeChange('gerrit/project1', 'master', 'A')
-        B = self.fake_github.openFakePullRequest(
-            'github/project2', 'master', 'B')
+        self.hold_jobs_in_queue = True
+        A = self.fake_gerrit.addFakeChange(project1, 'master', 'A')
+        B = self.fake_github.openFakePullRequest(project2, 'master', 'B')
 
         # A Depends-On: B
         A.data['commitMessage'] = '%s\n\nDepends-On: %s\n' % (
@@ -344,21 +348,23 @@ class TestGerritToGithubCRD(ZuulTestCase):
         self.fake_gerrit.addEvent(A.getPatchsetCreatedEvent(1))
         self.waitUntilSettled()
 
-        self.sched.reconfigure(self.config)
+        self.scheds.execute(lambda app: app.sched.reconfigure(app.config))
+        self.waitUntilSettled()
 
         # Make sure the items still share a change queue, and the
         # first one is not live.
-        tenant = self.sched.abide.tenants.get('tenant-one')
-        self.assertEqual(len(tenant.layout.pipelines['check'].queues), 1)
-        queue = tenant.layout.pipelines['check'].queues[0]
+        tenant = self.scheds.first.sched.abide.tenants.get('tenant-one')
+        self.assertEqual(
+            len(tenant.layout.pipeline_managers['check'].state.queues), 1)
+        queue = tenant.layout.pipeline_managers['check'].state.queues[0]
         first_item = queue.queue[0]
         for item in queue.queue:
             self.assertEqual(item.queue, first_item.queue)
         self.assertFalse(first_item.live)
         self.assertTrue(queue.queue[1].live)
 
-        self.gearman_server.hold_jobs_in_queue = False
-        self.gearman_server.release()
+        self.hold_jobs_in_queue = False
+        self.executor_api.release()
         self.waitUntilSettled()
 
         self.assertEqual(A.data['status'], 'NEW')
@@ -367,20 +373,27 @@ class TestGerritToGithubCRD(ZuulTestCase):
         self.assertEqual(len(B.comments), 0)
 
         changes = self.getJobFromHistory(
-            'project-merge', 'gerrit/project1').changes
+            'project-merge', project1).changes
         self.assertEqual(changes, '1,%s 1,1' %
                          (B.head_sha,))
-        self.assertEqual(len(tenant.layout.pipelines['check'].queues), 0)
+        self.assertEqual(
+            len(tenant.layout.pipeline_managers['check'].state.queues), 0)
 
+    @skipIfMultiScheduler()
     def test_crd_check_reconfiguration(self):
-        self._test_crd_check_reconfiguration('org/project1', 'org/project2')
+        self._test_crd_check_reconfiguration(
+            'gerrit/project1', 'github/project2')
 
+    @skipIfMultiScheduler()
     def test_crd_undefined_project(self):
         """Test that undefined projects in dependencies are handled for
         independent pipelines"""
         # It's a hack for fake github,
         # as it implies repo creation upon the creation of any change
         self.init_repo("github/unknown", tag='init')
+        # We also need make the repo known to the fake github as a
+        # side-effect of getting the project.
+        self.fake_github.source.getProject("github/unknown")
         self._test_crd_check_reconfiguration('gerrit/project1',
                                              'github/unknown')
 
@@ -429,6 +442,9 @@ class TestGerritToGithubCRD(ZuulTestCase):
     def test_crd_check_unknown(self):
         "Test unknown projects in independent pipeline"
         self.init_repo("github/unknown", tag='init')
+        # We also need make the repo known to the fake github as a
+        # side-effect of getting the project.
+        self.fake_github.source.getProject("github/unknown")
         A = self.fake_gerrit.addFakeChange('gerrit/project1', 'master', 'A')
         B = self.fake_github.openFakePullRequest(
             'github/unknown', 'master', 'B')
@@ -436,8 +452,12 @@ class TestGerritToGithubCRD(ZuulTestCase):
         A.data['commitMessage'] = '%s\n\nDepends-On: %s\n' % (
             A.subject, B.url)
 
-        # Make sure zuul has seen an event on B.
+        # Make sure zuul has seen an event on B. This is necessary
+        # in order to populate our fake github project db.
         self.fake_github.emitEvent(B.getPullRequestEditedEvent())
+        # Note we wait until settled here as the event processing for
+        # the next event may not have the updated db yet otherwise.
+        self.waitUntilSettled()
         self.fake_gerrit.addEvent(A.getPatchsetCreatedEvent(1))
         self.waitUntilSettled()
 
@@ -466,12 +486,12 @@ class TestGerritToGithubCRD(ZuulTestCase):
         self.assertEqual(B.reported, 1)
 
         # Update A to add A->B (a cycle).
-        A.editBody('Depends-On: %s\n' % (B.data['url']))
-        self.fake_github.emitEvent(A.getPullRequestEditedEvent())
+        self.fake_github.emitEvent(
+            A.editBody('Depends-On: %s\n' % (B.data['url'])))
         self.waitUntilSettled()
 
-        # Dependency cycle injected so zuul should not have reported again on A
-        self.assertEqual(len(A.comments), 1)
+        # Dependency cycle injected so zuul should have reported again on A
+        self.assertEqual(len(A.comments), 2)
 
         # Now if we update B to remove the depends-on, everything
         # should be okay.  B; A->B
@@ -482,7 +502,7 @@ class TestGerritToGithubCRD(ZuulTestCase):
         self.waitUntilSettled()
 
         # Cycle was removed so now zuul should have reported again on A
-        self.assertEqual(len(A.comments), 2)
+        self.assertEqual(len(A.comments), 3)
 
         self.fake_gerrit.addEvent(B.getPatchsetCreatedEvent(2))
         self.waitUntilSettled()
@@ -511,8 +531,8 @@ class TestGithubToGerritCRD(ZuulTestCase):
         self.assertFalse(A.is_merged)
         self.assertEqual(B.data['status'], 'NEW')
 
-        for connection in self.connections.connections.values():
-            connection.maintainCache([])
+        for connection in self.scheds.first.connections.connections.values():
+            connection.maintainCache([], max_age=0)
 
         self.executor_server.hold_jobs_in_build = True
         B.addApproval('Approved', 1)
@@ -635,7 +655,7 @@ class TestGithubToGerritCRD(ZuulTestCase):
         self.fake_github.emitEvent(A.addLabel('approved'))
         self.waitUntilSettled()
 
-        self.assertEqual(len(A.comments), 0)
+        self.assertEqual(len(A.comments), 1)
         self.assertEqual(B.reported, 0)
         self.assertFalse(A.is_merged)
         self.assertEqual(B.data['status'], 'NEW')
@@ -662,7 +682,7 @@ class TestGithubToGerritCRD(ZuulTestCase):
         # should not be processed in dependent pipeline
         self.assertFalse(A.is_merged)
         self.assertEqual(B.data['status'], 'NEW')
-        self.assertEqual(len(A.comments), 0)
+        self.assertEqual(len(A.comments), 1)
         self.assertEqual(B.reported, 0)
         self.assertEqual(len(self.history), 0)
 
@@ -681,27 +701,26 @@ class TestGithubToGerritCRD(ZuulTestCase):
         self.waitUntilSettled()
 
         self.assertTrue(A.is_merged)
-        self.assertEqual(len(A.comments), 2)
+        self.assertEqual(len(A.comments), 3)
         self.assertEqual(B.data['status'], 'MERGED')
         self.assertEqual(B.reported, 0)
 
     def test_crd_check(self):
         "Test cross-repo dependencies in independent pipelines"
         self.executor_server.hold_jobs_in_build = True
-        self.gearman_server.hold_jobs_in_queue = True
+        self.hold_jobs_in_queue = True
         A = self.fake_github.openFakePullRequest('github/project2', 'master',
                                                  'A')
         B = self.fake_gerrit.addFakeChange(
             'gerrit/project1', 'master', 'B')
 
         # A Depends-On: B
-        A.editBody('Depends-On: %s\n' % (B.data['url'],))
-
-        self.fake_github.emitEvent(A.getPullRequestEditedEvent())
+        self.fake_github.emitEvent(
+            A.editBody('Depends-On: %s\n' % (B.data['url'],)))
         self.waitUntilSettled()
 
-        self.gearman_server.hold_jobs_in_queue = False
-        self.gearman_server.release()
+        self.hold_jobs_in_queue = False
+        self.executor_api.release()
         self.waitUntilSettled()
 
         self.executor_server.release('.*-merge')
@@ -723,8 +742,9 @@ class TestGithubToGerritCRD(ZuulTestCase):
         self.assertEqual(changes, '1,1 1,%s' %
                          (A.head_sha,))
 
-        tenant = self.sched.abide.tenants.get('tenant-one')
-        self.assertEqual(len(tenant.layout.pipelines['check'].queues), 0)
+        tenant = self.scheds.first.sched.abide.tenants.get('tenant-one')
+        self.assertEqual(
+            len(tenant.layout.pipeline_managers['check'].state.queues), 0)
 
     def test_crd_check_duplicate(self):
         "Test duplicate check in independent pipelines"
@@ -735,24 +755,23 @@ class TestGithubToGerritCRD(ZuulTestCase):
             'gerrit/project1', 'master', 'B')
 
         # A Depends-On: B
-        A.editBody('Depends-On: %s\n' % (B.data['url'],))
-        tenant = self.sched.abide.tenants.get('tenant-one')
-        check_pipeline = tenant.layout.pipelines['check']
+        event = A.editBody('Depends-On: %s\n' % (B.data['url'],))
+        tenant = self.scheds.first.sched.abide.tenants.get('tenant-one')
 
         # Add two dependent changes...
-        self.fake_github.emitEvent(A.getPullRequestEditedEvent())
+        self.fake_github.emitEvent(event)
         self.waitUntilSettled()
-        self.assertEqual(len(check_pipeline.getAllItems()), 2)
+        self.assertEqual(len(self.getAllItems('tenant-one', 'check')), 2)
 
         # ...make sure the live one is not duplicated...
         self.fake_github.emitEvent(A.getPullRequestEditedEvent())
         self.waitUntilSettled()
-        self.assertEqual(len(check_pipeline.getAllItems()), 2)
+        self.assertEqual(len(self.getAllItems('tenant-one', 'check')), 2)
 
         # ...but the non-live one is able to be.
         self.fake_gerrit.addEvent(B.getPatchsetCreatedEvent(1))
         self.waitUntilSettled()
-        self.assertEqual(len(check_pipeline.getAllItems()), 3)
+        self.assertEqual(len(self.getAllItems('tenant-one', 'check')), 3)
 
         # Release jobs in order to avoid races with change A jobs
         # finishing before change B jobs.
@@ -774,40 +793,99 @@ class TestGithubToGerritCRD(ZuulTestCase):
         changes = self.getJobFromHistory(
             'project-merge', 'gerrit/project1').changes
         self.assertEqual(changes, '1,1')
-        self.assertEqual(len(tenant.layout.pipelines['check'].queues), 0)
+        self.assertEqual(
+            len(tenant.layout.pipeline_managers['check'].state.queues), 0)
 
         self.assertIn('Build succeeded', A.comments[0])
 
     def _test_crd_check_reconfiguration(self, project1, project2):
         "Test cross-repo dependencies re-enqueued in independent pipelines"
 
-        self.gearman_server.hold_jobs_in_queue = True
-        A = self.fake_github.openFakePullRequest('github/project2', 'master',
-                                                 'A')
-        B = self.fake_gerrit.addFakeChange(
-            'gerrit/project1', 'master', 'B')
+        self.hold_jobs_in_queue = True
+        A = self.fake_github.openFakePullRequest(project1, 'master', 'A')
+        B = self.fake_gerrit.addFakeChange(project2, 'master', 'B')
 
         # A Depends-On: B
-        A.editBody('Depends-On: %s\n' % (B.data['url'],))
-
-        self.fake_github.emitEvent(A.getPullRequestEditedEvent())
+        self.fake_github.emitEvent(
+            A.editBody('Depends-On: %s\n' % (B.data['url'],)))
         self.waitUntilSettled()
 
-        self.sched.reconfigure(self.config)
+        self.scheds.execute(lambda app: app.sched.reconfigure(app.config))
+        self.waitUntilSettled()
 
         # Make sure the items still share a change queue, and the
         # first one is not live.
-        tenant = self.sched.abide.tenants.get('tenant-one')
-        self.assertEqual(len(tenant.layout.pipelines['check'].queues), 1)
-        queue = tenant.layout.pipelines['check'].queues[0]
+        tenant = self.scheds.first.sched.abide.tenants.get('tenant-one')
+        self.assertEqual(
+            len(tenant.layout.pipeline_managers['check'].state.queues), 1)
+        queue = tenant.layout.pipeline_managers['check'].state.queues[0]
         first_item = queue.queue[0]
         for item in queue.queue:
             self.assertEqual(item.queue, first_item.queue)
         self.assertFalse(first_item.live)
         self.assertTrue(queue.queue[1].live)
 
-        self.gearman_server.hold_jobs_in_queue = False
-        self.gearman_server.release()
+        self.hold_jobs_in_queue = False
+        self.executor_api.release()
+        self.waitUntilSettled()
+
+        self.assertFalse(A.is_merged)
+        self.assertEqual(B.data['status'], 'NEW')
+        self.assertEqual(len(A.comments), 1)
+        self.assertEqual(B.reported, 0)
+
+        changes = self.getJobFromHistory(
+            'project-merge', project1).changes
+        self.assertEqual(changes, '1,1 1,%s' %
+                         (A.head_sha,))
+        self.assertEqual(
+            len(tenant.layout.pipeline_managers['check'].state.queues), 0)
+
+    @skipIfMultiScheduler()
+    def test_crd_check_reconfiguration(self):
+        self._test_crd_check_reconfiguration(
+            'github/project2', 'gerrit/project1')
+
+    @skipIfMultiScheduler()
+    def test_crd_undefined_project(self):
+        """Test that undefined projects in dependencies are handled for
+        independent pipelines"""
+        # It's a hack for fake gerrit,
+        # as it implies repo creation upon the creation of any change
+        self.init_repo("gerrit/unknown", tag='init')
+        self._test_crd_check_reconfiguration('github/project2',
+                                             'gerrit/unknown')
+
+    def test_crd_other_tenant_project(self):
+        """Test that undefined projects in dependencies are handled for
+        independent pipelines"""
+        self.hold_jobs_in_queue = True
+        A = self.fake_github.openFakePullRequest('github/project2',
+                                                 'master', 'A')
+        B = self.fake_gerrit.addFakeChange('gerrit/project2', 'master', 'B')
+
+        # A Depends-On: B
+        gh_event = A.editBody('Depends-On: %s\n' % (B.data['url'],))
+        self.fake_github.emitEvent(gh_event)
+        self.waitUntilSettled()
+
+        self.scheds.execute(lambda app: app.sched.reconfigure(app.config))
+        self.waitUntilSettled()
+
+        # Make sure the items still share a change queue, and the
+        # first one is not live.
+        tenant = self.scheds.first.sched.abide.tenants.get('tenant-one')
+        self.assertEqual(
+            len(tenant.layout.pipeline_managers['check'].state.queues), 1)
+        queue = tenant.layout.pipeline_managers['check'].state.queues[0]
+        first_item = queue.queue[0]
+        for item in queue.queue:
+            self.assertEqual(item.queue, first_item.queue)
+        self.assertFalse(first_item.live)
+        self.assertTrue(queue.queue[1].live)
+
+        self.hold_jobs_in_queue = False
+        self.executor_api.release()
         self.waitUntilSettled()
 
         self.assertFalse(A.is_merged)
@@ -817,21 +895,33 @@ class TestGithubToGerritCRD(ZuulTestCase):
 
         changes = self.getJobFromHistory(
             'project-merge', 'github/project2').changes
-        self.assertEqual(changes, '1,1 1,%s' %
-                         (A.head_sha,))
-        self.assertEqual(len(tenant.layout.pipelines['check'].queues), 0)
+        expected_changes = f'1,1 1,{A.head_sha}'
+        self.assertEqual(changes, expected_changes)
+        self.assertEqual(
+            len(tenant.layout.pipeline_managers['check'].state.queues), 0)
 
-    def test_crd_check_reconfiguration(self):
-        self._test_crd_check_reconfiguration('org/project1', 'org/project2')
+        # Re-check the same PR again
+        self.fake_github.emitEvent(gh_event)
+        self.waitUntilSettled()
 
-    def test_crd_undefined_project(self):
-        """Test that undefined projects in dependencies are handled for
-        independent pipelines"""
-        # It's a hack for fake gerrit,
-        # as it implies repo creation upon the creation of any change
-        self.init_repo("gerrit/unknown", tag='init')
-        self._test_crd_check_reconfiguration('github/project2',
-                                             'gerrit/unknown')
+        self.assertHistory([
+            dict(name='project-merge', result='SUCCESS',
+                 changes=expected_changes),
+            dict(name='project-test1', result='SUCCESS',
+                 changes=expected_changes),
+            dict(name='project-test2', result='SUCCESS',
+                 changes=expected_changes),
+            dict(name='project1-project2-integration', result='SUCCESS',
+                 changes=expected_changes),
+            dict(name='project-merge', result='SUCCESS',
+                 changes=expected_changes),
+            dict(name='project-test1', result='SUCCESS',
+                 changes=expected_changes),
+            dict(name='project1-project2-integration', result='SUCCESS',
+                 changes=expected_changes),
+            dict(name='project-test2', result='SUCCESS',
+                 changes=expected_changes),
+        ], ordered=False)
 
     def test_crd_check_transitive(self):
         "Test transitive cross-repo dependencies"
@@ -850,9 +940,8 @@ class TestGithubToGerritCRD(ZuulTestCase):
             B.subject, C.url)
 
         # A Depends-On: B
-        A.editBody('Depends-On: %s\n' % (B.data['url'],))
-
-        self.fake_github.emitEvent(A.getPullRequestEditedEvent())
+        self.fake_github.emitEvent(
+            A.editBody('Depends-On: %s\n' % (B.data['url'],)))
         self.waitUntilSettled()
         self.assertEqual(self.history[-1].changes, '2,%s 1,1 1,%s' %
                          (C.head_sha, A.head_sha))
@@ -894,11 +983,14 @@ class TestGithubToGerritCRD(ZuulTestCase):
             'gerrit/unknown', 'master', 'B')
 
         # A Depends-On: B
-        A.editBody('Depends-On: %s\n' % (B.data['url'],))
+        event = A.editBody('Depends-On: %s\n' % (B.data['url'],))
 
         # Make sure zuul has seen an event on B.
         self.fake_gerrit.addEvent(B.getPatchsetCreatedEvent(1))
-        self.fake_github.emitEvent(A.getPullRequestEditedEvent())
+        # Note we wait until settled here as the event processing for
+        # the next event may not have the updated db yet otherwise.
+        self.waitUntilSettled()
+        self.fake_github.emitEvent(event)
         self.waitUntilSettled()
 
         self.assertFalse(A.is_merged)
@@ -918,8 +1010,8 @@ class TestGithubToGerritCRD(ZuulTestCase):
         # Create B->A
         B = self.fake_github.openFakePullRequest('github/project2', 'master',
                                                  'B')
-        B.editBody('Depends-On: %s\n' % (A.data['url'],))
-        self.fake_github.emitEvent(B.getPullRequestEditedEvent())
+        self.fake_github.emitEvent(
+            B.editBody('Depends-On: %s\n' % (A.data['url'],)))
         self.waitUntilSettled()
 
         # Dep is there so zuul should have reported on B
@@ -931,8 +1023,8 @@ class TestGithubToGerritCRD(ZuulTestCase):
         self.fake_gerrit.addEvent(A.getPatchsetCreatedEvent(1))
         self.waitUntilSettled()
 
-        # Dependency cycle injected so zuul should not have reported again on A
-        self.assertEqual(A.reported, 1)
+        # Dependency cycle injected so zuul should have reported again on A
+        self.assertEqual(A.reported, 2)
 
         # Now if we update B to remove the depends-on, everything
         # should be okay.  B; A->B
@@ -943,7 +1035,7 @@ class TestGithubToGerritCRD(ZuulTestCase):
         self.waitUntilSettled()
 
         # Cycle was removed so now zuul should have reported again on A
-        self.assertEqual(A.reported, 2)
+        self.assertEqual(A.reported, 3)
 
         self.fake_github.emitEvent(B.getPullRequestEditedEvent())
         self.waitUntilSettled()

@@ -1,0 +1,4 @@
+patchset: 1
+pipeline_expected_result: ok
+check_timeout: 180
+check_number: 1

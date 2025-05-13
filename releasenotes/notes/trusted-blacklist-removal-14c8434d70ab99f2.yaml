@@ -1,0 +1,5 @@
+---
+security:
+  - |
+    The add_host host-vars blacklist is no longer effective for trusted
+    playbook.

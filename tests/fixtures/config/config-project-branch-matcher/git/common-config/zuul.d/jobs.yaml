@@ -1,0 +1,7 @@
+- job:
+    name: base
+    parent: null
+    run: playbooks/run.yaml
+
+- job:
+    name: testjob

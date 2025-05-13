@@ -1,0 +1,10 @@
+---
+upgrade:
+  - |
+    The Gerrit driver now has an additional option,
+    :attr:`pipeline.reporter.<gerrit reporter>.notify` which
+    configures the notification handling of reviews as noted in the
+    `Gerrit changes API Docs <https://gerrit-review.googlesource.com/Documentation/rest-api-changes.html#review-input>`_.
+    used to suppress reporting job results as review comments.  Due to
+    the configuration syntax for Gerrit reporters, the word "notify"
+    may no longer be used as a review label.

@@ -1,0 +1,6 @@
+---
+deprecations:
+  - |
+    The Elasticsearch reporter now filters `zuul` data from the job returned vars.
+    The job returned vars under the `zuul` key are meant for Zuul and may include large
+    amount of data such as file comments.

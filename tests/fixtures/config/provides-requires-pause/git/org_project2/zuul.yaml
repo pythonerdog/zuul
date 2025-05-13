@@ -1,0 +1,8 @@
+- project:
+    queue: integrated
+    check:
+      jobs:
+        - image-user
+    gate:
+      jobs:
+        - image-user

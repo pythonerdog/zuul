@@ -1,0 +1,27 @@
+- hosts: all
+  tasks:
+    - zuul_return:
+        data:
+          zuul:
+            file_comments:
+              README:
+                - line: 2
+                  message: "Invalid range (only start)"
+                  range:
+                    start_line: 2
+                    start_character: 1
+                - line: 4
+                  message: "Invalid range (only end)"
+                  range:
+                    end_line: 4
+                    end_character: 7
+                - message: "No line provided"
+                - line: 7  # No message provided
+                - line: 9999
+                  message: Line is not part of the file
+                - line: 3
+                  message: Invalid level will fall back to warning
+                  level: invalid-level
+              missingfile.txt:
+                - line: 1
+                  message: "Missing file"

@@ -1,0 +1,6 @@
+---
+upgrade:
+  - |
+    Support for Ansible versions 2.8 and 2.9 has been removed.
+    Migrate any existing jobs which rely on these versions to Ansible
+    version 5 or 6 before upgrading.

@@ -1,0 +1,10 @@
+---
+features:
+  - |
+    Jobs may now read variables from an in-repo file using the
+    :attr:`job.include-vars` job attribute.  This allows jobs with
+    many (or frequently changing) variables to load their variables
+    from a file in order to reduce the complexity of Zuul
+    configuration.  Because these files are read when the job is
+    executed, changes to their values will not cause Zuul tenant
+    reconfigurations.

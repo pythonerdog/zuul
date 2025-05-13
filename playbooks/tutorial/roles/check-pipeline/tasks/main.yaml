@@ -1,0 +1,28 @@
+- name: "Check pipeline: query open changes: {{ title }}"
+  uri:
+    url: "http://localhost:8080/a/changes/?q=project:{{ projectname }}&o=CURRENT_REVISION&n=1"
+    method: GET
+    user: admin
+    password: secret
+    return_content: true
+  register: changes
+
+- name: "Check pipeline: set variable: {{ title }}"
+  set_fact:
+    changeinfo: "{{ {'id': (changes.content[5:]|from_json)[0].id, 'change_id': (changes.content[5:]|from_json)[0].change_id, 'number': (changes.content[5:]|from_json)[0]._number, 'current_revision': (changes.content[5:]|from_json)[0].current_revision} }}"
+
+- name: "Check pipeline: Wait for Zuul to report check status: {{ title }}"
+  uri:
+    url: "http://localhost:8080/a/changes/{{ changeinfo.id }}/detail"
+    method: GET
+    user: admin
+    password: secret
+    return_content: true
+  register: result
+  until: result.status == 200 and (result.content[5:] | from_json | to_json | from_json | json_query(json_query_check) | length == check_number|int)
+  delay: 1
+  retries: "{{ check_timeout }}"
+
+- name: "Check pipeline: set variable: {{ title }}"
+  set_fact:
+    result_json: "{{ result.content[5:] }}"

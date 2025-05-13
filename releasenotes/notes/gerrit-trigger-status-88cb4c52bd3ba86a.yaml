@@ -1,0 +1,22 @@
+---
+features:
+  - |
+    Gerrit pipeline triggers now support embedded require and reject
+    filters in order to match.  Any conditions set for the pipeline in
+    require or reject filters may also be set for event trigger
+    filters.
+
+    This can be used to construct pipelines which trigger based on
+    certain events but only if certain other conditions are met.  It
+    is distinct from pipeline requirements in that it only affects
+    items that are directly enqueued whereas pipeline requirements
+    affect dependencies as well.
+  - |
+    All Gerrit "requires" filters are now available as "reject"
+    filters as well.
+deprecations:
+  - |
+    The `require-approval` and `reject-approval` Gerrit trigger
+    attributes are deprecated.  Use :attr:`pipeline.trigger.<gerrit
+    source>.require` and :attr:`pipeline.trigger.<gerrit
+    source>.reject` instead.

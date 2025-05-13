@@ -1,0 +1,4 @@
+---
+features:
+  - |
+    The ``find`` module is now allowed to run on the executor.

@@ -1,0 +1,6 @@
+---
+features:
+  - |
+    Individual attributes of jobs may now be marked as final so that
+    any attempt to override that attribute will cause an error.  See
+    :attr:`job.attribute-control`.

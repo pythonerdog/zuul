@@ -13,13 +13,23 @@
 import json
 import types
 
+import zuul.model
+
 
 class ZuulJSONEncoder(json.JSONEncoder):
     def default(self, o):
         if isinstance(o, types.MappingProxyType):
-            return dict(o)
+            d = dict(o)
+            # Always remove SafeLoader left-over
+            d.pop('_source_context', None)
+            d.pop('_start_mark', None)
+            return d
+        elif (
+                isinstance(o, zuul.model.SourceContext) or
+                isinstance(o, zuul.model.ZuulMark)):
+            return {}
         return json.JSONEncoder.default(self, o)
 
 
-def json_dumps(obj):
-    return json.dumps(obj, cls=ZuulJSONEncoder)
+def json_dumps(obj, **kw):
+    return json.dumps(obj, cls=ZuulJSONEncoder, **kw)

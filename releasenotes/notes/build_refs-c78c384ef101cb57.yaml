@@ -1,0 +1,6 @@
+---
+features:
+  - |
+    A new job variable, :var:`zuul.build_refs`, is available to
+    indicate for which particular refs in a circular dependency queue
+    item a deduplicated job is being run.

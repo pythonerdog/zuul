@@ -1,0 +1,10 @@
+- job:
+    name: test-workspace-checkout-multi-include-vars
+    parent: test-workspace-checkout-false
+    files: '.*'  # Reset parent file matcher
+    include-vars: zuul.include/vars.yaml
+
+- project:
+    check:
+      jobs:
+        - test-workspace-checkout-multi-include-vars

@@ -1,0 +1,10 @@
+---
+fixes:
+  - |
+    Projects and jobs on branches whose names have special characters
+    in regular expressions could fail to match changes as intended.
+    Implied branch matchers automatically generated from branch names
+    are now treated as requiring exact matches.  Any user-specified
+    branch matcher (including in :attr:`job.branches` and
+    :attr:`pragma.implied-branches`) are still treated as regular
+    expressions.

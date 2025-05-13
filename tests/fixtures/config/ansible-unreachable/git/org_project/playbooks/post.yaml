@@ -1,0 +1,20 @@
+- hosts: all:!zuul_unreachable
+  gather_facts: no
+  tasks:
+    - name: Output debug statement
+      debug:
+        msg: "This host is not unreachable: {{ inventory_hostname }}"
+
+- hosts: zuul_unreachable
+  gather_facts: no
+  tasks:
+    - name: Output debug statement
+      debug:
+        msg: "This host is unreachable: {{ inventory_hostname }}"
+
+- hosts: localhost
+  gather_facts: no
+  tasks:
+    - copy:
+        content: "{{ zuul_will_retry }}"
+        dest: "{{ zuul._test.test_root }}/builds/{{ zuul.build }}.will-retry.flag"

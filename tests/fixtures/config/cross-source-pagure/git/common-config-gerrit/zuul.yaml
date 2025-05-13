@@ -1,0 +1,137 @@
+- pipeline:
+    name: check
+    manager: independent
+    trigger:
+      gerrit:
+        - event: patchset-created
+      pagure:
+        - event: pg_pull_request
+          action:
+            - changed
+    success:
+      gerrit:
+        Verified: 1
+      pagure: {}
+    failure:
+      gerrit:
+        Verified: -1
+      pagure: {}
+
+- pipeline:
+    name: gate
+    manager: dependent
+    success-message: Build succeeded (gate).
+    require:
+      pagure:
+        score: 1
+        merged: False
+        status: success
+      gerrit:
+        approval:
+          - Approved: 1
+    trigger:
+      gerrit:
+        - event: comment-added
+          approval:
+            - Approved: 1
+      pagure:
+        - event: pg_pull_request
+          action: status
+          status: success
+        - event: pg_pull_request_review
+          action: thumbsup
+    success:
+      gerrit:
+        Verified: 2
+        submit: true
+      pagure:
+        merge: true
+    failure:
+      gerrit:
+        Verified: -2
+      pagure: {}
+    start:
+      gerrit:
+        Verified: 0
+      pagure: {}
+    precedence: high
+
+- job:
+    name: base
+    parent: null
+
+- job:
+    name: project-merge
+    nodeset:
+      nodes:
+        - name: controller
+          label: label1
+    run: playbooks/project-merge.yaml
+
+- job:
+    name: project-test1
+    nodeset:
+      nodes:
+        - name: controller
+          label: label1
+    run: playbooks/project-test1.yaml
+
+- job:
+    name: project-test2
+    nodeset:
+      nodes:
+        - name: controller
+          label: label1
+    run: playbooks/project-test2.yaml
+
+- job:
+    name: project1-project2-integration
+    nodeset:
+      nodes:
+        - name: controller
+          label: label1
+    run: playbooks/project1-project2-integration.yaml
+
+- project:
+    name: gerrit/project1
+    queue: integrated
+    check:
+      jobs:
+        - project-merge
+        - project-test1:
+            dependencies: project-merge
+        - project-test2:
+            dependencies: project-merge
+        - project1-project2-integration:
+            dependencies: project-merge
+    gate:
+      jobs:
+        - project-merge
+        - project-test1:
+            dependencies: project-merge
+        - project-test2:
+            dependencies: project-merge
+        - project1-project2-integration:
+            dependencies: project-merge
+
+- project:
+    name: pagure/project2
+    queue: integrated
+    check:
+      jobs:
+        - project-merge
+        - project-test1:
+            dependencies: project-merge
+        - project-test2:
+            dependencies: project-merge
+        - project1-project2-integration:
+            dependencies: project-merge
+    gate:
+      jobs:
+        - project-merge
+        - project-test1:
+            dependencies: project-merge
+        - project-test2:
+            dependencies: project-merge
+        - project1-project2-integration:
+            dependencies: project-merge

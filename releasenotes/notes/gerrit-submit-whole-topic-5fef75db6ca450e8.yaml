@@ -1,0 +1,20 @@
+---
+features:
+  - |
+    Zuul now matches Gerrit's behavior when
+    ``change.submitWholeTopic`` is set in Gerrit.
+
+    When this setting is enabled in Gerrit and a change is submitted
+    (merged), all changes with the same topic are submitted
+    simultaneously.  Zuul will now query for changes which are set to
+    be submitted together by Gerrit when enqueing them and treat them
+    as if they are a set of circular dependencies.
+
+    If the projects are not part of pipeline queues which are
+    configured to allow circular dependencies, then Zuul will report
+    failure on enqueue.  Be sure that the submitWholeTopic setting in
+    Gerrit and the allow-circular-dependencies setting in Zuul match.
+
+    This functionality requires an HTTP connection to Gerrit.  If only
+    an SSH connection is available, then changes submitted together
+    will be ignored.

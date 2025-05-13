@@ -15,7 +15,24 @@
     name: base
     parent: null
 
+- job:
+    name: central-test
+    run: playbooks/job.yaml
+
+- project:
+    name: common-config
+    check:
+      jobs:
+        - noop
+
 - project:
     name: org/project2
     check:
       jobs: []
+
+- pipeline:
+      name: broken_periodic
+      manager: independent
+      trigger:
+        timer:
+          time: "*/30 * * * * 300"

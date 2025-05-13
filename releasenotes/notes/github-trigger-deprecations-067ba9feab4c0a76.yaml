@@ -1,0 +1,15 @@
+deprecations:
+  - |
+    Specifying :attr:`pipeline.trigger.<github source>.event` as a
+    list is deprecated.  Update any instances to specify multiple
+    triggers each with a single associated event instead.
+  - |
+    The use of :value:`pipeline.trigger.<github
+    source>.action.requested` has been deprecated for some time
+    already.  Its use will now produce a configuration syntax warning,
+    and in a future version of Zuul, an error.
+  - |
+    The use of :attr:`pipeline.trigger.<github source>.require-status`
+    has been deprecated for some already.  Its use will now produce a
+    configuration syntax warning, and in a future version of Zuul, an
+    error.

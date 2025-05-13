@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-
 # Copyright 2017 Red Hat, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -14,34 +12,81 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+import base64
 import os
 
-import yaml
+from zuul.lib import yamlutil as yaml
 
+from tests.base import AnsibleZuulTestCase
 from tests.base import ZuulTestCase
 
 
-class TestInventory(ZuulTestCase):
+class TestInventoryBase(ZuulTestCase):
 
+    config_file = 'zuul-gerrit-github.conf'
     tenant_config_file = 'config/inventory/main.yaml'
+    use_gerrit = True
 
-    def setUp(self):
-        super(TestInventory, self).setUp()
+    def setUp(self, python_path=None, shell_type=None):
+        super(TestInventoryBase, self).setUp()
+        if python_path:
+            self.fake_nodepool.python_path = python_path
+        if shell_type:
+            self.fake_nodepool.shell_type = shell_type
         self.executor_server.hold_jobs_in_build = True
-        A = self.fake_gerrit.addFakeChange('org/project', 'master', 'A')
-        self.fake_gerrit.addEvent(A.getPatchsetCreatedEvent(1))
+        self.hold_jobs_in_queue = True
+
+        if self.use_gerrit:
+            A = self.fake_gerrit.addFakeChange('org/project', 'master', 'A')
+            self.fake_gerrit.addEvent(A.getPatchsetCreatedEvent(1))
+        else:
+            A = self.fake_github.openFakePullRequest(
+                'org/project3', 'master', 'A')
+            self.fake_github.emitEvent(A.getPullRequestOpenedEvent())
+        self.change_A = A
+
         self.waitUntilSettled()
 
+    def tearDown(self):
+        self.cancelExecutorJobs()
+        self.waitUntilSettled()
+        super(TestInventoryBase, self).tearDown()
+
     def _get_build_inventory(self, name):
+        self.runJob(name)
+
         build = self.getBuildByName(name)
         inv_path = os.path.join(build.jobdir.root, 'ansible', 'inventory.yaml')
-        return yaml.safe_load(open(inv_path, 'r'))
+        with open(inv_path, 'r') as f:
+            inventory = yaml.safe_load(f)
+        return inventory
 
     def _get_setup_inventory(self, name):
+        self.runJob(name)
+
         build = self.getBuildByName(name)
-        setup_inv_path = os.path.join(build.jobdir.root, 'ansible',
-                                      'setup-inventory.yaml')
-        return yaml.safe_load(open(setup_inv_path, 'r'))
+        setup_inv_path = build.jobdir.setup_playbook.inventory
+        with open(setup_inv_path, 'r') as f:
+            inventory = yaml.ansible_unsafe_load(f)
+        return inventory
+
+    def runJob(self, name):
+        self.hold_jobs_in_queue = False
+        self.executor_api.release(f'^{name}$')
+        self.waitUntilSettled()
+
+    def cancelExecutorJobs(self):
+        if self.use_gerrit:
+            self.fake_gerrit.addEvent(
+                self.change_A.getChangeAbandonedEvent())
+        else:
+            self.fake_github.emitEvent(
+                self.change_A.getPullRequestClosedEvent())
+
+
+class TestInventoryGithub(TestInventoryBase):
+
+    use_gerrit = False
 
     def test_single_inventory(self):
 
@@ -53,12 +98,159 @@ class TestInventory(ZuulTestCase):
         self.assertIn('vars', inventory['all'])
         for node_name in all_nodes:
             self.assertIn(node_name, inventory['all']['hosts'])
+            node_vars = inventory['all']['hosts'][node_name]
+            self.assertEqual(
+                'auto', node_vars['ansible_python_interpreter'])
+        self.assertIn('zuul', inventory['all']['vars'])
+        self.assertIn('attempts', inventory['all']['vars']['zuul'])
+        self.assertEqual(1, inventory['all']['vars']['zuul']['attempts'])
+        self.assertIn('max_attempts', inventory['all']['vars']['zuul'])
+        self.assertEqual(3, inventory['all']['vars']['zuul']['max_attempts'])
+        z_vars = inventory['all']['vars']['zuul']
+        self.assertIn('executor', z_vars)
+        self.assertIn('src_root', z_vars['executor'])
+        self.assertIn('ansible_version', z_vars)
+        self.assertIn('job', z_vars)
+        self.assertIn('event_id', z_vars)
+        self.assertEqual(z_vars['job'], 'single-inventory')
+        self.assertEqual(z_vars['message'], 'QQ==')
+        self.assertEqual(z_vars['change_url'],
+                         'https://github.com/org/project3/pull/1')
+
+        self.executor_server.release()
+        self.waitUntilSettled()
+
+
+class TestInventoryPythonPath(TestInventoryBase):
+
+    def setUp(self):
+        super(TestInventoryPythonPath, self).setUp(python_path='fake-python')
+
+    def test_single_inventory(self):
+        inventory = self._get_build_inventory('single-inventory')
+
+        all_nodes = ('ubuntu-xenial',)
+        self.assertIn('all', inventory)
+        self.assertIn('hosts', inventory['all'])
+        self.assertIn('vars', inventory['all'])
+        for node_name in all_nodes:
+            self.assertIn(node_name, inventory['all']['hosts'])
+            node_vars = inventory['all']['hosts'][node_name]
+            self.assertEqual(
+                'fake-python', node_vars['ansible_python_interpreter'])
+
+        self.assertIn('zuul', inventory['all']['vars'])
+        z_vars = inventory['all']['vars']['zuul']
+        self.assertIn('executor', z_vars)
+        self.assertIn('src_root', z_vars['executor'])
+        self.assertIn('ansible_version', z_vars)
+        self.assertIn('job', z_vars)
+        self.assertEqual(z_vars['job'], 'single-inventory')
+        self.assertEqual(z_vars['message'], 'QQ==')
+
+        self.executor_server.release()
+        self.waitUntilSettled()
+
+
+class TestInventoryShellType(TestInventoryBase):
+
+    def setUp(self):
+        super(TestInventoryShellType, self).setUp(shell_type='cmd')
+
+    def test_single_inventory(self):
+        inventory = self._get_build_inventory('single-inventory')
+
+        all_nodes = ('ubuntu-xenial',)
+        self.assertIn('all', inventory)
+        self.assertIn('hosts', inventory['all'])
+        self.assertIn('vars', inventory['all'])
+        for node_name in all_nodes:
+            self.assertIn(node_name, inventory['all']['hosts'])
+            node_vars = inventory['all']['hosts'][node_name]
+            self.assertEqual(
+                'cmd', node_vars['ansible_shell_type'])
+
+        self.assertIn('zuul', inventory['all']['vars'])
+        z_vars = inventory['all']['vars']['zuul']
+        self.assertIn('executor', z_vars)
+        self.assertIn('src_root', z_vars['executor'])
+        self.assertIn('ansible_version', z_vars)
+        self.assertIn('job', z_vars)
+        self.assertEqual(z_vars['job'], 'single-inventory')
+        self.assertEqual(z_vars['message'], 'QQ==')
+
+        self.executor_server.release()
+        self.waitUntilSettled()
+
+
+class InventoryAutoPythonMixin:
+    ansible_version = 'X'
+
+    def test_auto_python_ansible_inventory(self):
+        inventory = self._get_build_inventory(
+            f'ansible-version{self.ansible_version}-inventory')
+
+        all_nodes = ('ubuntu-xenial',)
+        self.assertIn('all', inventory)
+        self.assertIn('hosts', inventory['all'])
+        self.assertIn('vars', inventory['all'])
+        for node_name in all_nodes:
+            self.assertIn(node_name, inventory['all']['hosts'])
+            node_vars = inventory['all']['hosts'][node_name]
+            self.assertEqual(
+                'auto', node_vars['ansible_python_interpreter'])
+
         self.assertIn('zuul', inventory['all']['vars'])
         z_vars = inventory['all']['vars']['zuul']
         self.assertIn('executor', z_vars)
         self.assertIn('src_root', z_vars['executor'])
         self.assertIn('job', z_vars)
+        self.assertEqual(z_vars['job'],
+                         f'ansible-version{self.ansible_version}-inventory')
+        self.assertEqual(z_vars['message'], 'QQ==')
+
+        self.executor_server.release()
+        self.waitUntilSettled()
+
+
+class TestInventoryAutoPythonAnsible8(TestInventoryBase,
+                                      InventoryAutoPythonMixin):
+    ansible_version = '8'
+
+
+class TestInventoryAutoPythonAnsible9(TestInventoryBase,
+                                      InventoryAutoPythonMixin):
+    ansible_version = '9'
+
+
+class TestInventory(TestInventoryBase):
+
+    def test_single_inventory(self):
+
+        inventory = self._get_build_inventory('single-inventory')
+
+        all_nodes = ('ubuntu-xenial',)
+        self.assertIn('all', inventory)
+        self.assertIn('hosts', inventory['all'])
+        self.assertIn('vars', inventory['all'])
+        for node_name in all_nodes:
+            self.assertIn(node_name, inventory['all']['hosts'])
+            node_vars = inventory['all']['hosts'][node_name]
+            self.assertEqual(
+                'auto', node_vars['ansible_python_interpreter'])
+            self.assertNotIn(
+                'ansible_shell_type', node_vars)
+        self.assertIn('zuul', inventory['all']['vars'])
+        self.assertIn('attempts', inventory['all']['vars']['zuul'])
+        self.assertEqual(1, inventory['all']['vars']['zuul']['attempts'])
+        self.assertIn('max_attempts', inventory['all']['vars']['zuul'])
+        self.assertEqual(3, inventory['all']['vars']['zuul']['max_attempts'])
+        z_vars = inventory['all']['vars']['zuul']
+        self.assertIn('executor', z_vars)
+        self.assertIn('src_root', z_vars['executor'])
+        self.assertIn('job', z_vars)
         self.assertEqual(z_vars['job'], 'single-inventory')
+        self.assertEqual(z_vars['message'], 'QQ==')
 
         self.executor_server.release()
         self.waitUntilSettled()
@@ -83,6 +275,27 @@ class TestInventory(ZuulTestCase):
         self.executor_server.release()
         self.waitUntilSettled()
 
+    def test_executor_only_inventory(self):
+        inventory = self._get_build_inventory('executor-only-inventory')
+
+        self.assertIn('all', inventory)
+        self.assertIn('hosts', inventory['all'])
+        self.assertIn('vars', inventory['all'])
+
+        # Should be blank; i.e. rely on the implicit localhost
+        self.assertEqual(0, len(inventory['all']['hosts']))
+
+        self.assertIn('zuul', inventory['all']['vars'])
+        z_vars = inventory['all']['vars']['zuul']
+        self.assertIn('executor', z_vars)
+        self.assertIn('src_root', z_vars['executor'])
+        self.assertIn('job', z_vars)
+        self.assertEqual(z_vars['job'], 'executor-only-inventory')
+        self.assertEqual(z_vars['message'], 'QQ==')
+
+        self.executor_server.release()
+        self.waitUntilSettled()
+
     def test_group_inventory(self):
 
         inventory = self._get_build_inventory('group-inventory')
@@ -99,6 +312,21 @@ class TestInventory(ZuulTestCase):
             self.assertIn(node_name,
                           inventory['all']['children']
                           ['ceph-monitor']['hosts'])
+        self.assertEqual(
+            'auto',
+            inventory['all']['hosts']['controller']
+            ['ansible_python_interpreter'])
+        self.assertEqual(
+            'ceph',
+            inventory['all']['hosts']['controller']
+            ['ceph_var'])
+        self.assertEqual(
+            'auto',
+            inventory['all']['hosts']['compute1']
+            ['ansible_python_interpreter'])
+        self.assertNotIn(
+            'ceph_var',
+            inventory['all']['hosts']['compute1'])
         self.assertIn('zuul', inventory['all']['vars'])
         z_vars = inventory['all']['vars']['zuul']
         self.assertIn('executor', z_vars)
@@ -137,6 +365,18 @@ class TestInventory(ZuulTestCase):
                     'local',
                     inventory['all']['hosts'][node_name]['ansible_connection'])
 
+            self.assertEqual(
+                'auto',
+                inventory['all']['hosts'][node_name]
+                ['ansible_python_interpreter'])
+            self.assertEqual(
+                'all',
+                inventory['all']['hosts'][node_name]
+                ['all_var'])
+        self.assertNotIn(
+            'ansible_python_interpreter',
+            inventory['all']['vars'])
+
         self.executor_server.release()
         self.waitUntilSettled()
 
@@ -156,6 +396,99 @@ class TestInventory(ZuulTestCase):
         self.assertIn('fakeuser', inventory['all']['hosts'])
         self.assertIn('windows', inventory['all']['hosts'])
         self.assertIn('network', inventory['all']['hosts'])
+
+        self.executor_server.release()
+        self.waitUntilSettled()
+
+
+class TestAnsibleInventory(AnsibleZuulTestCase):
+
+    config_file = 'zuul-gerrit-github.conf'
+    tenant_config_file = 'config/inventory/main.yaml'
+
+    def _get_file(self, build, path):
+        p = os.path.join(build.jobdir.root, path)
+        with open(p) as f:
+            return f.read()
+
+    def _jinja2_message(self, expected_message):
+
+        # This test runs a bit long and needs extra time.
+        self.wait_timeout = 120
+        # Keep the jobdir around to check inventory
+        self.executor_server.keep_jobdir = True
+        # Output extra ansible info so we might see errors.
+        self.executor_server.verbose = True
+        A = self.fake_gerrit.addFakeChange(
+            'org/project2', 'master', expected_message,
+            files={'jinja.txt': 'foo'})
+        self.fake_gerrit.addEvent(A.getPatchsetCreatedEvent(1))
+        self.waitUntilSettled()
+        self.assertHistory([
+            dict(name='jinja2-message', result='SUCCESS', changes='1,1')])
+
+        build = self.history[0]
+        inv_path = os.path.join(build.jobdir.root, 'ansible', 'inventory.yaml')
+        with open(inv_path, 'r') as f:
+            inventory = yaml.safe_load(f)
+
+        zv_path = os.path.join(build.jobdir.root, 'ansible', 'zuul_vars.yaml')
+        with open(zv_path, 'r') as f:
+            zv = yaml.ansible_unsafe_load(f)
+
+        # TODO(corvus): zuul vars aren't really stored here anymore;
+        # rework these tests to examine them separately.
+        inventory['all']['vars'] = {'zuul': zv['zuul']}
+
+        # The deprecated base64 version
+        decoded_message = base64.b64decode(
+            inventory['all']['vars']['zuul']['message']).decode('utf-8')
+        self.assertEqual(decoded_message, expected_message)
+        obtained_message = self._get_file(self.history[0],
+                                          'work/logs/commit-message.txt')
+        self.assertEqual(obtained_message, expected_message)
+
+        # The new !unsafe version
+        decoded_message = inventory['all']['vars']['zuul']['change_message']
+        self.assertEqual(decoded_message, expected_message)
+        obtained_message = self._get_file(self.history[0],
+                                          'work/logs/change-message.txt')
+        self.assertEqual(obtained_message, expected_message)
+
+    def test_jinja2_message_brackets(self):
+        self._jinja2_message("This message has {{ ansible_host }} in it ")
+
+    def test_jinja2_message_raw(self):
+        self._jinja2_message("This message has {% raw %} in {% endraw %} it ")
+
+    def test_network_inventory(self):
+        # Network appliances can't run the freeze or setup playbooks,
+        # so they won't have any job variables available.  But they
+        # should still have nodepool hostvars.  Run a playbook that
+        # verifies that.
+        A = self.fake_gerrit.addFakeChange(
+            'org/project2', 'master', 'A',
+            files={'network.txt': 'foo'})
+        self.fake_gerrit.addEvent(A.getPatchsetCreatedEvent(1))
+        self.waitUntilSettled()
+        self.assertHistory([
+            dict(name='network', result='SUCCESS', changes='1,1')])
+
+
+class TestWindowsInventory(TestInventoryBase):
+    config_file = 'zuul-winrm.conf'
+
+    def test_windows_inventory(self):
+
+        inventory = self._get_build_inventory('hostvars-inventory')
+        windows_host = inventory['all']['hosts']['windows']
+        self.assertEqual(windows_host['ansible_connection'], 'winrm')
+        self.assertEqual(
+            windows_host['ansible_winrm_operation_timeout_sec'],
+            '120')
+        self.assertEqual(
+            windows_host['ansible_winrm_read_timeout_sec'],
+            '180')
 
         self.executor_server.release()
         self.waitUntilSettled()

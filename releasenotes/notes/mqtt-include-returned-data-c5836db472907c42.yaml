@@ -1,0 +1,6 @@
+---
+features:
+  - |
+    The MQTT driver now supports including data returned from a job in
+    its reports.  See
+    :attr:`pipeline.<reporter>.<mqtt>.include-returned-data`.

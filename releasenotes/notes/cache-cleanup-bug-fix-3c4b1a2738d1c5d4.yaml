@@ -1,0 +1,7 @@
+---
+fixes:
+  - |
+    Fix a bug in the cleanup routine for the new Zookeeper based change
+    cache. Previously this caused the change cache to leak entries. Note
+    the fixed routine will clean up the leaked entries automatically once
+    Zuul is restarted on this new version.

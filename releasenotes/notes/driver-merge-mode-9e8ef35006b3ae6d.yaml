@@ -1,0 +1,10 @@
+---
+upgrade:
+  - |
+    The default merge mode used by Zuul for preparing git repos was
+    previously :value:`project.merge-mode.merge-resolve` in all cases,
+    but is now :value:`project.merge-mode.merge` for all drivers except
+    Gerrit, where :value:`project.merge-mode.merge-resolve` is still
+    the default.  This makes the merge operations performed by Zuul
+    more closely match the operations that will be performed by the
+    code review systems.

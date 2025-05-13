@@ -1,0 +1,6 @@
+---
+features:
+  - |
+    Circular dependencies are now optionally supported (but disabled
+    by default).  To permit dependency cycles to be enqueued, see the
+    :attr:`queue.allow-circular-dependencies` option.

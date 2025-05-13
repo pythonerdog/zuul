@@ -26,7 +26,8 @@ class BaseTrigger(object, metaclass=abc.ABCMeta):
         self.config = config or {}
 
     @abc.abstractmethod
-    def getEventFilters(self, trigger_conf):
+    def getEventFilters(self, connection_name, trigger_conf,
+                        parse_context):
         """Return a list of EventFilter's for the scheduler to match against.
         """
 
@@ -36,5 +37,5 @@ class BaseTrigger(object, metaclass=abc.ABCMeta):
     def onChangeMerged(self, change, source):
         """Called when a change has been merged."""
 
-    def onChangeEnqueued(self, change, pipeline):
+    def onChangeEnqueued(self, change, manager, event):
         """Called when a change has been enqueued."""

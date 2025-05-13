@@ -1,0 +1,21 @@
+- name: Install docker
+  include_role:
+    name: ensure-docker
+
+- name: Build 2.7 container environment
+  shell: |
+    pushd {{ ansible_user_dir }}/src/opendev.org/zuul/zuul/playbooks/zuul-stream/fixtures/
+    cat ~/.ssh/id_rsa.pub > authorized_keys
+    docker build -f Dockerfile.py27 -t zuul_python27 .
+  args:
+    executable: /bin/bash
+
+- name: Run 2.7 container
+  shell: |
+    docker run -d -p 2022:22 -p 19887:19887 zuul_python27
+    docker ps
+
+- name: Accept host keys
+  shell: |
+    ssh-keyscan -p 2022 localhost >> ~/.ssh/known_hosts
+    ssh-keyscan -p 2022 127.0.0.2 >> ~/.ssh/known_hosts

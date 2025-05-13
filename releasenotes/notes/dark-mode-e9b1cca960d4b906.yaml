@@ -1,0 +1,9 @@
+---
+features:
+  - |
+    Added a new dark theme for the Zuul web interface.
+  - |
+    Added theme selection for the Zuul web interface. The default theme is set
+    to Auto which means your system/browsers preference determines if the Light
+    or Dark theme should be used. Either can be explicitly set in the settings
+    for the web interface by clicking the cogs in the top right.

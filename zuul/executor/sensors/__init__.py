@@ -23,6 +23,15 @@ class SensorInterface(object, metaclass=abc.ABCMeta):
 
     """
 
+    def __init__(self, statsd, base_key):
+        """Initialize the sensor.
+
+        :param statsd: the statsd object to use for reporting
+        :param base_key: the base key to use for reporting
+        """
+        self.statsd = statsd
+        self.base_key = base_key
+
     @abc.abstractmethod
     def isOk(self):
         """Report if current load is ok for accepting new jobs.
@@ -30,14 +39,5 @@ class SensorInterface(object, metaclass=abc.ABCMeta):
         :returns: Bool, str: True if we can accept new jobs, otherwise False
                   and a string for the log
         :rtype: Bool, str
-        """
-        pass
-
-    @abc.abstractmethod
-    def reportStats(self, statsd, base_key):
-        """Report statistics to statsd
-
-        :param statsd: the statsd object to use for reporting
-        :param base_key: the base key to use for reporting
         """
         pass

@@ -1,0 +1,8 @@
+---
+fixes:
+  - |
+    Fixes a bug where Zuul would incorrectly enqueue a Gerrit change that could
+    not be submitted due to missing labels in a dependent pipeline.
+
+    Specifically, if change had a score for any label that would provided by
+    Zuul, all other missing labels would be incorrectly ignored.

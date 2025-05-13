@@ -1,0 +1,18 @@
+query canMergeDataPageThreads(
+  $pull_node_id: ID!
+  $cursor: String
+) {
+  node(id: $pull_node_id) {
+    ... on PullRequest {
+      reviewThreads(first: 100, after: $cursor) {
+        pageInfo {
+          endCursor
+          hasNextPage
+        }
+        nodes {
+          isResolved
+        }
+      }
+    }
+  }
+}

@@ -1,4 +1,5 @@
 # Copyright 2017 Red Hat, Inc.
+# Copyright 2023 Acme Gating, LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may
 # not use this file except in compliance with the License. You may obtain
@@ -12,11 +13,8 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-import re
-
 from zuul.model import TriggerEvent
 from zuul.model import EventFilter
-
 
 EMPTY_GIT_REF = '0' * 40  # git sha of all zeros, used during creates/deletes
 
@@ -29,7 +27,9 @@ class GitTriggerEvent(TriggerEvent):
                                           self.project_name)
 
         if self.branch:
-            ret += " %s" % self.branch
+            ret += " branch:%s" % self.branch
+        if self.ref:
+            ret += " ref:%s" % self.ref
         ret += " oldrev:%s" % self.oldrev
         ret += " newrev:%s" % self.newrev
         ret += '>'
@@ -38,18 +38,21 @@ class GitTriggerEvent(TriggerEvent):
 
 
 class GitEventFilter(EventFilter):
-    def __init__(self, trigger, types=[], refs=[],
+    def __init__(self, connection_name, trigger, types=None, refs=None,
                  ignore_deletes=True):
 
-        super().__init__(trigger)
+        super().__init__(connection_name, trigger)
 
-        self._refs = refs
-        self.types = types
-        self.refs = [re.compile(x) for x in refs]
+        refs = refs if refs is not None else []
+        self._refs = [x.pattern for x in refs]
+        self.refs = refs
+
+        self.types = types if types is not None else []
         self.ignore_deletes = ignore_deletes
 
     def __repr__(self):
         ret = '<GitEventFilter'
+        ret += ' connection: %s' % self.connection_name
 
         if self.types:
             ret += ' types: %s' % ', '.join(self.types)
@@ -62,6 +65,9 @@ class GitEventFilter(EventFilter):
         return ret
 
     def matches(self, event, change):
+        if not super().matches(event, change):
+            return False
+
         # event types are ORed
         matches_type = False
         for etype in self.types:

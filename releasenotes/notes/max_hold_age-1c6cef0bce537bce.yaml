@@ -1,0 +1,8 @@
+---
+features:
+  - |
+    New scheduler options, max_hold_expiration and default_hold_expiration, are
+    added to control how long nodes held for an autohold request remain
+    available. The max_hold_expiration option defaults to 0, which means the
+    held nodes will not automatically expire, and default_hold_expiration
+    defaults to the value of max_hold_expiration.

@@ -1,0 +1,7 @@
+upgrade:
+  - |
+    The Gerrit driver now has an additional option,
+    :attr:`pipeline.reporter.<gerrit reporter>.comment` which may be
+    used to suppress reporting job results as review comments.  Due to
+    the configuration syntax for Gerrit reporters, the word "comment"
+    may no longer be used as a review label.

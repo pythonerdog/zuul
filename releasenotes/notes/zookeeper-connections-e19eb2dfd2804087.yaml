@@ -1,0 +1,7 @@
+---
+upgrade:
+  - |
+    The :attr:`zookeeper` section in ``zuul.conf`` is required for all
+    components, and all components must now be able to connect to
+    ZooKeeper.  Additionally, TLS is now required for all ZooKeeper
+    connections.  See :ref:`zk-encrypted-connections` for more details.

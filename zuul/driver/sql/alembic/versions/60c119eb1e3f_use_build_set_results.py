@@ -24,13 +24,16 @@ def upgrade(table_prefix=''):
 
     connection = op.get_bind()
     connection.execute(
-        """
-        UPDATE {buildset_table}
-         SET result=(
-             SELECT CASE score
-                WHEN 1 THEN 'SUCCESS'
-                ELSE 'FAILURE' END)
-        """.format(buildset_table=table_prefix + BUILDSET_TABLE))
+        sa.text(
+            """
+            UPDATE {buildset_table}
+             SET result=(
+                 SELECT CASE score
+                    WHEN 1 THEN 'SUCCESS'
+                    ELSE 'FAILURE' END)
+            """.format(buildset_table=table_prefix + BUILDSET_TABLE)
+        )
+    )
 
     op.drop_column(table_prefix + BUILDSET_TABLE, 'score')
 

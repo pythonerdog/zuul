@@ -1,0 +1,8 @@
+---
+features:
+  - |
+    The GitHub driver now has support for using a GitHub Enterprise
+    `repository cache
+    <https://docs.github.com/en/enterprise-server@3.3/admin/enterprise-management/caching-repositories/about-repository-caching>`_.
+    See :attr:`<github connection>.repo_cache` for information on how
+    to configure it.

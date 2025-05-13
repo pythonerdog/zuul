@@ -1,0 +1,102 @@
+- pipeline:
+    name: gate
+    manager: dependent
+    trigger:
+      gerrit:
+        - event: comment-added
+          approval:
+            - Code-Review: 2
+    success:
+      gerrit:
+        Verified: 2
+        submit: true
+    failure:
+      gerrit:
+        Verified: -2
+    start:
+      gerrit:
+        Verified: 0
+    precedence: high
+
+- pipeline:
+    name: check
+    manager: independent
+    trigger:
+      gerrit:
+        - event: comment-added
+          approval:
+            - Code-Review: 2
+      github:
+        - event: pull_request
+          action: opened
+    success:
+      gerrit:
+        Verified: 1
+        submit: true
+      github:
+        check: success
+        comment: false
+    failure:
+      gerrit:
+        Verified: -1
+      github:
+        check: failure
+        comment: false
+    start:
+      gerrit:
+        Verified: 0
+      github:
+        check: in_progress
+        comment: false
+    precedence: high
+
+- pipeline:
+    name: post
+    post-review: true
+    description: This pipeline runs jobs that operate after each change is merged.
+    manager: independent
+    precedence: low
+    trigger:
+      github:
+        - event: push
+          ref: ^refs/heads/.*$
+      gerrit:
+        - event: ref-updated
+          ref: ^refs/heads/.*$
+
+- job:
+    name: base-calling-implicit-role
+    pre-run:
+      - playbooks/pre.yaml
+    roles:
+      - zuul: org/roles
+
+- job:
+    name: test1
+    parent: base-calling-implicit-role
+    run: playbooks/test1.yaml
+
+- job:
+    name: test2
+    parent: base-calling-implicit-role
+    run: playbooks/test2.yaml
+
+- job:
+    name: require-test1
+    run: playbooks/require-test.yaml
+    required-projects:
+      - name: org/requiredproject
+
+- job:
+    name: require-test2
+    run: playbooks/require-test.yaml
+    required-projects:
+      - name: org/requiredproject
+
+- job:
+    name: dependent-test1
+    run: playbooks/require-test.yaml
+
+- job:
+    name: dependent-test2
+    run: playbooks/require-test.yaml

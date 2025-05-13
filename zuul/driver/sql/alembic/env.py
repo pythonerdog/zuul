@@ -53,7 +53,8 @@ def run_migrations_online():
     connectable = engine_from_config(
         config.get_section(config.config_ini_section),
         prefix='sqlalchemy.',
-        poolclass=pool.NullPool)
+        poolclass=pool.NullPool,
+        future=True)
 
     # we can get the table prefix via the tag object
     tag = context.get_tag_argument()

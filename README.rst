@@ -3,15 +3,15 @@ Zuul
 
 Zuul is a project gating system.
 
-The latest documentation for Zuul v3 is published at:
+The latest documentation for the current version of Zuul is published at:
 https://zuul-ci.org/docs/zuul/
 
 If you are looking for the Edge routing service named Zuul that is
 related to Netflix, it can be found here:
 https://github.com/Netflix/zuul
 
-If you are looking for the Javascript testing tool named Zuul, it
-can be found here:
+If you are looking for the Javascript testing tool named Zuul, its
+archive can be found here:
 https://github.com/defunctzombie/zuul
 
 Getting Help
@@ -27,18 +27,22 @@ There are two Zuul-related mailing lists:
   General discussion about Zuul, including questions about how to use
   it, and future development.
 
-You will also find Zuul developers in the `#zuul` channel on Freenode
-IRC.
+You will also find Zuul developers on
+`Matrix <https://matrix.to/#/#zuul:opendev.org>`.
 
 Contributing
 ------------
 
-To browse the latest code, see: https://git.zuul-ci.org/cgit/zuul/tree/
-To clone the latest code, use `git clone https://git.zuul-ci.org/zuul`
+To browse the latest code, see: https://opendev.org/zuul/zuul
+To clone the latest code, use `git clone https://opendev.org/zuul/zuul`
 
-Bugs are handled at: https://storyboard.openstack.org/#!/project/679
+Bugs are handled at: https://storyboard.openstack.org/#!/project/zuul/zuul
 
-Code reviews are handled by gerrit at https://review.openstack.org
+Suspected security vulnerabilities are most appreciated if first
+reported privately following any of the supported mechanisms
+described at https://zuul-ci.org/docs/zuul/latest/vulnerabilities.html
+
+Code reviews are handled by gerrit at https://review.opendev.org
 
 After creating a Gerrit account, use `git review` to submit patches.
 Example::
@@ -47,7 +51,8 @@ Example::
     $ git review
     # Enter your username if prompted
 
-Join `#zuul` on Freenode to discuss development or usage.
+`Join us on Matrix <https://matrix.to/#/#zuul:opendev.org>`_ to discuss
+development or usage.
 
 License
 -------
@@ -60,9 +65,8 @@ at the tops of individual source files.
 Python Version Support
 ----------------------
 
-Zuul v3 requires Python 3. It does not support Python 2.
+Zuul requires Python 3. It does not support Python 2.
 
-As Ansible is used for the execution of jobs, it's important to note that
-while Ansible does support Python 3, not all of Ansible's modules do. Zuul
-currently sets ``ansible_python_interpreter`` to python2 so that remote
-content will be executed with Python 2.
+Since Zuul uses Ansible to drive CI jobs, Zuul can run tests anywhere
+Ansible can, including Python 2 environments.
+

@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 
 import logging
+from collections import UserDict
 
 from zuul.driver.github.githubconnection import GithubConnection
 from zuul.driver.github import GithubDriver
-from zuul.model import Change, Project
+from zuul.model import Change
+from zuul.zk.change_cache import ChangeKey
 
 # This is a template with boilerplate code for debugging github issues
 
@@ -17,6 +19,14 @@ appkey = '/opt/project/appkey'
 org = 'example'
 repo = 'sandbox'
 pull_nr = 8
+
+
+class DummyChangeCache(UserDict):
+
+    def updateChangeWithRetry(self, key, change, update_func, retry_count=5):
+        update_func(change)
+        self[key] = change
+        return change
 
 
 def configure_logging(context):
@@ -40,7 +50,8 @@ def create_connection(server, api_token):
         'api_token': api_token,
     }
     conn = GithubConnection(driver, 'github', connection_config)
-    conn._authenticateGithubAPI()
+    conn._github_client_manager.initialize()
+    conn._change_cache = DummyChangeCache()
     return conn
 
 
@@ -52,8 +63,8 @@ def create_connection_app(server, appid, appkey):
         'app_key': appkey,
     }
     conn = GithubConnection(driver, 'github', connection_config)
-    conn._authenticateGithubAPI()
-    conn._prime_installation_map()
+    conn._github_client_manager.initialize()
+    conn._change_cache = DummyChangeCache()
     return conn
 
 
@@ -61,11 +72,12 @@ def get_change(connection: GithubConnection,
                org: str,
                repo: str,
                pull: int) -> Change:
-    p = Project("%s/%s" % (org, repo), connection.source)
-    github = connection.getGithubClient(p.name)
+    project_name = f"{org}/{repo}"
+    github = connection.getGithubClient(project_name)
     pr = github.pull_request(org, repo, pull)
     sha = pr.head.sha
-    return conn._getChange(p, pull, sha, True)
+    change_key = ChangeKey('github', project_name, 'PullRequest', pull, sha)
+    return conn._getChange(change_key, refresh=True)
 
 
 # create github connection with api token

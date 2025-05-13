@@ -1,0 +1,10 @@
+- job:
+    parent: base
+    name: datetime-fact
+    run: playbooks/datetime-fact.yaml
+
+- project:
+    name: org/project
+    promote:
+      jobs:
+        - datetime-fact

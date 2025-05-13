@@ -1,0 +1,8 @@
+---
+features:
+  - |
+    A new job configuration option, :attr:`job.failure-output`, has
+    been added to allow users to specify regular expressions which,
+    when seen in the streaming job output, will trigger the early
+    failure detection in Zuul so that dependent pipeline gate resets
+    may begin before the completion of a failed job.

@@ -1,6 +1,9 @@
 - job:
     name: project1-test1
     semaphore: test-semaphore
+    vars:
+      semaphore:
+        test: 42
     run: playbooks/project1-test1.yaml
 
 - project:

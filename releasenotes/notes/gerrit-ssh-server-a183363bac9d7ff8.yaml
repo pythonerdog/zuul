@@ -1,0 +1,6 @@
+---
+features:
+  - |
+    The new `ssh_server` option for gerrit connections may be used to specify
+    a hostname to use for SSH connections while the normal `server` option
+    specifies the hostname to use for HTTP connections.

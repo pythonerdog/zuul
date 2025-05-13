@@ -2,3 +2,16 @@
   tasks:
     - name: Some command
       command: echo 123
+
+    - name: Check that 'stdin' parameter is handled by 'zuul_run_command' (which
+       is a fork of ansible.module_utils.basic.run_command)
+      command:
+        cmd: cat -
+        stdin: test_stdin_param
+      register: _run_command_result
+
+    - assert:
+        that:
+          - _run_command_result is success
+          - _run_command_result.rc == 0
+          - "_run_command_result.stdout == 'test_stdin_param'"

@@ -1,0 +1,88 @@
+- queue:
+    name: integrated
+    allow-circular-dependencies: true
+
+- pipeline:
+    name: check
+    manager: independent
+    trigger:
+      gerrit:
+        - event: patchset-created
+    success:
+      gerrit:
+        Verified: 1
+    failure:
+      gerrit:
+        Verified: -1
+
+- pipeline:
+    name: gate
+    manager: dependent
+    success-message: Build succeeded (gate).
+    require:
+      gerrit:
+        approval:
+          - Approved: 1
+    trigger:
+      gerrit:
+        - event: comment-added
+          approval:
+            - Approved: 1
+    success:
+      gerrit:
+        Verified: 2
+        submit: true
+    failure:
+      gerrit:
+        Verified: -2
+    start:
+      gerrit:
+        Verified: 0
+    precedence: high
+
+- job:
+    name: base
+    parent: null
+    run: playbooks/run.yaml
+    nodeset:
+      nodes:
+        - label: debian
+          name: controller
+
+- job:
+    name: parent-job
+    deduplicate: true
+
+- job:
+    name: project1-job
+
+- job:
+    name: project2-job
+
+- project:
+    name: org/project1
+    queue: integrated
+    check:
+      jobs:
+        - parent-job
+        - project1-job:
+            dependencies: parent-job
+    gate:
+      jobs:
+        - parent-job
+        - project1-job:
+            dependencies: parent-job
+
+- project:
+    name: org/project2
+    queue: integrated
+    check:
+      jobs:
+        - parent-job
+        - project2-job:
+            dependencies: parent-job
+    gate:
+      jobs:
+        - parent-job
+        - project2-job:
+            dependencies: parent-job

@@ -1,0 +1,10 @@
+---
+features:
+  - |
+    Two new settings are available to protect Zuul from resource
+    exhaustion from processing too many dependencies among changes.
+    The Gerrit driver supports setting :attr:`<gerrit
+    connection>.max_dependencies` to limit internal dependency
+    processing during event processing, and a new tenant setting of
+    :attr:`tenant.max-dependencies` is available to limit tenant
+    processing while enqueing changes in pipelines.

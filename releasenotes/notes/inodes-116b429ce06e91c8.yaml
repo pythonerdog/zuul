@@ -1,0 +1,8 @@
+---
+features:
+  - |
+    The executor now monitors filesystem inode usage as well as
+    storage usage.  The threshold for accepting jobs can be configured
+    independenty with :attr:`executor.min_avail_inodes`.  Inode
+    usage is also reported separately with the
+    :stat:`zuul.executor.<executor>.pct_used_inodes` metric.

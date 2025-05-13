@@ -40,7 +40,8 @@ def handle_repo(path):
             config_path = os.path.join(path, fn)
             break
     try:
-        config = yaml.safe_load(open(config_path))
+        with open(config_path) as f:
+            config = yaml.safe_load(f)
     except Exception:
         print("  Has yaml errors")
         return

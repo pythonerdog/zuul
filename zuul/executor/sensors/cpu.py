@@ -23,7 +23,8 @@ from zuul.lib.config import get_default
 class CPUSensor(SensorInterface):
     log = logging.getLogger("zuul.executor.sensor.cpu")
 
-    def __init__(self, config=None):
+    def __init__(self, statsd, base_key, config=None):
+        super().__init__(statsd, base_key)
         load_multiplier = float(get_default(config, 'executor',
                                             'load_multiplier', '2.5'))
         self.max_load_avg = multiprocessing.cpu_count() * load_multiplier
@@ -31,12 +32,12 @@ class CPUSensor(SensorInterface):
     def isOk(self):
         load_avg = os.getloadavg()[0]
 
+        if self.statsd:
+            self.statsd.gauge(self.base_key + '.load_average',
+                              int(load_avg * 100))
+
         if load_avg > self.max_load_avg:
             return False, "high system load {} > {}".format(
                 load_avg, self.max_load_avg)
 
-        return True, "{} <= {}".format(load_avg, self.max_load_avg)
-
-    def reportStats(self, statsd, base_key):
-        load_avg = os.getloadavg()[0]
-        statsd.gauge(base_key + '.load_average', int(load_avg * 100))
+        return True, "load avg {} <= {}".format(load_avg, self.max_load_avg)

@@ -1,0 +1,36 @@
+- authorization-rule:
+    name: tenant-admin
+    conditions:
+      - groups: "{tenant.name}"
+- tenant:
+    name: tenant-zero
+    admin-rules:
+      - tenant-admin
+    source:
+      gerrit:
+        config-projects:
+          - common-config
+        untrusted-projects:
+          - org/project
+- tenant:
+    name: tenant-one
+    authentication-realm: myOIDC1
+    admin-rules:
+      - tenant-admin
+    source:
+      gerrit:
+        config-projects:
+          - common-config
+        untrusted-projects:
+          - org/project1
+- tenant:
+    name: tenant-two
+    authentication-realm: myOIDC2
+    admin-rules:
+      - tenant-admin
+    source:
+      gerrit:
+        config-projects:
+          - common-config
+        untrusted-projects:
+          - org/project2

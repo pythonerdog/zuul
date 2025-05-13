@@ -1,0 +1,13 @@
+---
+fixes:
+  - |
+    The use of implied branch matchers in jobs where
+    `override-checkout` was specified could cause some jobs to include
+    unintended variants.  Specifically: job variants with implied
+    branch matchers on branches which are substring matches of a
+    branch specified in the `override-checkout` job attribute may have
+    been used when not intended.
+
+    This has been corrected so that the same job variant matching
+    process happens whether the change's branch or the branch
+    specified by override-checkout is used.

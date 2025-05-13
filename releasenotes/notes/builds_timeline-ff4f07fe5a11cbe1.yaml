@@ -1,0 +1,5 @@
+---
+features:
+  - |
+    On the description page of a buildset in the zuul web dashboard, a user can
+    display a timeline of the builds making up the buildset.

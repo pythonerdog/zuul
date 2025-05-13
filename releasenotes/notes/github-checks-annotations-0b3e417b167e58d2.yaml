@@ -1,0 +1,10 @@
+---
+features:
+  - |
+    The Github driver can now report file comments via Github checks API.
+    If a github reporter is configured to use the checks API, file comments
+    provided via ``zuul_return`` will automatically be reported to the pull
+    request in Github.
+
+    For more details on how to provide file comments from Zuul, see the
+    documentation of the :ref:`return_values`.

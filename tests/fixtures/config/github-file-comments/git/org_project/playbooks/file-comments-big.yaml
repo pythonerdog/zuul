@@ -1,0 +1,74 @@
+- hosts: all
+  tasks:
+    - zuul_return:
+        data:
+          zuul:
+            file_comments:
+              bigfile:
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                # 10
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                # 20
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                # 30
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                # 40
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                # 50
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Annoying comment"}
+                - {line: 1, message: "Useful comment"}
+                - {line: 1, message: "Useful comment"}
+                - {line: 2, message: "Useful comment"}
+                - {line: 2, message: "Insightful comment"}

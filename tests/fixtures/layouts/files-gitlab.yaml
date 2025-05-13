@@ -1,0 +1,31 @@
+- pipeline:
+    name: check
+    manager: independent
+    trigger:
+      gitlab:
+        - event: gl_merge_request
+          action: opened
+
+- job:
+    name: base
+    parent: null
+    run: playbooks/base.yaml
+
+- job:
+    name: project-test1
+    files:
+      - .*-requires
+    run: playbooks/project-test1.yaml
+
+- job:
+    name: project-test2
+    files:
+      - .*-removed
+    run: playbooks/project-test1.yaml
+
+- project:
+    name: org/project
+    check:
+      jobs:
+        - project-test1
+        - project-test2

@@ -1,0 +1,20 @@
+# Not actually the global semaphore -- this tenant doesn't have it, so
+# this semaphore will be used.
+- semaphore:
+    name: global-semaphore
+    max: 999
+
+- semaphore:
+    name: project3-semaphore
+    max: 13
+
+- job:
+    name: test-project3-semaphore
+    semaphores: project3-semaphore
+
+- project:
+    check:
+      jobs:
+        - test-global-semaphore
+        - test-common-semaphore
+        - test-project3-semaphore

@@ -1,0 +1,8 @@
+- job:
+    name: emit-warnings
+    run: playbooks/warnings.yaml
+
+- project:
+    check:
+      jobs:
+        - emit-warnings

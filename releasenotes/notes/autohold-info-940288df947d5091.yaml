@@ -1,0 +1,5 @@
+---
+features:
+  - |
+    A new zuul CLI command, autohold-info, has been added to retrieve full
+    details for an existing autohold request.

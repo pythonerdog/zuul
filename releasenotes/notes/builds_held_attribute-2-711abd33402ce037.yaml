@@ -1,0 +1,10 @@
+---
+features:
+  - |
+    Builds in the SQL reporter have a "held" attribute set to True if the build
+    triggered a autohold request. Builds can be filtered by held status.
+upgrade:
+  - |
+    If using a SQL reporter, the zuul_builds table will be updated with a new
+    'held' column. The `zuul-scheduler` and `zuul-web` services need to be restarted
+    together for the change to take effect.

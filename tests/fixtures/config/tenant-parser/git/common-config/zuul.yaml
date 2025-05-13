@@ -17,6 +17,12 @@
 
 - job:
     name: common-config-job
+    run: playbooks/common.yaml
+
+- project:
+    check:
+      jobs:
+        - common-config-job
 
 # Use the canonical name here. This should be merged with the org/project1 in
 # the other repo.

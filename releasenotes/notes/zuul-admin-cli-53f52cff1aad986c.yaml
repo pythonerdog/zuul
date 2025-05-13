@@ -1,0 +1,7 @@
+---
+deprecations:
+  - |
+    The zuul CLI is renamed `zuul-admin`. The `zuul` command will remain usable until a future version,
+    then will be phased out. Likewise, tenant-scoped, workflow affecting commands such as autohold,
+    enqueue, dequeue, promote are deprecated from the zuul-admin CLI and will be phased out in a
+    future version. They can still be performed via the `zuul-client` CLI.

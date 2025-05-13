@@ -1,0 +1,19 @@
+- hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Add a fake host
+      add_host:
+        hostname: fake
+        ansible_host: notexisting.example.notexisting
+
+- hosts: fake
+  gather_facts: no
+  tasks:
+    - name: Run a lineinfile task
+      lineinfile:
+        path: /tmp/.netrc
+        mode: 0600
+        create: true
+        insertafter: EOF
+        line: "foo"
+      no_log: true

@@ -1,0 +1,12 @@
+---
+fixes:
+  - |
+    Under specific conditions Zuul could fail to properly update git
+    repos causing it to fall back to testing master. If jobs were
+    meant to run against commits other than current master this lead
+    to testing the wrong commit. Zuul now correctly updates repos and
+    should test the correct commit in all cases.
+
+    Specifically this could happen if a new branch was created off a
+    commit in an existing branch. Then the first proposed change to
+    this new branch would be tested against master instead.

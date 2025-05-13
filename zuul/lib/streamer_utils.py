@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 # Copyright 2017 Red Hat, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -19,13 +18,22 @@ The log streamer process within each executor, the finger gateway service,
 and the web interface will all make use of this module.
 '''
 
+import logging
 import os
 import pwd
+import random
 import select
 import socket
 import socketserver
+import ssl
 import threading
 import time
+
+from zuul.exceptions import StreamingError
+from zuul.zk.components import COMPONENT_REGISTRY
+
+
+log = logging.getLogger("zuul.lib.streamer_utils")
 
 
 class BaseFingerRequestHandler(socketserver.BaseRequestHandler):
@@ -51,7 +59,11 @@ class BaseFingerRequestHandler(socketserver.BaseRequestHandler):
                 raise Exception("Timeout while waiting for input")
             for fd, event in poll.poll(timeout):
                 if event & select.POLLIN:
-                    buffer += self.request.recv(self.MAX_REQUEST_LEN)
+                    x = self.request.recv(self.MAX_REQUEST_LEN)
+                    if not x:
+                        # This will cause the caller to quietly shut down
+                        raise BrokenPipeError
+                    buffer += x
                 else:
                     raise Exception("Received error event")
             if len(buffer) >= self.MAX_REQUEST_LEN:
@@ -94,6 +106,9 @@ class CustomThreadingTCPServer(socketserver.ThreadingTCPServer):
         self.address_family = address_family
         self.user = kwargs.pop('user', None)
         self.pid_file = kwargs.pop('pid_file', None)
+        self.server_ssl_key = kwargs.pop('server_ssl_key', None)
+        self.server_ssl_cert = kwargs.pop('server_ssl_cert', None)
+        self.server_ssl_ca = kwargs.pop('server_ssl_ca', None)
         socketserver.ThreadingTCPServer.__init__(self, *args, **kwargs)
 
     def change_privs(self):
@@ -147,3 +162,76 @@ class CustomThreadingTCPServer(socketserver.ThreadingTCPServer):
                              args=(request, client_address))
         t.daemon = self.daemon_threads
         t.start()
+
+    def get_request(self):
+        sock, addr = super().get_request()
+
+        if all([self.server_ssl_key, self.server_ssl_cert,
+                self.server_ssl_ca]):
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(self.server_ssl_cert, self.server_ssl_key)
+            context.load_verify_locations(self.server_ssl_ca)
+            context.verify_mode = ssl.CERT_REQUIRED
+            sock = context.wrap_socket(sock, server_side=True)
+        return sock, addr
+
+
+def getJobLogStreamAddress(executor_api, uuid, source_zone,
+                           tenant_name=None):
+    """
+    Looks up the log stream address for the given build UUID.
+
+    Try to find the build request for the given UUID in ZooKeeper
+    by searching through all available zones. If a build request
+    was found we use the worker information to build the log stream
+    address.
+    """
+    build_request = executor_api.getRequest(uuid)
+
+    if build_request is None:
+        raise StreamingError("Build not found")
+
+    if tenant_name is not None and build_request.tenant_name != tenant_name:
+        # Intentionally the same error as above to avoid leaking
+        # out-of-tenant build information.
+        raise StreamingError("Build not found")
+
+    worker_info = build_request.worker_info
+    if not worker_info:
+        raise StreamingError("Build did not start yet")
+
+    worker_zone = worker_info.get("zone")
+    job_log_stream_address = {}
+    if worker_zone and source_zone != worker_zone:
+        info = _getFingerGatewayInZone(worker_zone)
+        if info:
+            job_log_stream_address['server'] = info.hostname
+            job_log_stream_address['port'] = info.public_port
+            job_log_stream_address['use_ssl'] = info.use_ssl
+            log.debug('Source (%s) and worker (%s) zone '
+                      'are different, routing via %s:%s',
+                      source_zone, worker_zone,
+                      info.hostname, info.public_port)
+        else:
+            log.warning('Source (%s) and worker (%s) zone are different'
+                        'but no fingergw in target zone found. '
+                        'Falling back to direct connection.',
+                        source_zone, worker_zone)
+    else:
+        log.debug('Source (%s) or worker zone (%s) undefined '
+                  'or equal, no routing is needed.',
+                  source_zone, worker_zone)
+
+    if 'server' not in job_log_stream_address:
+        job_log_stream_address['server'] = worker_info["hostname"]
+        job_log_stream_address['port'] = worker_info["log_port"]
+
+    return job_log_stream_address
+
+
+def _getFingerGatewayInZone(zone):
+    registry = COMPONENT_REGISTRY.registry
+    gws = [gw for gw in registry.all('fingergw') if gw.zone == zone]
+    if gws:
+        return random.choice(gws)
+    return None

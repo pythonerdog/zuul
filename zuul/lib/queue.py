@@ -14,6 +14,7 @@
 # under the License.
 
 import collections
+import queue
 import threading
 
 
@@ -76,3 +77,14 @@ class MergedQueue(object):
         while self.tasks:
             self.join_condition.wait()
         self.join_condition.release()
+
+
+class NamedQueue(queue.Queue):
+    """For identification of queues in logs"""
+
+    def __init__(self, name, maxsize=0):
+        super().__init__(maxsize)
+        self.name = name
+
+    def __repr__(self):
+        return f"<Queue {self.name} [{id(self)}]>"

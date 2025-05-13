@@ -1,0 +1,82 @@
+{
+  "name": "@zuul-ci/dashboard",
+  "version": "1.0.0",
+  "description": "Zuul Web Dashboard",
+  "repository": "https://opendev.org/zuul/zuul",
+  "author": "Zuul Developers",
+  "license": "Apache-2.0",
+  "private": true,
+  "dependencies": {
+    "@patternfly/react-charts": "^6.51.5",
+    "@patternfly/react-core": "^4.198.5",
+    "@patternfly/react-table": "^4.67.5",
+    "@softwarefactory-project/re-ansi": "^0.7.2",
+    "axios": "^0.26.0",
+    "broadcast-channel": "^4.5.0",
+    "d3-graphviz": "2.6.1",
+    "js-yaml": "^3.13.0",
+    "lodash": "^4.17.10",
+    "moment": "^2.29.4",
+    "moment-duration-format": "2.3.2",
+    "moment-timezone": "^0.5.28",
+    "oidc-client": "^1.10.1",
+    "oidc-react": "^1.5.1",
+    "patternfly-react": "^2.39.16",
+    "prop-types": "^15.6.2",
+    "react": "^16.14.0",
+    "react-dom": "^16.14.0",
+    "react-height": "^3.0.0",
+    "react-json-view": "^1.21.1",
+    "react-redux": "<7.1.1",
+    "react-router": "5.2.0",
+    "react-router-dom": "5.2.0",
+    "react-scripts": "3.4.1",
+    "react-select": "3.1.0",
+    "react-test-renderer": "^16.14.0",
+    "redux": "^4.0.5",
+    "redux-immutable-state-invariant": "^2.1.0",
+    "redux-thunk": "^2.3.0",
+    "sockette": "^2.0.0",
+    "swagger-ui": "^3.20.1",
+    "xterm": "^4.12.0",
+    "xterm-addon-fit": "^0.5.0",
+    "xterm-addon-search": "^0.8.0",
+    "xterm-addon-web-links": "^0.4.0"
+  },
+  "resolutions": {
+    "formdata-node": "2.1.1",
+    "nanoid": "2.1.11"
+  },
+  "devDependencies": {
+    "customize-cra": "^1.0.0",
+    "eslint-plugin-jest": "^23.8.2",
+    "eslint-plugin-react": "^7.19.0",
+    "eslint-plugin-standard": "^4.0.1",
+    "react-app-rewired": "^2.2.1",
+    "react-app-rewired-esbuild": "^0.0.11",
+    "yarn": "^1.16.0"
+  },
+  "//": [
+    "Temporarily adding NODE_OPTIONS=--openssl-legacy-provider below",
+    "TODO: remove after upgrading js dependencies",
+    "node >= 18 is incompatible with webpack versions < 5.61",
+    "cf. https://github.com/webpack/webpack/issues/17805"
+  ],
+  "scripts": {
+    "start:opendev": "NODE_OPTIONS=--openssl-legacy-provider REACT_APP_ZUUL_API='https://zuul.opendev.org/api/' react-app-rewired start",
+    "start:openstack": "NODE_OPTIONS=--openssl-legacy-provider REACT_APP_ZUUL_API='https://zuul.openstack.org/api/' react-app-rewired start",
+    "start:multi": "NODE_OPTIONS=--openssl-legacy-provider REACT_APP_ZUUL_API='https://softwarefactory-project.io/zuul/api/' react-app-rewired start",
+    "start": "NODE_OPTIONS=--openssl-legacy-provider react-app-rewired start",
+    "build": "NODE_OPTIONS=--openssl-legacy-provider react-app-rewired --max_old_space_size=4096 build",
+    "test": "react-app-rewired test --env=jsdom --watchAll=false  --transformIgnorePatterns 'node_modules/(?!@softwarefactory-project)/' --transformIgnorePatterns 'node_modules/d3/'",
+    "eject": "react-scripts eject",
+    "lint": "eslint --ext .js --ext .jsx src",
+    "lint-fix": "eslint --ext .js --ext .jsx --fix src"
+  },
+  "browserslist": [
+    ">0.2%",
+    "not dead",
+    "not ie <= 11",
+    "not op_mini all"
+  ]
+}

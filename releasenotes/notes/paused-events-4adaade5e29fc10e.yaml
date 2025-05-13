@@ -1,0 +1,5 @@
+---
+features:
+  - |
+    Zuul now stores the pause and resume events for a build together with
+    their timestamp and reports them to the SQL database and via MQTT.

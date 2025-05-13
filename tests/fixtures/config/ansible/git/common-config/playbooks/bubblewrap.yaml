@@ -1,0 +1,12 @@
+- hosts: localhost
+  tasks:
+    - name: Verify that we are unable to write to a ro mount
+      shell: "cp {{ zuul.executor.inventory_file }} /bin/bubblewrap-test-failure"
+      ignore_errors: true
+      register: cp_result
+    - assert:
+        that:
+          - cp_result.rc == 1
+          - "'Read-only file system' in cp_result.stdout"
+    - name: Verify that we are able to write to a rw mount
+      shell: "cp {{ zuul.executor.inventory_file }} {{ zuul.executor.work_root }}/bubblewrap-test-success"

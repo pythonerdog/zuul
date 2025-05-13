@@ -1,0 +1,105 @@
+- pipeline:
+    name: check
+    manager: independent
+    trigger:
+      gerrit:
+        - event: patchset-created
+    success:
+      gerrit:
+        Verified: 1
+    failure:
+      gerrit:
+        Verified: -1
+
+- job:
+    name: base
+    parent: null
+    run: playbooks/base.yaml
+    nodeset:
+      nodes:
+        - label: ubuntu-xenial
+          name: controller
+    attribute-control:
+      requires: {final: true}
+      provides: {final: true}
+      tags: {final: true}
+      files: {final: true}
+      irrelevant-files: {final: true}
+      required-projects: {final: true}
+      vars: {final: true}
+      extra-vars: {final: true}
+      host-vars: {final: true}
+      group-vars: {final: true}
+      include-vars: {final: true}
+      dependencies: {final: true}
+      failure-output: {final: true}
+
+- job:
+    name: final-job
+
+- job:
+    name: test-requires
+    requires: foo
+
+- job:
+    name: test-provides
+    provides: foo
+
+- job:
+    name: test-tags
+    tags: ['foo']
+
+- job:
+    name: test-files
+    files: ['foo']
+
+- job:
+    name: test-irrelevant-files
+    irrelevant-files: ['foo']
+
+- job:
+    name: test-required-projects
+    required-projects: ['org/project1']
+
+- job:
+    name: test-vars
+    vars: {foo: bar}
+
+- job:
+    name: test-extra-vars
+    extra-vars: {foo: bar}
+
+- job:
+    name: test-host-vars
+    host-vars:
+      controller:
+        foo: bar
+
+- job:
+    name: test-group-vars
+    group-vars:
+      group:
+        foo: bar
+
+- job:
+    name: test-include-vars
+    include-vars: ['foo.yaml']
+
+- job:
+    name: test-dependencies
+    dependencies: ['final-job']
+
+- job:
+    name: test-failure-output
+    failure-output: foo
+
+- project:
+    name: org/project1
+    check:
+      jobs:
+        - final-job
+
+- project:
+    name: org/project2
+    check:
+      jobs: []

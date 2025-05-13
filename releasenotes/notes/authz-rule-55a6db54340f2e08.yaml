@@ -1,0 +1,24 @@
+---
+upgrade:
+  - |
+    In preparation for expanded access control features in the web
+    interface, and REST API, the ``admin-rule`` tenant configuration
+    object has been renamed to ``authorization-rule``.  When applied
+    to a tenant, the tenant attribute is still ``admin-rules`` since
+    it determines admin access to that tenant.  This change will allow
+    similar rules to be applied to non-admin level access in the
+    future.
+
+    Tenant configs should now follow this example:
+
+    .. code-block:: yaml
+
+       - authorization-rule:
+           name: example-rule
+       - tenant:
+           name: example-tenant
+           admin-rules:
+             - example-rule
+
+    The old form is still permitted for backwards compatability, but
+    will be removed in a later version of Zuul.

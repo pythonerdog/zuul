@@ -1,0 +1,98 @@
+/* Patternfly 4 migration:
+ * These are extracts from the original Patternfly 3 CSS rules which are
+ * overridden by some Patternfly 4 CSS wildcard expression. These expressions
+ * mostly affect the padding and margin of various HTML tags being set to 0.
+ *
+ * Those wildcard rules can be found in
+ * node_modules/@patternfly/react-core/dist/styles/base.css by searching for
+ * "[class*="pf-c-"]" (without quotes).
+ *
+ * To "restore" those original values, we can copy the overwritten parts from
+ * the original CSS rules and paste them here.
+ *
+ * This file should be save to delete after the transition is finished.
+ */
+
+.h1, .h2, .h3, h1, h2, h3, .pf-c-title {
+    margin-top: 20px;
+    margin-bottom: 10px;
+}
+
+pre {
+    padding: 9.5px;
+    margin: 0 0 10px;
+}
+
+p {
+    margin: 0 0 10px;
+}
+
+/** Global **/
+
+/* Overwrite a PF3 rule that sets a padding-top for the whole body. Most
+   probably because they placed the menu/navbar atop of the whole body. */
+.layout-pf.layout-pf-fixed body {
+    padding-top: 0;
+}
+
+/** Status page **/
+
+/* Correct line height for job result labels on status page due to larger
+   font size */
+span.zuul-job-result.label {
+    line-height: 0.7;
+}
+
+.zuul-job-result {
+    font-size: small;
+}
+
+/* Don't let the "row" class break the page layout */
+.zuul-status-content, .zuul-change-content {
+    margin-left: 0;
+    margin-right: 0;
+}
+
+/* Don't indent the jobs inside a change box */
+.zuul-status-content .list-group {
+    padding-left: 0;
+    margin-left: 0;
+}
+
+/* Avoid that the change boxes are stretched out (too much space in between) */
+.zuul-status-content table:not(:last-child) {
+    margin-bottom: 0;
+}
+
+/* Align the build status indicator (icon left of the change box) at the top */
+.zuul-build-status {
+    vertical-align: top;
+}
+
+/* Restore the menuitem styling */
+.zuul-status-content .pf-c-content ul[role="menu"] {
+    padding-left: 0;
+    list-style: none;
+}
+
+/* Avoid duplicated lines/borders for the job items on the status page */
+.zuul-status-content li+li {
+    margin-top: 0;
+}
+
+/* Restore padding values for the coluns on the status page */
+.col-lg-1, .col-lg-2, .col-lg-3, .col-lg-4,
+.col-lg-5, .col-lg-6, .col-lg-7, .col-lg-8,
+.col-lg-9, .col-lg-10, .col-lg-11, .col-lg-12,
+.col-md-1, .col-md-2, .col-md-3, .col-md-4,
+.col-md-5, .col-md-6, .col-md-7, .col-md-8,
+.col-md-9, .col-md-10, .col-md-11, .col-md-12,
+.col-sm-1, .col-sm-2, .col-sm-3, .col-sm-4,
+.col-sm-5, .col-sm-6, .col-sm-7, .col-sm-8,
+.col-sm-9, .col-sm-10, .col-sm-11, .col-sm-12,
+.col-xs-1, .col-xs-2, .col-xs-3, .col-xs-4,
+.col-xs-5, .col-xs-6, .col-xs-7, .col-xs-8,
+.col-xs-9, .col-xs-10, .col-xs-11, .col-xs-12 {
+    padding-right: 20px;
+    padding-left: 20px;
+}

@@ -1,0 +1,29 @@
+query repoProtectedBranches(
+  $owner: String!
+  $repo: String!
+  $cursor: String
+) {
+  repository(owner: $owner, name: $repo) {
+    branchProtectionRules(first: 100, after: $cursor) {
+      pageInfo {
+        endCursor
+        hasNextPage
+        hasPreviousPage
+      }
+      nodes {
+        id
+        lockBranch
+        matchingRefs(first: 100) {
+          pageInfo {
+            endCursor
+            hasNextPage
+            hasPreviousPage
+          }
+          nodes {
+            name
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,11 @@
+- hosts: all
+  tasks:
+    - debug:
+        msg: "TESTJOB SUB: {{ sub }}"
+    - debug:
+        msg: "TESTJOB LATESUB: {{ latesub }}"
+    - debug:
+        msg: "TESTJOB LATESUB UNSAFE: {{ unsafe_vars.latesub }}"
+    - debug:
+        msg: "TESTJOB SECRET: {{ project_secret.secretsub }}"
+      when: project_secret is defined

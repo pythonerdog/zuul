@@ -1,0 +1,28 @@
+- pipeline:
+    name: gate-merge
+    manager: dependent
+    trigger:
+      gitlab:
+        - event: gl_merge_request
+          action:
+            - opened
+            - changed
+    success:
+      gitlab:
+        merge: true
+
+- job:
+    name: base
+    parent: null
+    run: playbooks/base.yaml
+
+- job:
+    name: project-test
+    run: playbooks/project-test.yaml
+
+- project:
+    name: org/project1
+    merge-mode: squash-merge
+    gate-merge:
+      jobs:
+        - project-test

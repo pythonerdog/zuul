@@ -1,0 +1,7 @@
+---
+features:
+  - |
+    The `cherry-pick` merger mode can now handle merges between branches by
+    performing a `git merge` instead of `git cherry-pick` if the change has
+    multiple parents. Previously, this would fail because git doesn't allow
+    a merge to be cherry-picked.

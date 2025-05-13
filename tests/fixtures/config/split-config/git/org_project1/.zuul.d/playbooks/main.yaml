@@ -1,0 +1,8 @@
+# This is a playbook in the configuration directory which should be
+# ignored because the directory has a .zuul.ignore
+- hosts: all
+  tasks:
+
+    - name: foo
+      debug:
+        msg: blah

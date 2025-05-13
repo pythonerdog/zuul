@@ -1,0 +1,25 @@
+- job:
+    parent: base
+    name: file-comments
+    run: playbooks/file-comments.yaml
+    files: README
+
+- job:
+    parent: base
+    name: file-comments-error
+    run: playbooks/file-comments-error.yaml
+    files: README
+
+- job:
+    parent: base
+    name: file-comments-big
+    run: playbooks/file-comments-big.yaml
+    files: bigfile
+
+- project:
+    name: org/project
+    check:
+      jobs:
+        - file-comments
+        - file-comments-error
+        - file-comments-big

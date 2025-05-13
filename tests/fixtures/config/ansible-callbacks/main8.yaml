@@ -1,0 +1,7 @@
+- tenant:
+    name: tenant-one
+    default-ansible-version: '8'
+    source:
+      gerrit:
+        config-projects:
+          - common-config

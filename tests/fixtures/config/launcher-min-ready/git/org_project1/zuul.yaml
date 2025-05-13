@@ -1,0 +1,26 @@
+- label:
+    name: debian-emea
+    image: debian
+    flavor: normal
+    min-ready: 1
+    max-ready-age: 900
+
+- provider:
+    name: aws-eu-central-1-main
+    section: aws-eu-central-1
+    labels:
+      - name: debian-emea
+
+- provider:
+    name: aws-ca-central-1-main
+    section: aws-ca-central-1
+    labels:
+      - name: debian-normal
+
+- project:
+    check:
+      jobs:
+        - check-job
+    gate:
+      jobs:
+        - check-job

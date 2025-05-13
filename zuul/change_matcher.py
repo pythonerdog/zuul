@@ -1,4 +1,5 @@
 # Copyright 2015 Red Hat, Inc.
+# Copyright 2023 Acme Gating, LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may
 # not use this file except in compliance with the License. You may obtain
@@ -17,14 +18,24 @@ This module defines classes used in matching changes based on job
 configuration.
 """
 
-import re
+import json
+
+from zuul.lib.re2util import ZuulRegex
+
+COMMIT_MSG = '/COMMIT_MSG'
 
 
 class AbstractChangeMatcher(object):
+    """An abstract class that matches change attributes against regular
+    expressions
+
+    :arg ZuulRegex regex: A Zuul regular expression object to match
+
+    """
 
     def __init__(self, regex):
-        self._regex = regex
-        self.regex = re.compile(regex)
+        self._regex = regex.pattern
+        self.regex = regex
 
     def matches(self, change):
         """Return a boolean indication of whether change matches
@@ -33,16 +44,20 @@ class AbstractChangeMatcher(object):
         raise NotImplementedError()
 
     def copy(self):
-        return self.__class__(self._regex)
+        return self.__class__(self.regex)
 
     def __deepcopy__(self, memo):
         return self.copy()
 
     def __eq__(self, other):
-        return str(self) == str(other)
+        return (self.__class__ == other.__class__ and
+                self.regex == other.regex)
 
     def __ne__(self, other):
         return not self.__eq__(other)
+
+    def __hash__(self):
+        return hash(json.dumps(self.regex.toDict(), sort_keys=True))
 
     def __str__(self):
         return '{%s:%s}' % (self.__class__.__name__, self._regex)
@@ -58,40 +73,50 @@ class ProjectMatcher(AbstractChangeMatcher):
 
 
 class BranchMatcher(AbstractChangeMatcher):
+    exactmatch = False
 
     def matches(self, change):
         if hasattr(change, 'branch'):
-            if self.regex.match(change.branch):
-                return True
+            # an implied branch matcher must do a fullmatch to work correctly
+            if self.exactmatch:
+                if self._regex == change.branch:
+                    return True
+            else:
+                if self.regex.match(change.branch):
+                    return True
             return False
         if self.regex.match(change.ref):
             return True
+        if hasattr(change, 'containing_branches'):
+            for branch in change.containing_branches:
+                if self.exactmatch:
+                    if self._regex == branch:
+                        return True
+                else:
+                    if self.regex.match(branch):
+                        return True
         return False
 
+    def serialize(self):
+        return {
+            "implied": self.exactmatch,
+            "regex": self.regex.serialize(),
+        }
 
-class ImpliedBranchMatcher(AbstractChangeMatcher):
-    """
-    A branch matcher that only considers branch refs, and always
-    succeeds on other types (e.g., tags).
-    """
+    @classmethod
+    def deserialize(cls, data):
+        regex = ZuulRegex.deserialize(data['regex'])
+        o = cls(regex)
+        return o
 
-    def matches(self, change):
-        if hasattr(change, 'branch'):
-            if self.regex.match(change.branch):
-                return True
-            return False
-        return True
+
+class ImpliedBranchMatcher(BranchMatcher):
+    exactmatch = True
 
 
 class FileMatcher(AbstractChangeMatcher):
 
-    def matches(self, change):
-        if not hasattr(change, 'files'):
-            return False
-        for file_ in change.files:
-            if self.regex.match(file_):
-                return True
-        return False
+    pass
 
 
 class AbstractMatcherCollection(AbstractChangeMatcher):
@@ -107,28 +132,32 @@ class AbstractMatcherCollection(AbstractChangeMatcher):
                             ','.join([str(x) for x in self.matchers]))
 
     def __repr__(self):
-        return '<%s>' % self.__class__.__name__
+        return '<%s [%s]>' % (self.__class__.__name__,
+                              ', '.join([repr(x) for x in self.matchers]))
 
     def copy(self):
         return self.__class__(self.matchers[:])
 
 
-class MatchAllFiles(AbstractMatcherCollection):
-
-    commit_regex = re.compile('^/COMMIT_MSG$')
+class AbstractMatchFiles(AbstractMatcherCollection):
 
     @property
     def regexes(self):
         for matcher in self.matchers:
             yield matcher.regex
-        yield self.commit_regex
+
+
+class MatchAllFiles(AbstractMatchFiles):
 
     def matches(self, change):
-        if not (hasattr(change, 'files') and change.files):
+        # NOTE(yoctozepto): make irrelevant files matcher match when
+        # there are no files to check - return False (NB: reversed)
+        if not hasattr(change, 'files'):
             return False
-        if len(change.files) == 1 and self.commit_regex.match(change.files[0]):
+        files = [c for c in change.files if c != COMMIT_MSG]
+        if not files:
             return False
-        for file_ in change.files:
+        for file_ in files:
             matched_file = False
             for regex in self.regexes:
                 if regex.match(file_):
@@ -137,6 +166,23 @@ class MatchAllFiles(AbstractMatcherCollection):
             if not matched_file:
                 return False
         return True
+
+
+class MatchAnyFiles(AbstractMatchFiles):
+
+    def matches(self, change):
+        # NOTE(yoctozepto): make files matcher match when
+        # there are no files to check - return True
+        if not hasattr(change, 'files'):
+            return True
+        files = [c for c in change.files if c != COMMIT_MSG]
+        if not files:
+            return True
+        for file_ in files:
+            for regex in self.regexes:
+                if regex.match(file_):
+                    return True
+        return False
 
 
 class MatchAll(AbstractMatcherCollection):

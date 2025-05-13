@@ -1,0 +1,7 @@
+---
+fixes:
+  - |
+    The `labels` pipeline requirement in the `gitlab` driver erroneously treated
+    the labels as a boolean `or` but should have treated them as a boolean `and`
+    (i.e., all listed labels are required).
+    The behavior has been updated to match the documentation and other drivers.

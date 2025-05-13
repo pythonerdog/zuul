@@ -17,7 +17,7 @@ import logging
 import voluptuous as v
 from zuul.trigger import BaseTrigger
 from zuul.driver.zuul.zuulmodel import ZuulEventFilter
-from zuul.driver.util import scalar_or_list, to_list
+from zuul.driver.util import scalar_or_list, to_list, make_regex, ZUUL_REGEX
 
 
 class ZuulTrigger(BaseTrigger):
@@ -29,13 +29,22 @@ class ZuulTrigger(BaseTrigger):
         self._handle_parent_change_enqueued_events = False
         self._handle_project_change_merged_events = False
 
-    def getEventFilters(self, trigger_conf):
+    def getEventFilters(self, connection_name, trigger_conf,
+                        parse_context):
         efilters = []
+        pcontext = parse_context
         for trigger in to_list(trigger_conf):
+            with pcontext.confAttr(trigger, 'event') as attr:
+                types = [make_regex(x, pcontext)
+                         for x in to_list(attr)]
+            with pcontext.confAttr(trigger, 'pipeline') as attr:
+                pipelines = [make_regex(x, pcontext)
+                             for x in to_list(attr)]
             f = ZuulEventFilter(
+                connection_name=connection_name,
                 trigger=self,
-                types=to_list(trigger['event']),
-                pipelines=to_list(trigger.get('pipeline')),
+                types=types,
+                pipelines=pipelines,
             )
             efilters.append(f)
 
@@ -45,9 +54,13 @@ class ZuulTrigger(BaseTrigger):
 def getSchema():
     zuul_trigger = {
         v.Required('event'):
-        scalar_or_list(v.Any('parent-change-enqueued',
-                             'project-change-merged')),
-        'pipeline': scalar_or_list(str),
+        scalar_or_list(v.Any(
+            'parent-change-enqueued',
+            'project-change-merged',
+            'image-build',
+            'image-validate',
+        )),
+        'pipeline': scalar_or_list(v.Any(ZUUL_REGEX, str)),
     }
 
     return zuul_trigger

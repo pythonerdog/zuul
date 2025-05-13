@@ -1,4 +1,5 @@
 # Copyright 2015 Rackspace Australia
+# Copyright 2024 Acme Gating, LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may
 # not use this file except in compliance with the License. You may obtain
@@ -13,10 +14,22 @@
 # under the License.
 
 import datetime
+import json
 import logging
+import time
 import voluptuous as v
 
+import sqlalchemy.exc
+
+from zuul.driver.sql.sqlconnection import SQL_MAX_STRING_LENGTH
+from zuul.exceptions import MissingBuildsetError
+from zuul.lib.result_data import get_artifacts_from_result_data
 from zuul.reporter import BaseReporter
+
+
+DATA_LENGTH_ERROR = """
+%s's length exceeds DB storage capacity.
+Original value: %s"""
 
 
 class SQLReporter(BaseReporter):
@@ -24,73 +37,251 @@ class SQLReporter(BaseReporter):
 
     name = 'sql'
     log = logging.getLogger("zuul.SQLReporter")
+    retry_count = 3
+    retry_delay = 5
 
-    def report(self, item):
-        """Create an entry into a database."""
+    def _getBuildData(self, item, job, build):
+        (result, _) = item.formatJobResult(job, build)
+        start = end = None
+        if build.start_time:
+            start = datetime.datetime.fromtimestamp(
+                build.start_time,
+                tz=datetime.timezone.utc)
+        if build.end_time:
+            end = datetime.datetime.fromtimestamp(
+                build.end_time,
+                tz=datetime.timezone.utc)
+        return result, build.log_url, start, end
 
-        if not self.connection.tables_established:
-            self.log.warn("SQL reporter (%s) is disabled " % self)
+    def _createBuildset(self, db, buildset):
+        event_id = None
+        event_timestamp = None
+        item = buildset.item
+        if item.event is not None:
+            event_id = getattr(item.event, "zuul_event_id", None)
+            event_timestamp = datetime.datetime.fromtimestamp(
+                item.event.timestamp, tz=datetime.timezone.utc)
+
+        db_buildset = db.createBuildSet(
+            uuid=buildset.uuid,
+            tenant=item.manager.tenant.name,
+            pipeline=item.manager.pipeline.name,
+            event_id=event_id,
+            event_timestamp=event_timestamp,
+            updated=datetime.datetime.utcnow(),
+        )
+        for change in item.changes:
+            ref = db.getOrCreateRef(
+                project=change.project.name,
+                change=getattr(change, 'number', None),
+                patchset=getattr(change, 'patchset', None),
+                ref_url=change.url,
+                ref=getattr(change, 'ref', ''),
+                oldrev=getattr(change, 'oldrev', ''),
+                newrev=getattr(change, 'newrev', ''),
+                branch=getattr(change, 'branch', ''),
+            )
+            db_buildset.refs.append(ref)
+        event_change = item.getEventChange()
+        if event_change:
+            db_buildset.createBuildSetEvent(
+                event_time=datetime.datetime.fromtimestamp(
+                    item.event.timestamp, tz=datetime.timezone.utc),
+                event_type='triggered',
+                description=f'Triggered by {event_change.toString()}',
+            )
+        return db_buildset
+
+    def reportBuildsetStart(self, buildset):
+        """Create the initial buildset entry in the db"""
+        if not buildset.uuid:
             return
 
-        with self.connection.engine.begin() as conn:
-            change = getattr(item.change, 'number', None)
-            patchset = getattr(item.change, 'patchset', None)
-            ref = getattr(item.change, 'ref', '')
-            oldrev = getattr(item.change, 'oldrev', '')
-            newrev = getattr(item.change, 'newrev', '')
-            branch = getattr(item.change, 'branch', '')
-            buildset_ins = self.connection.zuul_buildset_table.insert().values(
-                zuul_ref=item.current_build_set.ref,
-                pipeline=item.pipeline.name,
-                project=item.change.project.name,
-                change=change,
-                patchset=patchset,
-                ref=ref,
-                oldrev=oldrev,
-                newrev=newrev,
-                ref_url=item.change.url,
-                result=item.current_build_set.result,
-                message=self._formatItemReport(
-                    item, with_jobs=False),
-                tenant=item.pipeline.tenant.name,
-                branch=branch,
-            )
-            buildset_ins_result = conn.execute(buildset_ins)
-            build_inserts = []
+        for retry_count in range(self.retry_count):
+            try:
+                with self.connection.getSession() as db:
+                    return self._createBuildset(db, buildset)
+            except sqlalchemy.exc.DBAPIError:
+                if retry_count < self.retry_count - 1:
+                    self.log.error("Unable to create buildset, will retry")
+                    time.sleep(self.retry_delay)
+                else:
+                    self.log.exception("Unable to create buildset")
 
-            for job in item.getJobs():
-                build = item.current_build_set.getBuild(job.name)
-                if not build:
-                    # build hasn't began. The sql reporter can only send back
-                    # stats about builds. It doesn't understand how to store
-                    # information about the change.
-                    continue
+    def reportBuildsetEnd(self, buildset, action, final, result=None):
+        if not buildset.uuid:
+            return
+        if final:
+            message = self._formatItemReport(
+                buildset.item, with_jobs=False, action=action)
+        else:
+            message = None
+        for retry_count in range(self.retry_count):
+            try:
+                with self.connection.getSession() as db:
+                    db_buildset = db.getBuildset(
+                        tenant=buildset.item.manager.tenant.name,
+                        uuid=buildset.uuid)
+                    if not db_buildset:
+                        db_buildset = self._createBuildset(db, buildset)
+                    db_buildset.result = buildset.result or result
+                    db_buildset.message = message
+                    end_time = db_buildset.first_build_start_time
+                    for build in db_buildset.builds:
+                        if (build.end_time and end_time
+                            and build.end_time > end_time):
+                            end_time = build.end_time
+                    db_buildset.last_build_end_time = end_time
+                    db_buildset.updated = datetime.datetime.utcnow()
+                    return
+            except sqlalchemy.exc.DBAPIError:
+                if retry_count < self.retry_count - 1:
+                    self.log.error("Unable to update buildset, will retry")
+                    time.sleep(self.retry_delay)
+                else:
+                    self.log.exception("Unable to update buildset")
 
-                (result, url) = item.formatJobResult(job)
+    def reportBuildStart(self, build):
+        for retry_count in range(self.retry_count):
+            try:
+                with self.connection.getSession() as db:
+                    db_build = self._createBuild(db, build)
+                    return db_build
+            except sqlalchemy.exc.DBAPIError:
+                if retry_count < self.retry_count - 1:
+                    self.log.error("Unable to create build, will retry")
+                    time.sleep(self.retry_delay)
+                else:
+                    self.log.exception("Unable to create build")
 
-                start = end = None
-                if build.start_time:
-                    start = datetime.datetime.fromtimestamp(
-                        build.start_time,
-                        tz=datetime.timezone.utc)
-                if build.end_time:
-                    end = datetime.datetime.fromtimestamp(
-                        build.end_time,
-                        tz=datetime.timezone.utc)
+    def reportBuildEnd(self, build, tenant, final):
+        return self.reportBuildEnds([build], tenant, final)
 
-                build_inserts.append({
-                    'buildset_id': buildset_ins_result.inserted_primary_key[0],
-                    'uuid': build.uuid,
-                    'job_name': build.job.name,
-                    'result': result,
-                    'start_time': start,
-                    'end_time': end,
-                    'voting': build.job.voting,
-                    'log_url': url,
-                    'node_name': build.node_name,
-                })
-            conn.execute(self.connection.zuul_build_table.insert(),
-                         build_inserts)
+    def reportBuildEnds(self, builds, tenant, final):
+        for retry_count in range(self.retry_count):
+            try:
+                with self.connection.getSession() as db:
+                    buildset = builds[0].build_set
+                    try:
+                        db_buildset = self._getBuildset(db, builds[0])
+                    except MissingBuildsetError:
+                        # let _createBuild handle if necessary
+                        pass
+                    for build in builds:
+                        if build.build_set is not buildset:
+                            raise Exception("All batch reported builds "
+                                            "must be for the same buildset")
+                        self._reportBuildEnd(
+                            db, db_buildset, build, tenant, final)
+                # Exit retry loop
+                return
+            except sqlalchemy.exc.DBAPIError:
+                if retry_count < self.retry_count - 1:
+                    self.log.error("Unable to update build, will retry")
+                    time.sleep(self.retry_delay)
+                else:
+                    self.log.exception("Unable to update build")
+
+    def _reportBuildEnd(self, db, db_buildset, build, tenant, final):
+        db_build = db.getBuild(tenant=tenant, uuid=build.uuid)
+        if not db_build:
+            db_build = self._createBuild(db, build, db_buildset=db_buildset)
+        end_time = build.end_time or time.time()
+        end = datetime.datetime.fromtimestamp(
+            end_time, tz=datetime.timezone.utc)
+
+        db_build.result = build.result
+        db_build.end_time = end
+        db_build.error_detail = build.error_detail
+        db_build.log_url = build.log_url
+        if build.log_url is not None:
+            if len(build.log_url) >= SQL_MAX_STRING_LENGTH:
+                db_build.log_url = None
+                if db_build.error_detail is not None:
+                    db_build.error_detail += (
+                        DATA_LENGTH_ERROR % ("log URL", build.log_url)
+                    )
+                else:
+                    db_build.error_detail = (
+                        DATA_LENGTH_ERROR % ("log URL", build.log_url)
+                    )
+        db_build.final = final
+        db_build.held = build.held
+
+        for provides in build.job.provides:
+            db_build.createProvides(name=provides)
+
+        for artifact in get_artifacts_from_result_data(
+                build.result_data,
+                logger=self.log):
+            if 'metadata' in artifact:
+                artifact['metadata'] = json.dumps(
+                    artifact['metadata'])
+            db_build.createArtifact(**artifact)
+
+        for event in build.events:
+            # Reformat the event_time so it's compatible to SQL.
+            # Don't update the event object in place, but only
+            # the generated dict representation to not alter the
+            # datastructure for other reporters.
+            ev = event.toDict()
+            ev["event_time"] = datetime.datetime.fromtimestamp(
+                event.event_time, tz=datetime.timezone.utc)
+            db_build.createBuildEvent(**ev)
+        return db_build
+
+    def _getBuildset(self, db, build):
+        buildset = build.build_set
+        if not buildset:
+            return None
+        db_buildset = db.getBuildset(
+            tenant=buildset.item.manager.tenant.name, uuid=buildset.uuid)
+        if not db_buildset:
+            self.log.warning("Creating missing buildset %s", buildset.uuid)
+            db_buildset = self._createBuildset(db, buildset)
+        return db_buildset
+
+    def _createBuild(self, db, build, db_buildset=None):
+        start_time = build.start_time or time.time()
+        start = datetime.datetime.fromtimestamp(start_time,
+                                                tz=datetime.timezone.utc)
+        if db_buildset is None:
+            db_buildset = self._getBuildset(db, build)
+        if db_buildset is None:
+            raise MissingBuildsetError()
+        if db_buildset.first_build_start_time is None:
+            db_buildset.first_build_start_time = start
+        item = build.build_set.item
+        change = item.getChangeForJob(build.job)
+        ref = db.getOrCreateRef(
+            project=change.project.name,
+            change=getattr(change, 'number', None),
+            patchset=getattr(change, 'patchset', None),
+            ref_url=change.url,
+            ref=getattr(change, 'ref', ''),
+            oldrev=getattr(change, 'oldrev', ''),
+            newrev=getattr(change, 'newrev', ''),
+            branch=getattr(change, 'branch', ''),
+        )
+
+        db_build = db_buildset.createBuild(
+            ref=ref,
+            uuid=build.uuid,
+            job_name=build.job.name,
+            start_time=start,
+            voting=build.job.voting,
+            nodeset=build.job.nodeset.name,
+        )
+        return db_build
+
+    def getBuilds(self, *args, **kw):
+        """Return a list of Build objects"""
+        return self.connection.getBuilds(*args, **kw)
+
+    def report(self, item):
+        # We're not a real reporter, but we use _formatItemReport, so
+        # we inherit from the reporters.
+        raise NotImplementedError()
 
 
 def getSchema():

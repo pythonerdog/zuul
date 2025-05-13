@@ -1,0 +1,6 @@
+---
+upgrade:
+  - |
+    Ansible version 8 is now deprecated in Zuul since it is
+    unmaintaned, and it will be removed from a future version of
+    Zuul. Ansible 9 is now the default version in Zuul.

@@ -1,0 +1,5 @@
+---
+features:
+  - |
+    A job now can leave warning messages on the change using zuul_return.
+    See :ref:`return_values` for examples.

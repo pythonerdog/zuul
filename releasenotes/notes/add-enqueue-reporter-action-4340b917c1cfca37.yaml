@@ -1,0 +1,5 @@
+---
+features:
+  - |
+    Added the :attr:`pipeline.enqueue` reporter action so that
+    reporters may be run when an item is enqueued into a pipeline.

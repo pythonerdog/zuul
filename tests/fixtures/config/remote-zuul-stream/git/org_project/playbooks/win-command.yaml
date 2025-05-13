@@ -1,0 +1,183 @@
+- hosts: localhost
+  tasks:
+    - debug:
+        msg: Ansible version={{ ansible_version.major }}.{{ ansible_version.minor }}
+
+- hosts: all
+  tasks:
+    # This is a noop to make the task numbers line up with the console job.
+    - name: "Noop"
+      debug:
+        msg: noop
+      run_once: True
+
+    - name: Start zuul_console daemon
+      win_zuul_console:
+        port: "{{ test_console_port }}"
+
+    # This is checked in indexed JSON output so order is important
+    - name: Output stream test
+      win_shell: |
+        echo "Standard output test {{ zuul.executor.src_root }}"
+        [Console]::Error.WriteLine("Standard error test {{ zuul.executor.src_root }}")
+
+    - name: Create first file
+      win_copy:
+        content: "command test one\n"
+        dest: "{{ ansible_user_dir }}/command_test_file1"
+    - name: Create second file
+      win_copy:
+        content: "command test two\n"
+        dest: "{{ ansible_user_dir }}/command_test_file2"
+    - name: Show contents of first file
+      win_command: "cmd /c type {{ ansible_user_dir }}\\command_test_file1"
+    - name: Show contents of second file
+      # We use a sleep here to ensure that we log even after
+      # a period of no logging.
+      win_shell: "sleep 6; cat {{ ansible_user_dir }}/command_test_file2"
+
+    # Test a task with a handler
+    - name: Run a command with notifying a handler
+      win_command: "cmd /c exit 0"
+      notify: test handler
+
+    # Test cleanup task
+    - name: Block with cleanup
+      block:
+        - name: Run a command
+          win_command: "cmd /c exit 1"
+      rescue:
+        - name: Rescue task
+          win_command: 'cmd /c echo This is a rescue task'
+      always:
+        - name: Always task
+          win_command: 'cmd /c echo This is an always task'
+
+    - name: Skip command task
+      win_command: "cmd /c exit 0"
+      when: false
+
+    - name: Skip command task loop
+      win_command: "cmd /c exit 0"
+      when: false
+      with_items:
+        - failed_in_loop1
+        - failed_in_loop2
+
+    - name: Set testfile path name for later test
+      set_fact:
+        testfile: "{{ ansible_user_dir }}\\testfile-{{ zuul.build }}"
+
+  handlers:
+    - name: test handler
+      win_command: 'cmd /c echo This is a handler'
+
+- hosts: all
+  strategy: free
+  tasks:
+    - name: Command task 1 within free strategy
+      win_command: 'cmd /c echo First free task'
+    - name: Command task 2 within free strategy
+      win_command: 'cmd /c echo Second free task'
+
+# Test a role that has an include_role
+- hosts: all
+  strategy: linear
+  roles:
+    - win-include-a-role
+
+- hosts: compute1
+  tasks:
+    - name: Single command
+      win_command: 'cmd /c echo single'
+    # Test commands within loops
+    - name: Command with loop
+      win_shell: |
+        echo {{ item }}
+      with_items:
+        - item_in_loop1
+        - item_in_loop2
+    - name: Failing command with loop
+      win_shell: |
+        echo {{ item }}
+        exit 1
+      with_items:
+        - failed_in_loop1
+        - failed_in_loop2
+      ignore_errors: True
+    - name: Creates file that does not exist
+      win_command: 'cmd /c "echo foo > {{ testfile }}"'
+      args:
+        creates: "{{ testfile }}"
+    - name: Creates file that already exists
+      win_command: 'cmd /c "echo foo > {{ testfile }}"'
+      args:
+        creates: "{{ testfile }}"
+
+# Try transitive includes two different ways
+- hosts: compute1
+  tasks:
+    - include_role:
+        name: win-include-echo-role
+      vars:
+        item: transitive-one
+    - include_role:
+        name: win-include-echo-role
+      vars:
+        item: transitive-two
+
+- hosts: compute1
+  roles:
+    - role: win-include-echo-role
+      item: transitive-three
+    - role: win-include-echo-role
+      item: transitive-four
+
+- hosts: compute1
+  tasks:
+    - name: Command Not Found
+      win_command: command-not-found
+      failed_when: false
+
+- hosts: compute1
+  tasks:
+
+    - name: Debug raw variable in msg
+      debug:
+        msg: '{{ ansible_version }}'
+
+    - name: Debug raw variable in a loop
+      debug:
+        msg: '{{ ansible_version }}'
+      loop:
+        - 1
+        - 2
+
+- hosts: all
+  tasks:
+    - name: Clean up tmpfile
+      win_file:
+        path: "{{ testfile }}"
+        state: absent
+      # win_file may not be idempotent
+      failed_when: false
+    # Test large output
+    - name: Output 70KB each to stdout and stderr
+      # We use print (as opposed to write) so this uses buffered
+      # output in order to encourage a deadlock.
+      win_shell: python -c "import sys; print('x' * 70000, file=sys.stdout); print('x' * 70000, file=sys.stderr)"
+
+- hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Add a fake host
+      add_host:
+        hostname: fake
+        ansible_host: notexisting.example.notexisting
+
+- hosts: fake
+  gather_facts: no
+  tasks:
+    - name: Skip a command on an unreachable host
+      win_command: cmd /c echo nope
+      when: false

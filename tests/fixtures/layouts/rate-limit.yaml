@@ -23,6 +23,7 @@
     window-increase-factor: 1
     window-decrease-type: exponential
     window-decrease-factor: 2
+    window-ceiling: 2
 
 - job:
     name: base

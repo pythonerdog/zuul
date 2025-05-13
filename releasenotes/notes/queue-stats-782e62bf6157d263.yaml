@@ -1,0 +1,6 @@
+---
+features:
+  - |
+    Additional pipeline stats for individual project queues are
+    available at
+    :stat:`zuul.tenant.<tenant>.pipeline.<pipeline>.queue`.

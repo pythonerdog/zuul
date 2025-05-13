@@ -10,8 +10,8 @@
 
 - project:
     name: ^.*$
+    queue: integrated
     gate:
-      queue: integrated
       jobs:
         - base
 

@@ -1,0 +1,12 @@
+---
+features:
+  - |
+    The Github driver now has a basic support for the Github checks API.
+    To enable reporting build results via the checks API one can configure the
+    the new :attr:`pipeline.<reporter>.<github source>.check` attribute on the
+    Github reporter. It's also possible to trigger on a requested or completed
+    :value:`pipeline.trigger.<github source>.event.check_run`.
+
+    To be able to use the checks API, zuul must be authenticated as Github
+    app. For more information about the necessary requirements, please see
+    the :ref:`github_driver` driver documentation.

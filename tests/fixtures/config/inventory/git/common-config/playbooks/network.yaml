@@ -1,0 +1,9 @@
+- hosts: controller
+  tasks:
+    # This verifies that even though we don't have other frozen vars
+    # (since we can't connect to it), we do still have the nodepool
+    # hostvars for the appliance.
+    - name: Use the nodepool hostvars for the appliance
+      debug:
+        msg: "ssh admin@{{ hostvars[item].nodepool.public_ipv4 }}"
+      with_inventory_hostnames: appliance

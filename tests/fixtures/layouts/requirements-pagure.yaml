@@ -1,0 +1,146 @@
+- pipeline:
+    name: req-score-1
+    manager: independent
+    require:
+      pagure:
+        score: 1
+    trigger:
+      pagure:
+        - event: pg_pull_request_review
+          action: thumbsup
+    success:
+      pagure:
+        status: 'success'
+
+- pipeline:
+    name: req-score-2
+    manager: independent
+    require:
+      pagure:
+        score: 2
+    trigger:
+      pagure:
+        - event: pg_pull_request_review
+          action: thumbsup
+    success:
+      pagure:
+        status: 'success'
+
+- pipeline:
+    name: trigger-flag
+    manager: independent
+    trigger:
+      pagure:
+        - event: pg_pull_request
+          action: status
+          status: success
+    success:
+      pagure:
+        status: 'success'
+
+- pipeline:
+    name: trigger-tag
+    manager: independent
+    trigger:
+      pagure:
+        - event: pg_pull_request
+          action: tagged
+          tag:
+            - gateit
+            - mergeit
+    success:
+      pagure:
+        status: 'success'
+
+- pipeline:
+    name: require-tag
+    manager: independent
+    require:
+      pagure:
+        tags: gateit
+    trigger:
+      pagure:
+        - event: pg_pull_request
+          action: changed
+    success:
+      pagure:
+        status: 'success'
+
+- pipeline:
+    name: require-flag
+    manager: independent
+    require:
+      pagure:
+        status: success
+    trigger:
+      pagure:
+        - event: pg_pull_request
+          action: status
+          status: success
+
+- pipeline:
+    name: require-trigger-pg-closed-merged
+    precedence: high
+    manager: independent
+    require:
+      pagure:
+        merged: True
+        open: False
+    trigger:
+       pagure:
+         - event: pg_pull_request
+           action: closed
+    success:
+      pagure:
+        comment: true
+
+- job:
+    name: base
+    parent: null
+    run: playbooks/base.yaml
+
+- job:
+    name: project-test
+    run: playbooks/project-test.yaml
+
+- project:
+    name: org/project1
+    req-score-1:
+      jobs:
+        - project-test
+
+- project:
+    name: org/project2
+    req-score-2:
+      jobs:
+        - project-test
+
+- project:
+    name: org/project3
+    trigger-flag:
+      jobs:
+        - project-test
+
+- project:
+    name: org/project4
+    trigger-tag:
+      jobs:
+        - project-test
+
+- project:
+    name: org/project5
+    require-tag:
+      jobs:
+        - project-test
+
+- project:
+    name: org/project6
+    require-trigger-pg-closed-merged:
+      jobs:
+        - project-test
+
+- project:
+    name: org/project7
+    require-flag:
+      jobs:
+        - project-test

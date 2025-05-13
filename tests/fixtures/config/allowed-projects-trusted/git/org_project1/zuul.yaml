@@ -1,0 +1,13 @@
+- secret:
+    name: project1_secret
+    data: {}
+
+- job:
+    name: test-project1
+    secrets: project1_secret
+
+- project:
+    name: org/project1
+    check:
+      jobs:
+        - test-project1

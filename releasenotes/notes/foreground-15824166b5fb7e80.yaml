@@ -1,0 +1,5 @@
+---
+upgrade:
+  - |
+    The -d switch doesn't enforce foreground anymore. It only enables debug
+    logging. To start zuul in foreground please add the -f switch instead.

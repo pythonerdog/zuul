@@ -1,0 +1,22 @@
+- authorization-rule:
+    name: auth-rule-one
+    conditions:
+      - sub: venkman
+      - sub: zeddemore
+- authorization-rule:
+    name: auth-rule-two
+    conditions:
+      - sub: gozer
+        iss: another_dimension
+- tenant:
+    name: tenant-one
+    admin-rules:
+      - auth-rule-one
+      - auth-rule-two
+    source:
+      gerrit:
+        config-projects:
+          - common-config
+        untrusted-projects:
+          - org/project1
+          - org/project2

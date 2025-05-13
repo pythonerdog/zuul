@@ -1,0 +1,17 @@
+- authorization-rule:
+    name: user-rule
+    conditions:
+      - groups: users
+
+- api-root:
+    access-rules: user-rule
+
+- tenant:
+    name: tenant-one
+    access-rules: user-rule
+    source:
+      gerrit:
+        config-projects:
+          - common-config
+        untrusted-projects:
+          - org/project

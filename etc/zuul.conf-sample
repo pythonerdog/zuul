@@ -1,9 +1,5 @@
-[gearman]
-server=127.0.0.1
-;port=4730
-;ssl_ca=/path/to/ca.pem
-;ssl_cert=/path/to/client.pem
-;ssl_key=/path/to/client.key
+[database]
+dburi=mysql+pymysql://user@localhost/zuul
 
 [statsd]
 server=127.0.0.1
@@ -11,34 +7,49 @@ server=127.0.0.1
 [zookeeper]
 hosts=127.0.0.1:2181
 
-[gearman_server]
-start=true
-;ssl_ca=/path/to/ca.pem
-;ssl_cert=/path/to/server.pem
-;ssl_key=/path/to/server.key
-;port=4730
+[keystore]
+password=secret
 
 [scheduler]
 tenant_config=/etc/zuul/main.yaml
 log_config=/etc/zuul/logging.conf
 pidfile=/var/run/zuul/zuul.pid
-state_dir=/var/lib/zuul
+prometheus_port=9091
+;prometheus_addr=0.0.0.0
 
 [merger]
 git_dir=/var/lib/zuul/git
 ;git_user_email=zuul@example.com
 ;git_user_name=zuul
+prometheus_port=9092
 
 [executor]
 default_username=zuul
 trusted_ro_paths=/opt/zuul-scripts:/var/cache
 trusted_rw_paths=/opt/zuul-logs
+prometheus_port=9093
 
 [web]
 listen_address=127.0.0.1
 port=9000
 static_cache_expiry=0
-status_url=https://zuul.example.com/status
+root=https://zuul.example.com/
+prometheus_port=9094
+
+[webclient]
+url=https://zuul.example.com
+verify_ssl=true
+
+[auth zuul_operator]
+driver=HS256
+allow_authz_override=true
+realm=zuul.example.com
+default=true
+client_id=zuul.example.com
+issuer_id=zuul_operator
+secret=NoDanaOnlyZuul
+max_validity_time=36000
+skew=0
 
 [connection gerrit]
 driver=gerrit
@@ -61,7 +72,3 @@ server=localhost
 user=zuul
 password=zuul
 ;keepalive=60
-
-[connection mydatabase]
-driver=sql
-dburi=mysql+pymysql://user@localhost/zuul

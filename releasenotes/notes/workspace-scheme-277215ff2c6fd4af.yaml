@@ -1,0 +1,15 @@
+---
+features:
+  - |
+    Jobs may now specify an alternate scheme to use when preparing
+    repositories in the workspace.  The default remains the same
+    golang-style, but an alternate scheme called `flat` is now
+    available.  See :attr:`job.workspace-scheme` for more details.
+upgrade:
+  - |
+    The internal git repo caches maintained by the mergers and
+    executors now use a new naming scheme in order to avoid
+    collisions.  When existing executors and mergers are restarted,
+    they will remove their git repo caches and re-clone repos using
+    the new scheme.  Jobs may be slow to start until the caches are
+    warmed again.

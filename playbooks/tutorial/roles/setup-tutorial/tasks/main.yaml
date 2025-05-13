@@ -1,0 +1,187 @@
+- name: Create workspace directory
+  file:
+    state: directory
+    path: "{{ workspace }}"
+
+- block:
+    - name: Generate example user ssh key
+      command: "ssh-keygen -f {{ workspace }}/id_rsa -N ''"
+      args:
+        creates: "{{ workspace }}/id_rsa.pub"
+    - name: Load example user SSH key
+      shell: "cat {{ workspace }}/id_rsa.pub"
+      register: ssh_key_cat
+    - name: Register example user SSH key (temp)
+      set_fact:
+        ssh_public_key_new: "{{ ssh_key_cat.stdout }}"
+        stop_ssh_agent: yes
+    - name: Start ssh-agent
+      command: ssh-agent
+      register: ssh_agent_new
+    - name: Add key to ssh agent
+      shell:
+        executable: /bin/bash
+        cmd: |
+          {{ ssh_agent_new.stdout }}
+          ssh-add {{ workspace }}/id_rsa
+    - name: "Set Fact: ssh_public_key/ssh_agent"
+      set_fact:
+        ssh_public_key: "{{ ssh_public_key_new }}"
+        ssh_agent: "{{ ssh_agent_new }}"
+  when: ssh_public_key is not defined or ssh_public_key == ''
+
+- name: Run podman-compose up
+  when: not local
+  shell:
+    cmd: podman-compose -p zuul-tutorial up -d
+    chdir: src/opendev.org/zuul/zuul/doc/source/examples
+
+- name: Run podman-compose up
+  when: local
+  shell:
+    cmd: podman-compose -p zuul-tutorial up -d
+    chdir: ../../doc/source/examples
+
+- name: Print list of images
+  command: podman image ls --all --digests --no-trunc
+
+- name: Wait for Gerrit to start
+  wait_for:
+    host: localhost
+    port: 29418
+
+- name: Wait for Zuul user to be created
+  uri:
+    url: http://localhost:8080/a/accounts/zuul/sshkeys
+    method: GET
+    user: admin
+    password: secret
+  register: result
+  until: result.status == 200 and not result.redirected
+  delay: 1
+  retries: 120
+
+# -4 for ipv4 only because of the way Docker sets up the port forwards
+- name: fetch ssh host keys from gerrit
+  shell: ssh-keyscan -4 -p 29418 localhost > {{ workspace }}/known_hosts
+
+- name: Check if example user exists in Gerrit
+  uri:
+    url: http://localhost:8080/accounts/user
+    status_code: 200, 404
+  register: user_check
+
+- name: Create example gerrit account
+  when: user_check.status==404
+  uri:
+    url: http://localhost:8080/a/accounts/user
+    method: PUT
+    user: admin
+    password: secret
+    status_code: 201
+    body_format: json
+    body:
+      username: user
+      name: Example User
+      email: user@example.com
+      ssh_key: "{{ ssh_public_key }}"
+      http_password: secret
+
+- name: Wait for zuul
+  uri:
+    url: http://localhost:9000/api/tenant/example-tenant/status
+    method: GET
+    return_content: true
+    status_code: 200
+    body_format: json
+  register: result
+  retries: 30
+  delay: 10
+  until: result.status == 200 and result.json["zuul_version"] is defined
+  changed_when: false
+
+# Quick-Start tutorial begin
+- name: Init zuul-config
+  include_role:
+    name: init-repository
+  vars:
+    projectname: zuul-config
+
+- name: Make initial change in zuul-config
+  copy:
+    src: ../../doc/source/examples/zuul-config/zuul.d/pipelines.yaml
+    dest: "{{ workspace }}/zuul-config/zuul.d/"
+
+- name: Make initial change in zuul-config
+  copy:
+    src: ../../doc/source/examples/zuul-config/zuul.d/projects.yaml
+    dest: "{{ workspace }}/zuul-config/zuul.d/"
+
+- name: Copy basic base job definition
+  copy:
+    src: ../../doc/source/examples/zuul-config/zuul.d/jobs.yaml
+    dest: "{{ workspace }}/zuul-config/zuul.d/jobs.yaml"
+
+- name: Commit and upload initial change in zuul-config
+  shell:
+    chdir: "{{ workspace }}/zuul-config/"
+    executable: /bin/bash
+    cmd: |
+      {{ ssh_agent.stdout }}
+      git add zuul.d
+      git commit -m "Add initial Zuul configuration"
+      git review -v
+
+- name: Query open changes
+  uri:
+    url: http://localhost:8080/a/changes/?q=status:open+project:zuul-config&o=CURRENT_REVISION
+    method: GET
+    user: admin
+    password: secret
+    return_content: true
+  register: changes
+
+- set_fact:
+    changeinfo: "{{ {'id': (changes.content[5:]|from_json)[0].id, 'current_revision': (changes.content[5:]|from_json)[0].current_revision} }}"
+
+- name: Approve zuul-config change
+  uri:
+    url: "http://localhost:8080/a/changes/{{ changeinfo.id }}/revisions/{{ changeinfo.current_revision }}/review"
+    method: POST
+    user: admin
+    password: secret
+    status_code: 200
+    body_format: json
+    body:
+      labels:
+        Code-Review: "+2"
+        Verified: "+2"
+        Workflow: "+1"
+
+- name: Merge zuul-config change
+  uri:
+    url: "http://localhost:8080/a/changes/{{ changeinfo.id }}/revisions/{{ changeinfo.current_revision }}/submit"
+    method: POST
+    user: admin
+    password: secret
+    status_code: 200
+
+- name: Fetch status page
+  uri:
+    url: http://localhost:9000/t/example-tenant/status
+    return_content: true
+  register: status_page
+
+- name: Verify status page was served
+  assert:
+    that: "'You need to enable JavaScript to run this app.' in status_page.content"
+
+- name: Fetch status data
+  uri:
+    url: http://localhost:9000/api/tenant/example-tenant/status
+    return_content: true
+  register: status_data
+
+- name: Verify status data were served
+  assert:
+    that: "status_data.json.last_reconfigured > 0"

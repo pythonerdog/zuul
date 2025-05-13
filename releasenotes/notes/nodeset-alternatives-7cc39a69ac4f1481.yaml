@@ -1,0 +1,7 @@
+---
+features:
+  - |
+    Nodesets may now express an ordered list of alternatives so that
+    if Nodepool is unable to fulfill a request for certain labels, one
+    or more alternative Nodesets may be attempted instead.  See
+    :attr:`nodeset.alternatives` for details.

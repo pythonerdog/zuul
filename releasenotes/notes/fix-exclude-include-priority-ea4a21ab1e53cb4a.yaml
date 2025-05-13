@@ -1,0 +1,12 @@
+---
+upgrade:
+  - |
+    Fixes `tenant.untrusted-projects.<project>.include-branches` being lower
+    priority than `tenant.untrusted-projects.<project>.exclude-branches` to
+    match the documentation and expected user behavior.
+
+    This only affects projects that are using both `include-branches` and
+    `exclude-branches` at the same time. Now, `include-branches` has priority
+    over `exclude-branches` for any branches that match both. Practically
+    speaking, this means that `exclude-branches` is ignored if
+    `include-branches` is set.

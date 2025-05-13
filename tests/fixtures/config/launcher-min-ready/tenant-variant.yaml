@@ -1,0 +1,25 @@
+- tenant:
+    name: tenant-one
+    source:
+      gerrit:
+        config-projects:
+          - common-config:
+              include: ['job', 'nodeset', 'secret', 'pipeline', 'project', 'project-template', 'semaphore', 'queue', 'flavor', 'label', 'section', 'provider']
+        untrusted-projects:
+          - org/project1:
+              extra-config-paths:
+                - zuul-extra.d/
+              include: ['job', 'nodeset', 'secret', 'pipeline', 'project', 'project-template', 'semaphore', 'queue', 'image', 'flavor', 'label', 'section', 'provider']
+
+- tenant:
+    name: tenant-two
+    source:
+      gerrit:
+        config-projects:
+          - common-config:
+              include: ['job', 'nodeset', 'secret', 'pipeline', 'project-template', 'semaphore', 'queue', 'flavor', 'label', 'section', 'provider']
+        untrusted-projects:
+          - org/project2:
+              extra-config-paths:
+                - zuul-extra.d/
+              include: ['job', 'nodeset', 'secret', 'pipeline', 'project', 'project-template', 'semaphore', 'queue', 'image', 'flavor', 'label', 'section', 'provider']

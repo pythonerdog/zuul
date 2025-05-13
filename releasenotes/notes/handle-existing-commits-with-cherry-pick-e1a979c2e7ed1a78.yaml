@@ -1,0 +1,14 @@
+---
+fixes:
+  - |
+    The `cherry-pick` merge mode will now silently skip commits that have
+    already been applied to the tree when cherry-picking, instead of failing
+    with an error.
+
+    The exception to this is if the source of the cherry-pick is an empty
+    commit, in which case it is always kept.
+
+    Skipping commits that have already been applied is important in a pipeline
+    triggered by the Gerrit `change-merged` event (like the `deploy` pipeline),
+    since the scheduler would previously try to cherry-pick the change on top
+    of the commit that just merged and fail.

@@ -1,0 +1,5 @@
+---
+upgrade:
+  - |
+    The built-in support for the ARA Ansible callback plugin has been
+    removed.

@@ -1,0 +1,69 @@
+- pipeline:
+    name: check
+    manager: independent
+    trigger:
+      gerrit:
+        - event: patchset-created
+    success:
+      gerrit:
+        Verified: 1
+    failure:
+      gerrit:
+        Verified: -1
+
+- pipeline:
+    name: gate
+    manager: dependent
+    success-message: Build succeeded (gate).
+    trigger:
+      gerrit:
+        - event: comment-added
+          approval:
+            - Approved: 1
+    success:
+      gerrit:
+        Verified: 2
+        submit: true
+    failure:
+      gerrit:
+        Verified: -2
+    start:
+      gerrit:
+        Verified: 0
+    precedence: high
+
+- job:
+    name: base
+    parent: null
+    run: playbooks/base.yaml
+    nodeset:
+      nodes:
+        - name: controller
+          label: ubuntu-xenial
+
+- job:
+    name: testjob1
+    include-vars:
+      name: test.yaml
+      project: org/project3
+    required-projects: org/project2
+
+- job:
+    name: testjob2
+
+- project:
+    name: org/project1
+    check:
+      jobs:
+        - testjob1
+        - testjob2
+    gate:
+      jobs:
+        - testjob1
+        - testjob2
+
+- project:
+    name: org/project2
+
+- project:
+    name: org/project3

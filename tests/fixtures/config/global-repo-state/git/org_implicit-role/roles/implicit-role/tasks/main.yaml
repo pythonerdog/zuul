@@ -1,0 +1,3 @@
+- name: Test
+  debug:
+    msg: run implicit-role

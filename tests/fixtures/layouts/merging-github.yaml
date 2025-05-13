@@ -1,8 +1,8 @@
 - pipeline:
     name: merge
     description: Pipeline for merging the pull request
-    manager: independent
-    merge-failure-message: Merge failed
+    manager: dependent
+    merge-conflict-message: Merge failed
     trigger:
       github:
         - event: pull_request

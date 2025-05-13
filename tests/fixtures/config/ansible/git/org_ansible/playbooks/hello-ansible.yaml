@@ -3,3 +3,7 @@
     - name: hello
       debug:
         msg: hello ansible
+
+    - name: Echo ansible version.
+      debug:
+        msg: Ansible version={{ ansible_version.major }}.{{ ansible_version.minor }}

@@ -1,0 +1,30 @@
+- tenant:
+    name: tenant-one
+    source:
+      gerrit:
+        config-projects:
+          - common-config
+        untrusted-projects:
+          - org/project
+          - org/project1:
+              exclude: project
+          - org/project2:
+              extra-config-paths:
+                - .extra.yaml
+                - extra.d/
+          - org/project3:
+              extra-config-paths:
+                - .extra-3.yaml
+                - extra-3.d/
+
+- tenant:
+    name: tenant-two
+    source:
+      gerrit:
+        config-projects:
+          - common-config:
+              exclude: project
+        untrusted-projects:
+          - org/project1:
+              extra-config-paths:
+                - extra.d/

@@ -1,0 +1,5 @@
+---
+features:
+  - |
+    A new executor option :attr:`executor.merge_jobs` has been added to toggle
+    global merge operations.

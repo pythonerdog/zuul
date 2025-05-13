@@ -1,0 +1,8 @@
+---
+fixes:
+  - |
+    In some cases (such as when an older version of kubectl is present on the executor,
+    or the kubectl on the executor is from OpenShift), streaming logs from Kubernetes or
+    OpenShift pods did not work.
+    The log streaming system has been corrected to work with a wider range of kubectl
+    versions and error logging has been improved.

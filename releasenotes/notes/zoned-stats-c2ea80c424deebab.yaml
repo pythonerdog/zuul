@@ -1,0 +1,12 @@
+---
+upgrade:
+  - |
+    Two sets of statsd metrics are now reported for executors: zoned
+    and unzoned.  The existing statsd keys are now deprecated; new
+    statsd keys are available for both zoned and unzoned executors.
+    See :stat:`zuul.executors` for details.
+fixes:
+  - |
+    If zoned executors were used with prior releases of Zuul, the
+    reported executor statistics would only represent a single,
+    unspecified zone.  This has now been corrected.

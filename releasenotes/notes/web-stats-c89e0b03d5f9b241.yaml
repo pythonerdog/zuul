@@ -1,0 +1,4 @@
+---
+features:
+  - |
+    New monitoring metrics specific to zuul-web are available.

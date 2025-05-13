@@ -1,0 +1,35 @@
+- authorization-rule:
+    name: venkman_rule
+    conditions:
+      - zuul_uid: venkman
+# TODO: rename to authorization-rule; this tests backwards compat for now
+- admin-rule:
+    name: columbia_rule
+    conditions:
+      - sub: stantz
+        iss: columbia.edu
+      - sub: zeddemore
+        iss: columbia.edu
+- admin-rule:
+    name: gb_rule
+    conditions:
+      - groups: ghostbusters
+- admin-rule:
+    name: car_rule
+    conditions:
+      - vehicle.car: ecto-1
+- tenant:
+    name: tenant-one
+    admin-rules:
+      - venkman_rule
+      - car_rule
+      - gb_rule
+      - columbia_rule
+    source:
+      gerrit:
+        config-projects:
+          - common-config
+        untrusted-projects:
+          - org/project
+          - org/project1
+          - org/project2

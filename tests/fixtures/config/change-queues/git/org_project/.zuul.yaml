@@ -1,0 +1,10 @@
+# This queue will be ignored since it is already defined in common-config
+- queue:
+    name: integrated
+    per-branch: false
+
+- project:
+    queue: integrated
+    gate:
+      jobs:
+        - project-test

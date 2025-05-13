@@ -1,0 +1,11 @@
+---
+features:
+  - |
+    The promote administrative action now functions with all pipeline
+    managers.  Previously it would only have an impact on dependent
+    pipelines, but it will now re-order change queues as well as
+    changes within any type of pipeline.
+upgrade:
+  - |
+    The promote administrative action will no longer restart jobs for
+    changes which have not been re-ordered within their change queue.

@@ -1,0 +1,13 @@
+---
+features:
+  - |
+    The annotation levels for the file comments reported via Github checks
+    API are now configurable in ``zuul_return``. Each file comment entry can
+    provide an optional ``level`` parameter ``[info|warning|error]`` that will
+    be picked up by the Github reporter.
+
+    For more details on how to provide file comments from Zuul, see the
+    documentation of the :ref:`return_values`.
+
+upgrade:
+  - With GitHub the Zuul app now requires permissions to read/write check runs.

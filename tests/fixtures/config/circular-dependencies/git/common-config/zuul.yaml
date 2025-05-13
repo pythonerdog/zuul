@@ -1,0 +1,183 @@
+- queue:
+    name: integrated
+    allow-circular-dependencies: true
+
+- pipeline:
+    name: check
+    manager: independent
+    trigger:
+      gerrit:
+        - event: patchset-created
+      github:
+        - event: pull_request
+          action:
+            - opened
+            - changed
+            - reopened
+            - edited
+    success:
+      gerrit:
+        Verified: 1
+      github:
+        status: success
+        check: success
+    failure:
+      gerrit:
+        Verified: -1
+      github:
+        status: failure
+        check: failure
+    start:
+      github:
+        check: in_progress
+        comment: false
+    dequeue:
+      github:
+        check: cancelled
+        comment: false
+
+- pipeline:
+    name: gate
+    manager: dependent
+    success-message: Build succeeded (gate).
+    require:
+      gerrit:
+        approval:
+          - Approved: 1
+      github:
+        label: approved
+    trigger:
+      gerrit:
+        - event: comment-added
+          approval:
+            - Approved: 1
+      github:
+        - event: pull_request
+          action: edited
+        - event: pull_request
+          action: labeled
+          label: approved
+    success:
+      gerrit:
+        Verified: 2
+        submit: true
+      github:
+        merge: true
+        check: success
+    failure:
+      gerrit:
+        Verified: -2
+      github:
+        check: failure
+    start:
+      gerrit:
+        Verified: 0
+      github:
+        check: in_progress
+        comment: false
+    dequeue:
+      github:
+        check: cancelled
+        comment: false
+    precedence: high
+
+- job:
+    name: base
+    parent: null
+    run: playbooks/run.yaml
+    deduplicate: false
+    required-projects:
+      - common-config
+      - org/project
+      - org/project1
+      - org/project2
+
+- job:
+    name: common-config-job
+
+- job:
+    name: project-job
+
+- job:
+    name: project1-job
+
+- job:
+    name: project2-job
+
+- job:
+    name: project3-job
+
+- job:
+    name: project5-job-t1
+
+- job:
+    name: project6-job-t1
+
+- project:
+    name: common-config
+    queue: integrated
+    check:
+      jobs:
+        - common-config-job
+    gate:
+      jobs:
+        - common-config-job
+
+- project:
+    name: ^.*/project
+    queue: integrated
+    check:
+      jobs:
+        - project-job
+    gate:
+      jobs:
+        - project-job
+
+- project:
+    name: ^.*/project1
+    queue: integrated
+    check:
+      jobs:
+        - project1-job
+        - project-vars-job
+    gate:
+      jobs:
+        - project1-job
+        - project-vars-job
+
+- project-template:
+    name: project2-template
+    queue: integrated
+    check:
+      jobs:
+        - project2-job
+    gate:
+      jobs:
+        - project2-job
+
+- project:
+    name: ^.*/project2
+    templates:
+      - project2-template
+
+- project:
+    name: ^.*/project3
+    check:
+      jobs:
+        - project3-job
+    gate:
+      jobs:
+        - project3-job
+
+- project:
+    name: org/project5
+    queue: integrated
+    check:
+      jobs:
+        - project5-job-t1
+
+- project:
+    name: org/project6
+    check:
+      jobs:
+        - project6-job-t1

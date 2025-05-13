@@ -1,0 +1,13 @@
+- hosts: all
+  tasks:
+    - set_fact:
+        latefact: 'late'
+        cacheable: true
+    - debug:
+        msg: "BASE JOBSECRET: {{ jobvar }}"
+    - debug:
+        msg: "BASE SECRETSUB: {{ base_secret.secretsub }}"
+    - debug:
+        msg: "BASE LATESUB: {{ latesub }}"
+    - debug:
+        msg: "BASE LATESUB UNSAFE: {{ unsafe_vars.latesub }}"

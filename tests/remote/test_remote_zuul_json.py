@@ -20,11 +20,12 @@ import textwrap
 from tests.base import AnsibleZuulTestCase
 
 
-class TestZuulJSON(AnsibleZuulTestCase):
+class FunctionalZuulJSONMixIn:
     tenant_config_file = 'config/remote-zuul-json/main.yaml'
+    # This should be overriden in child classes.
+    ansible_version = 'X'
 
-    def setUp(self):
-        super(TestZuulJSON, self).setUp()
+    def _setUp(self):
         self.fake_nodepool.remote_ansible = True
 
         ansible_remote = os.environ.get('ZUUL_REMOTE_IPV4')
@@ -43,6 +44,7 @@ class TestZuulJSON(AnsibleZuulTestCase):
             - job:
                 name: {job_name}
                 run: playbooks/{job_name}.yaml
+                ansible-version: {version}
                 roles:
                   - zuul: org/common-config
                 nodeset:
@@ -54,7 +56,7 @@ class TestZuulJSON(AnsibleZuulTestCase):
                 check:
                   jobs:
                     - {job_name}
-            """.format(job_name=job_name))
+            """.format(job_name=job_name, version=self.ansible_version))
 
         file_dict = {'zuul.yaml': conf}
         A = self.fake_gerrit.addFakeChange('org/project', 'master', 'A',
@@ -66,7 +68,7 @@ class TestZuulJSON(AnsibleZuulTestCase):
         return job
 
     def _get_json_as_text(self, build):
-        path = os.path.join(self.test_root, build.uuid,
+        path = os.path.join(self.jobdir_root, build.uuid,
                             'work', 'logs', 'job-output.json')
         with open(path) as f:
             return f.read()
@@ -81,6 +83,23 @@ class TestZuulJSON(AnsibleZuulTestCase):
             self.assertIn('rosebud', text)
             self.assertNotIn('setec', text)
 
+    def test_json_task_action(self):
+        job = self._run_job('no-log')
+        with self.jobLog(job):
+            build = self.history[-1]
+            self.assertEqual(build.result, 'SUCCESS')
+
+            text = self._get_json_as_text(build)
+            json_result = json.loads(text)
+            tasks = json_result[0]['plays'][0]['tasks']
+            expected_actions = [
+                'debug', 'debug', 'debug', 'copy', 'find',
+                'stat', 'debug'
+            ]
+            for i, expected in enumerate(expected_actions):
+                host_result = tasks[i]['hosts']['controller']
+                self.assertEquals(expected, host_result['action'])
+
     def test_json_role_log(self):
         job = self._run_job('json-role')
         with self.jobLog(job):
@@ -93,6 +112,9 @@ class TestZuulJSON(AnsibleZuulTestCase):
             json_result = json.loads(text)
             role_name = json_result[0]['plays'][0]['tasks'][0]['role']['name']
             self.assertEqual('json-role', role_name)
+
+            role_path = json_result[0]['plays'][0]['tasks'][0]['role']['path']
+            self.assertEqual('json-role', os.path.basename(role_path))
 
     def test_json_time_log(self):
         job = self._run_job('no-log')
@@ -121,3 +143,19 @@ class TestZuulJSON(AnsibleZuulTestCase):
             dateutil.parser.parse(task_end_time)
             dateutil.parser.parse(play_start_time)
             dateutil.parser.parse(play_end_time)
+
+
+class TestZuulJSON8(AnsibleZuulTestCase, FunctionalZuulJSONMixIn):
+    ansible_version = '8'
+
+    def setUp(self):
+        super().setUp()
+        self._setUp()
+
+
+class TestZuulJSON9(AnsibleZuulTestCase, FunctionalZuulJSONMixIn):
+    ansible_version = '9'
+
+    def setUp(self):
+        super().setUp()
+        self._setUp()

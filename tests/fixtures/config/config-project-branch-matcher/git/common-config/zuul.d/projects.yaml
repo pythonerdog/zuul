@@ -1,0 +1,32 @@
+- pragma:
+    implied-branch-matchers: True
+    implied-branches:
+      - stable/implied
+
+- project:
+    name: org/project1
+    check:
+      jobs:
+        - testjob
+
+- project:
+    name: org/project2
+    branches:
+      - stable/explicit
+    check:
+      jobs:
+        - testjob
+
+- project:
+    name: ^org/reproject3.*$
+    check:
+      jobs:
+        - testjob
+
+- project:
+    name: ^org/reproject4.*$
+    branches:
+      - stable/explicit
+    check:
+      jobs:
+        - testjob

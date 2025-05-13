@@ -1,0 +1,32 @@
+---
+features:
+  - |
+    Ansible version 5 is now available.  The default Ansible version
+    is still 2.9, but version 5 may be selected by using
+    :attr:`job.ansible-version`.
+
+upgrade:
+  - |
+    This is the first version of Ansible added to Zuul since the
+    Ansible project began releasing the `Ansible community` package.
+    Zuul includes the Ansible community package since it includes a
+    wide selection of useful modules, many of which were included by
+    default in previous versions of Ansible.
+
+    Only the major version of Ansible community is specified
+    (e.g. ``ansible-version: 5``).  This corresponds to a single minor
+    release of Ansible core (e.g., Ansible community 5 corresponds to
+    Ansible core 2.12).  Ansible releases minor versions of the
+    community package which may contain updates to the included
+    Ansible collections as well as micro version updates of Ansible
+    core (e.g. Ansible community 5.6 includes ansible-core 2.12.4).
+
+    Zuul does not specify the minor version of Ansible community,
+    therefore the latest available micro-version will be installed at
+    build-time.  If you need more control over the version of Ansible
+    used, see the help text for ``zuul-manage-ansible``.
+
+  - |
+    Python 3.8 or newer is required to run Zuul. This change was necessary
+    to support Ansible 5 and newer as Ansible's minimum python requirement
+    is 3.8.
