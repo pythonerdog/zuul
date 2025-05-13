@@ -70,3 +70,4 @@ Zuul requires Python 3. It does not support Python 2.
 Since Zuul uses Ansible to drive CI jobs, Zuul can run tests anywhere
 Ansible can, including Python 2 environments.
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/pythonerdog/zuul)
