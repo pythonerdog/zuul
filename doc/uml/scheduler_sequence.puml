@@ -1,0 +1,80 @@
+@startuml
+skinparam backgroundColor white
+skinparam handwritten false
+
+' 定义参与者
+participant "Scheduler主线程" as Main
+participant "布局更新线程" as Layout
+participant "统计线程" as Stats
+participant "清理线程" as Cleanup
+participant "命令处理线程" as Command
+database "ZooKeeper" as ZK
+collections "事件队列" as Events
+collections "租户" as Tenants
+collections "流水线" as Pipelines
+
+' 初始化流程
+Main -> Main: 初始化组件
+Main --> Layout: 启动布局更新线程
+Main --> Stats: 启动统计线程
+Main --> Cleanup: 启动清理线程
+Main --> Command: 启动命令处理线程
+
+' 主事件循环
+group 主事件循环
+    Main -> Events: 等待事件
+
+    alt 配置事件
+        Events -> Main: 触发配置事件
+        Main -> ZK: 获取配置
+        Main -> Tenants: 更新租户配置
+        Main -> Pipelines: 更新流水线
+    else 管理事件
+        Events -> Main: 触发管理事件
+        Main -> Pipelines: 处理管理操作
+    else 触发事件
+        Events -> Main: 触发构建事件
+        Main -> Pipelines: 分发到对应流水线
+    else 构建事件
+        Events -> Main: 触发构建状态更新
+        Main -> Pipelines: 更新构建状态
+    end
+end
+
+' 布局更新线程
+group 布局更新循环
+    Layout -> ZK: 监听布局变更
+    Layout -> Layout: 更新本地布局
+    Layout -> Main: 通知主线程
+end
+
+' 统计线程
+group 统计循环
+    Stats -> ZK: 选举统计主节点
+    Stats -> Stats: 收集统计数据
+    Stats -> ZK: 存储统计信息
+end
+
+' 清理线程
+group 清理循环
+    Cleanup -> Cleanup: 执行初始清理
+    loop 定期清理
+        Cleanup -> ZK: 清理过期数据
+        Cleanup -> Pipelines: 清理流水线状态
+        Cleanup -> Events: 清理过期事件
+    end
+end
+
+' 命令处理线程
+group 命令处理
+    Command -> Command: 等待命令
+    alt 全量重配置
+        Command -> Main: 触发全量重配置
+    else 智能重配置
+        Command -> Main: 触发智能重配置
+    else 租户重配置
+        Command -> Main: 触发租户重配置
+    end
+end
+
+@enduml

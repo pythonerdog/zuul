@@ -1,0 +1,72 @@
+@startuml
+title Zuul Gerrit Driver 任务触发与执行流程
+
+' 定义参与者
+participant "Gerrit" as Gerrit
+participant "GerritConnection\n(Driver)" as Driver
+participant "GerritEventConnector" as Connector
+participant "ZooKeeper" as ZK
+participant "Scheduler" as Scheduler
+participant "Pipeline" as Pipeline
+participant "Launcher" as Launcher
+participant "Executor" as Executor
+
+' Gerrit 事件触发流程
+Gerrit -> Driver : 触发事件(patchset-created等)
+activate Driver
+Driver -> Connector : _event_handler()
+activate Connector
+Connector -> ZK : 存储事件
+deactivate Connector
+deactivate Driver
+
+' Scheduler处理流程
+activate Scheduler
+Scheduler -> ZK : 获取事件
+ZK --> Scheduler : 返回事件
+Scheduler -> Scheduler : processEvent()
+note right: 解析事件类型和项目信息
+
+Scheduler -> Pipeline : getAllItems()
+activate Pipeline
+Pipeline -> Pipeline : getSourceItems()
+note right: 获取pipeline配置项
+Pipeline --> Scheduler : 返回待执行items
+deactivate Pipeline
+
+' 任务准备和调度
+Scheduler -> Scheduler : executeJobs()
+note right: 准备任务执行环境
+
+' Launcher处理
+Scheduler -> Launcher : submitJob()
+activate Launcher
+
+' 节点分配
+Launcher -> ZK : requestNodeSet()
+activate ZK
+ZK -> ZK : 查找可用节点
+ZK --> Launcher : 返回可用节点信息
+deactivate ZK
+
+' 任务分发
+Launcher -> Executor : 分发任务
+activate Executor
+
+' 任务执行
+Executor -> Executor : execute()
+note right: 执行具体任务
+
+' 执行结果处理
+Executor --> Launcher : 返回执行结果
+deactivate Executor
+
+Launcher --> Scheduler : 任务完成通知
+deactivate Launcher
+
+' 结果处理
+Scheduler -> Gerrit : reportResult()
+note right: 回报执行结果
+deactivate Scheduler
+
+@enduml

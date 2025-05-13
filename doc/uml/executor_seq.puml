@@ -1,0 +1,72 @@
+@startuml
+title Zuul Executor 任务执行流程
+
+' 定义参与者
+participant "ZK Client" as Client
+participant "ExecutorServer" as Server
+participant "Executor" as Executor
+participant "JobExecutor" as JobExecutor
+participant "Merger" as Merger
+participant "ZooKeeper" as ZK
+
+' 初始化流程
+Server -> ZK : 注册executor节点
+activate Server
+Server -> Server : start()
+Server -> Executor : 创建执行器实例
+Executor -> JobExecutor : 初始化任务执行器
+deactivate Server
+
+' 任务接收和执行流程
+Client -> Server : 提交任务
+activate Server
+Server -> Executor : execute_job(job)
+activate Executor
+
+' 任务执行前准备
+Executor -> Executor : prepareJob()
+note right: 准备工作目录和环境
+
+' 任务执行
+Executor -> JobExecutor : execute()
+activate JobExecutor
+JobExecutor -> JobExecutor : runJob()
+note right: 执行具体任务逻辑
+
+' 结果处理
+JobExecutor --> Executor : 返回执行结果
+deactivate JobExecutor
+Executor -> Executor : processResult()
+note right: 处理执行结果
+
+' Merger处理
+alt 如果是Merger任务
+    Executor -> Merger : merge()
+    activate Merger
+    Merger -> Merger : processMerge()
+    note right: 处理代码合并
+    Merger --> Executor : 合并结果
+    deactivate Merger
+end
+
+' 任务完成
+Executor --> Server : 返回执行结果
+deactivate Executor
+Server --> Client : 返回任务结果
+deactivate Server
+
+' 状态更新
+Server -> ZK : 更新执行器状态
+note right: 更新负载信息
+
+' 错误处理
+alt 任务执行失败
+    Executor -> Executor : handleError()
+    note right: 错误处理和日志记录
+end
+
+' 资源清理
+Executor -> Executor : cleanup()
+note right: 清理临时文件和资源
+
+@enduml

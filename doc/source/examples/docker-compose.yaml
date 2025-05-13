@@ -86,6 +86,7 @@ services:
       - "sshkey:/var/ssh:z"
       - "certs:/var/certs:z"
       - "lib-zuul-scheduler:/var/lib/zuul"
+      - "/root/zuul:/tmp"
     networks:
       - zuul
   web:

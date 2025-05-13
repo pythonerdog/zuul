@@ -1,0 +1,85 @@
+@startuml
+
+class Scheduler {
+  - log: Logger
+  - tracer: Tracer
+  - _stats_interval: int
+  - _semaphore_cleanup_interval: IntervalTrigger
+  - _general_cleanup_interval: IntervalTrigger
+  - _build_request_cleanup_interval: IntervalTrigger
+  - _merge_request_cleanup_interval: IntervalTrigger
+  - _connection_cleanup_interval: IntervalTrigger
+  - hostname: str
+  - config: Config
+  - connections: Connections
+  - sql: SQLReporter
+  - statsd: StatsD
+  - times: Times
+  - zk_client: ZooKeeperClient
+  - component_info: SchedulerComponent
+  - unparsed_abide: UnparsedAbideConfig
+  - abide: Abide
+  + __init__(config, connections, app, wait_for_init)
+  + start()
+  + stop()
+  + prime(config)
+  + reconfigure(config, smart=False, tenants=None)
+  + promote(tenant_name, pipeline_name, change_ids)
+  + dequeue(tenant_name, pipeline_name, project_name, change, ref)
+  + enqueue(tenant_name, pipeline_name, project_name, change, ref, oldrev, newrev)
+}
+
+class SchedulerStatsElection {
+  - election_root: str
+  + __init__(client)
+}
+
+class FullReconfigureCommand {
+  + name: str = 'full-reconfigure'
+  + help: str
+}
+
+class SmartReconfigureCommand {
+  + name: str = 'smart-reconfigure' 
+  + help: str
+}
+
+class TenantReconfigureCommand {
+  + name: str = 'tenant-reconfigure'
+  + help: str
+  + args: List[TenantArgument]
+}
+
+class ZKProfileCommand {
+  + name: str = 'zkprofile'
+  + help: str
+  + args: List[Argument]
+}
+
+class TenantArgument {
+  + name: str = 'tenant'
+  + help: str
+}
+
+class PipelineArgument {
+  + name: str = 'pipeline'
+  + help: str
+}
+
+class PendingReconfiguration {
+}
+
+' 继承关系
+SchedulerStatsElection --|> SessionAwareElection
+FullReconfigureCommand --|> Command
+SmartReconfigureCommand --|> Command  
+TenantReconfigureCommand --|> Command
+ZKProfileCommand --|> Command
+TenantArgument --|> Argument
+PipelineArgument --|> Argument
+PendingReconfiguration --|> Exception
+
+' 关联关系
+Scheduler *-- SchedulerStatsElection
+
+@enduml
