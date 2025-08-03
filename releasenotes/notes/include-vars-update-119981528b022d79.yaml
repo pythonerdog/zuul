@@ -1,0 +1,12 @@
+---
+features:
+  - |
+    If a change alters a file in an :attr:`job.include-vars`,
+    :attr:`job.pre-run`, :attr:`job.run`, or :attr:`job.post-run`
+    attribute of a job, then that job will run regardless of any file
+    matchers configured on the job (unless
+    :attr:`job.match-on-config-updates` is disabled).
+
+    This means that jobs with file matchers should no longer need to
+    explicitly list their playbooks or include-vars files in order to
+    run on changes to those files.

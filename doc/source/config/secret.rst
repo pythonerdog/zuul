@@ -3,10 +3,82 @@
 Secret
 ======
 
-A Secret is a collection of private data for use by one or more jobs.
+Zuul supports two types of secrets:
+
+* A collection of private data for use by one or more jobs,
+  hereafter referred to as a `data secret`.
+
+* Automatic OpenID Connect (OIDC) token generation for use by jobs,
+  hereafter referred to as a `token secret`.
+
+A given secret defined in Zuul may only perform one of those roles
+(they are mutually exclusive).
+
+Data Secrets
+------------
+
+A `data secret` is one where values are specified using the
+:attr:`secret.data` attribute described below.
+
 In order to maintain the security of the data, the values are usually
 encrypted, however, data which are not sensitive may be provided
 unencrypted as well for convenience.
+
+Token Secrets
+-------------
+
+A `token secret` is one where an OpenID Connect (OIDC) token is
+automatically generated for the job being run.  Configuration of the
+token is described below in :attr:`secret.oidc`.
+
+Zuul acts as an OpenID Connect Identity Provider which enables it to
+provide an identity to a job which can be trusted by federated third
+party services.  When configured in :attr:`secret.oidc`, Zuul will
+generate an OIDC ID token dynamically and make it available to the jobs
+that are configured to use the secret.
+
+In addition to the standard claims, the ID token will contain the
+following Zuul claims by default:
+
+**sub**
+   This is the most important claim.  Most third-party services are
+   likely to match on this claim to determine permissions.  This claim
+   acts as a fully-qualified name to uniquely identify the Zuul
+   secret used.  It takes the form:
+
+     ``secret:{zuul tenant}/{canonical project name}/{secret name}``
+
+The following items are not stable identifiers and may not be suitable
+for use in matching.  Caution is advised when using these.
+
+**build-uuid**
+   The UUID that uniquely identifies the current build.
+
+**job-name**
+   The name of the currently running job.
+
+**playbook**
+   The name of the currently running playbook.
+
+**pipeline**
+   The name of the pipeline the currently running build is in.
+
+**tenant**
+   The name of the Zuul tenant the running build is in.
+
+Custom claims can be added to the ID token in :attr:`secret.oidc.claims`
+
+Signing key rotation is handled by Zuul automatically where the rotation
+interval can be specified in :attr:`oidc.signing_key_rotation_interval`
+system-wide in the main Zuul configuration file.
+
+In case a key is compromised, the ``zuul-admin`` command
+``delete-oidc-signing-keys`` can be used to delete the signing keys of
+a specific algorithm and Zuul will automatically generate a new
+signing key.
+
+Usage
+-----
 
 A Secret may only be used by jobs defined within the same project.
 Note that they can be used by any branch of that project, so if a
@@ -29,7 +101,7 @@ current job definition, but to all playbooks in all parent jobs as
 well.  This allows for jobs which are designed to work with secrets
 while leaving it up to child jobs to actually supply the secret.  Use
 this option with care, as it may allow the authors of parent jobs to
-accidentially or intentionally expose secrets.  If a secret with
+accidentally or intentionally expose secrets.  If a secret with
 `pass-to-parent` set in a child job has the same name as a secret
 available to a parent job's playbook, the secret in the child job will
 not override the parent, instead it will simply not be available to
@@ -104,9 +176,60 @@ unsafe_var_eval.
       request the secret.
 
    .. attr:: data
-      :required:
+
+      Mutually exclusive with ``oidc``, either ``data`` or ``oidc``
+      must be supplied.
+
+      Use of this attribute generates a :term:`data secret`.
 
       A dictionary which will be added to the Ansible variables
       available to the job.  The values can be any of the normal YAML
       data types (strings, integers, dictionaries or lists) or
       encrypted strings.  See :ref:`encryption` for more information.
+
+   .. attr:: oidc
+
+      Mutually exclusive with ``data``, either ``data`` or ``oidc``
+      must be supplied.
+
+      Use of this attribute generates a :term:`token secret`.
+
+      If this value is set, then an OIDC ID token in string form will
+      be generated dynamically before running the playbook, and will
+      be added to the Ansible variables available to the job.  It can
+      be used to authenticate to external services that trust Zuul.
+
+      Since all attributes below are optional, to request a `token secret`
+      without supplying any options, use the following form:
+
+      .. code-block:: yaml
+
+         - secret:
+             name: my-oidc-secret
+             oidc:
+
+      .. attr:: ttl
+
+         TTL (Time-To-Live) of the ID token in seconds, it is used to
+         calculate ``exp`` claim. It should be longer than the duration
+         between the playbook start and the task execution that uses
+         the secret, otherwise the token may be expired. It must not
+         be greater than the :attr:`tenant.max-oidc-ttl` and if not
+         specified, the default value is :attr:`tenant.default-oidc-ttl`.
+
+      .. attr:: iss
+
+         Custom ``iss`` claim, it must be one of the allowed issuers
+         defined in :attr:`tenant.allowed-oidc-issuers`.
+
+      .. attr:: algorithm
+
+         Specify the signing algorithm of the ID token.  It must be one of
+         :attr:`oidc.supported_signing_algorithms` and if not specified,
+         the default value is :attr:`oidc.default_signing_algorithm`.
+
+      .. attr:: claims
+
+         A dictionary of custom claims to be added to the ID token. For example,
+         the ``aud`` claim can be specified here.  The custom claims are not
+         able to overwrite the Zuul default claims mentioned above.

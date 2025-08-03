@@ -140,6 +140,10 @@ class GitConnection(ZKChangeCacheMixin, BaseConnection):
                     refs if ref.startswith('refs/heads/')]
         return branches
 
+    def getRefSha(self, project, ref):
+        refs = self.lsRemote(project.name)
+        return refs.get(ref, '')
+
     def getGitUrl(self, project):
         return os.path.join(self.baseurl, project.name)
 

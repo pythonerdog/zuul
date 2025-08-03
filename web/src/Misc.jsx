@@ -190,6 +190,61 @@ function formatTime(ms) {
   })
 }
 
+const NODE_STYLES = {
+  requested: {
+    variant: 'pending',
+    color: '',
+  },
+  building: {
+    variant: 'warning',
+    color: 'var(--pf-global--warning-color--100)',
+  },
+  ready: {
+    variant: 'success',
+    color: 'var(--pf-global--success-color--100)',
+  },
+  failed: {
+    variant: 'danger',
+    color: 'var(--pf-global--danger-color--100)',
+  },
+  tempfailed: {
+    variant: 'danger',
+    color: 'var(--pf-global--danger-color--100)',
+  },
+  'in-use': {
+    variant: 'info',
+    color: 'var(--pf-global--info-color--100)',
+  },
+  used: {
+    variant: 'danger',
+    color: 'var(--pf-global--danger-color--100)',
+  },
+  outdated: {
+    variant: 'danger',
+    color: 'var(--pf-global--danger-color--100)',
+  },
+  hold: {
+    variant: 'info',
+    color: 'var(--pf-global--info-color--100)',
+  },
+  unknown: {
+    variant: 'pending',
+    color: '',
+  },
+}
+
+function getNodeStyle(node) {
+  return NODE_STYLES[node.state] || NODE_STYLES['unknown']
+}
+
+function formatProviderName(providerName) {
+  if (providerName !== null) {
+    return providerName.split('/', 2)[1]
+  } else {
+    return providerName
+  }
+}
+
 export {
   buildExternalLink,
   buildExternalTableLink,
@@ -197,9 +252,11 @@ export {
   describeRef,
   ExternalLink,
   formatTime,
+  formatProviderName,
   IconProperty,
   removeHash,
   renderRefInfo,
   resolveDarkMode,
   setDarkMode,
+  getNodeStyle,
 }

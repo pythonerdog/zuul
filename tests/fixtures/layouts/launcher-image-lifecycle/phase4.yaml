@@ -1,0 +1,102 @@
+- pipeline:
+    name: check
+    manager: independent
+    trigger:
+      gerrit:
+        - event: patchset-created
+    success:
+      gerrit:
+        Verified: 1
+    failure:
+      gerrit:
+        Verified: -1
+
+- pipeline:
+    name: image
+    manager: independent
+    trigger:
+      zuul:
+        - event: image-build
+    success:
+      zuul:
+        image-built: true
+        image-validated: true
+
+- job:
+    name: base
+    parent: null
+    run: playbooks/base.yaml
+    nodeset:
+      nodes:
+        - label: debian-local
+          name: controller
+
+- job:
+    name: build-debian-local-image
+    image-build-name: debian-local
+
+- job:
+    name: check-job
+    run: playbooks/check.yaml
+
+- project:
+    name: org/common-config
+    image:
+      jobs:
+        - build-debian-local-image
+
+- project:
+    name: org/project
+    check:
+      jobs:
+        - check-job
+
+- image:
+    name: debian-local
+    type: zuul
+
+- flavor:
+    name: normal
+
+- label:
+    name: debian-local-normal
+    image: debian-local
+    flavor: normal
+
+- section:
+    name: aws-base
+    abstract: true
+    connection: aws
+    host-key-checking: false
+    boot-timeout: 120
+    launch-timeout: 600
+    object-storage:
+      bucket-name: zuul
+    key-name: zuul
+    flavors:
+      - name: normal
+        instance-type: t3.medium
+
+- section:
+    name: aws-us-east-1
+    parent: aws-base
+    region: us-east-1
+
+- provider:
+    name: aws-us-east-1-main
+    section: aws-us-east-1
+    images:
+      - name: debian-local
+        iops: 2000
+    labels:
+      - name: debian-local-normal
+
+- provider:
+    name: aws-us-east-1-same
+    section: aws-us-east-1
+    # Remove image
+
+- provider:
+    name: aws-us-east-1-different
+    section: aws-us-east-1
+    # Remove image

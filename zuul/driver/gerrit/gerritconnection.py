@@ -61,7 +61,7 @@ from zuul.driver.gerrit.gerriteventgcloudpubsub import (
 from zuul.driver.git.gitwatcher import GitWatcher
 from zuul.lib import tracing
 from zuul.lib.logutil import get_annotated_logger
-from zuul.model import Ref, Tag, Branch, Project
+from zuul.model import Ref, Tag, Branch, Project, FalseWithReason
 from zuul.zk.branch_cache import BranchCache, BranchFlag, BranchInfo
 from zuul.zk.change_cache import (
     AbstractChangeCache,
@@ -74,17 +74,6 @@ from zuul.zk.event_queues import ConnectionEventQueue
 TIMEOUT = 30
 # SSH connection timeout
 SSH_TIMEOUT = TIMEOUT
-
-# commentSizeLimit default set by Gerrit.  Gerrit is a bit
-# vague about what this means, it says
-#
-#  Comments which exceed this size will be rejected ... Size
-#  computation is approximate and may be off by roughly 1% ...
-#  Default is 16k
-#
-# This magic number is int((16 << 10) * 0.98).  Robot comments
-# are accounted for separately.
-GERRIT_HUMAN_MESSAGE_LIMIT = 16056
 
 
 class HTTPConflictException(Exception):
@@ -540,7 +529,7 @@ class GerritEventConnector(BaseThreadPoolEventConnector):
 
         delay = None
         for event in self.event_queue.iter(event_id_offset):
-            if self._stopped:
+            if self._shouldStop():
                 break
 
             self._peek_queue.append(event)
@@ -1332,12 +1321,13 @@ class GerritConnection(ZKChangeCacheMixin, ZKBranchCacheMixin, BaseConnection):
             # means it's merged.
             return True
         if change.wip:
-            return False
+            self.log.debug("Unable to merge due to WIP")
+            return FalseWithReason("work in progress flag")
         missing_labels = change.missing_labels - set(allow_needs)
         if missing_labels:
             self.log.debug("Unable to merge due to "
                            "missing labels: %s", missing_labels)
-            return False
+            return FalseWithReason(f"missing labels: {missing_labels}")
         for sr in change.submit_requirements:
             if sr.get('status') == 'UNSATISFIED':
                 # Otherwise, we don't care and should skip.
@@ -1360,7 +1350,7 @@ class GerritConnection(ZKChangeCacheMixin, ZKBranchCacheMixin, BaseConnection):
                 if not expr_contains_allow:
                     self.log.debug("Unable to merge due to "
                                    "submit requirement: %s", sr)
-                    return False
+                    return FalseWithReason(f"submit requirement: {sr}")
         return True
 
     def getProjectOpenChanges(self, project: Project) -> List[GerritChange]:
@@ -1531,12 +1521,6 @@ class GerritConnection(ZKChangeCacheMixin, ZKBranchCacheMixin, BaseConnection):
             cmd += ' --notify %s' % shlex.quote(notify)
         if phase1:
             if message:
-                b_len = len(message.encode('utf-8'))
-                if b_len >= GERRIT_HUMAN_MESSAGE_LIMIT:
-                    log.info("Message truncated %d > %d" %
-                             (b_len, GERRIT_HUMAN_MESSAGE_LIMIT))
-                    message = ("%s... (truncated)" %
-                               message[:GERRIT_HUMAN_MESSAGE_LIMIT - 20])
                 cmd += ' --message %s' % shlex.quote(message)
             for key, val in labels.items():
                 if val is True:
@@ -1606,12 +1590,6 @@ class GerritConnection(ZKChangeCacheMixin, ZKBranchCacheMixin, BaseConnection):
             urllib.parse.quote(str(change.branch), safe=''),
             change.id)
         log = get_annotated_logger(self.log, zuul_event_id)
-        b_len = len(message.encode('utf-8'))
-        if b_len >= GERRIT_HUMAN_MESSAGE_LIMIT:
-            log.info("Message truncated %d > %d" %
-                     (b_len, GERRIT_HUMAN_MESSAGE_LIMIT))
-            message = ("%s... (truncated)" %
-                       message[:GERRIT_HUMAN_MESSAGE_LIMIT - 20])
         data = dict(strict_labels=False)
         if notify:
             data['notify'] = notify
@@ -2084,8 +2062,12 @@ class GerritConnection(ZKChangeCacheMixin, ZKBranchCacheMixin, BaseConnection):
                                          component_registry)
 
         self.log.info("Creating Zookeeper event queue")
+        if self.sched:
+            component_info = self.sched.component_info
+        else:
+            component_info = None
         self.event_queue = ConnectionEventQueue(
-            zk_client, self.connection_name)
+            zk_client, self.connection_name, component_info)
 
         # If the connection was not loaded by a scheduler, but by e.g.
         # zuul-web, we want to stop here.

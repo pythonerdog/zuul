@@ -48,6 +48,7 @@ class GitlabTrigger(BaseTrigger):
                 refs=refs,
                 labels=to_list(trigger.get('labels')),
                 unlabels=to_list(trigger.get('unlabels')),
+                debug=trigger.get('debug'),
             )
             efilters.append(f)
         return efilters
@@ -69,5 +70,6 @@ def getSchema():
         'ref': scalar_or_list(v.Any(ZUUL_REGEX, str)),
         'labels': scalar_or_list(str),
         'unlabels': scalar_or_list(str),
+        'debug': bool,
     }
     return gitlab_trigger

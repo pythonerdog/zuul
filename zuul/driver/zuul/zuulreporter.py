@@ -42,6 +42,7 @@ class ZuulReporter(BaseReporter):
                 continue
             image_name = build.job.image_build_name
             image = item.manager.tenant.layout.images[image_name]
+            ibas = []
             for artifact in get_artifacts_from_result_data(
                     build.result_data,
                     logger=self.log):
@@ -51,7 +52,9 @@ class ZuulReporter(BaseReporter):
                             item.manager.tenant.name, image, build,
                             metadata, artifact['url'],
                             self.image_validated)
-                        sched.createImageUploads(iba)
+                        ibas.append(iba)
+            for iba in ibas:
+                sched.createImageUploads(iba)
 
     def reportImageValidated(self, item):
         sched = self.driver.sched

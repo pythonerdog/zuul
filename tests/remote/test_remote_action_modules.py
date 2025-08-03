@@ -87,16 +87,16 @@ class FunctionalActionModulesMixIn:
         self._run_job('shell-good', 'SUCCESS')
 
 
-class TestActionModules8(AnsibleZuulTestCase, FunctionalActionModulesMixIn):
-    ansible_version = '8'
+class TestActionModules9(AnsibleZuulTestCase, FunctionalActionModulesMixIn):
+    ansible_version = '9'
 
     def setUp(self):
         super().setUp()
         self._setUp()
 
 
-class TestActionModules9(AnsibleZuulTestCase, FunctionalActionModulesMixIn):
-    ansible_version = '9'
+class TestActionModules11(AnsibleZuulTestCase, FunctionalActionModulesMixIn):
+    ansible_version = '11'
 
     def setUp(self):
         super().setUp()

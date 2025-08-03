@@ -182,12 +182,12 @@ pipeline.
       .. value:: merge-recursive
 
          Uses the ``recursive`` git merge strategy. This is the default
-         merge mode for GitHub Enterise version earlier than 3.8.
+         merge mode for GitHub Enterprise version earlier than 3.8.
 
       .. value:: merge-ort
 
          Uses the ``ort`` git merge strategy. This is the default merge
-         mode for github.com and GitHub Enterise version 3.8 or newer.
+         mode for github.com and GitHub Enterprise version 3.8 or newer.
 
       .. value:: cherry-pick
 
@@ -292,4 +292,4 @@ they are defined, they honor the implied branch :ref:`pragmas <pragma>`
 (unlike Projects).  The same heuristics described in
 :attr:`job.branches` that determine what implied branches a :ref:`job`
 will receive apply to Project Templates (with the exception that it is
-not possible to explicity set a branch matcher on a Project Template).
+not possible to explicitly set a branch matcher on a Project Template).

@@ -7,7 +7,7 @@ Project Testing Interface
 
 The following sections describe an example PTI (Project Testing Interface)
 implementation. The goal is to setup a consistent interface for driving tests
-and other necessary tasks to succesfully configure :ref:`project_gating` within
+and other necessary tasks to successfully configure :ref:`project_gating` within
 your organization.
 
 
@@ -30,7 +30,7 @@ couple of integrated projects named:
 org-config
 ~~~~~~~~~~
 
-The config project needs careful scrutiny as it defines priviledged Zuul
+The config project needs careful scrutiny as it defines privileged Zuul
 configurations that are shared by all your projects:
 
 :ref:`pipeline` triggers and requirements let you define when a change is
@@ -48,14 +48,14 @@ only manage its own configuration, and as part of a PTI implementation, you
 want to ensure your projects' changes undergo validation that are defined
 globally by your organization.
 
-Because the nature of those configuration settings are priviledged,
+Because the nature of those configuration settings are privileged,
 config-projects changes are only effective when merged.
 
 
 org-jobs
 ~~~~~~~~
 
-Jobs definition content are not priviledged Zuul settings and jobs can be
+Jobs definition content are not privileged Zuul settings and jobs can be
 defined in a regular :term:`untrusted-project`.
 As a matter of fact, it is recommended to define jobs outside of the config
 project so that job updates can be tested before being merged.
@@ -111,7 +111,7 @@ In the org-config project, we define a project template:
           - org-integration-test
 
 
-Finaly, in the org-config project, we setup the PTI template on both projects:
+Finally, in the org-config project, we setup the PTI template on both projects:
 
 .. code-block:: yaml
 
@@ -176,7 +176,7 @@ codestyle check using such commit:
 
   Update codestyle to enforce CamelCase.
 
-Then, without merging this proposal, it can be tested accross the projects using
+Then, without merging this proposal, it can be tested across the projects using
 such commit:
 
 .. code-block:: text

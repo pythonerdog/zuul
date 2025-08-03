@@ -66,6 +66,9 @@ class StaticChangeQueueContextManager(object):
         pass
 
 
+EventMatchInfo = collections.namedtuple('EventMatchInfo', ['debug'])
+
+
 class PipelineManager(metaclass=ABCMeta):
     """Abstract Base Class for enqueing and processing Changes in a Pipeline"""
 
@@ -199,12 +202,16 @@ class PipelineManager(metaclass=ABCMeta):
         return allow_needs
 
     def eventMatches(self, event, change):
+        # Return False if the event does not match, return a
+        # EventMatchInfo (which will eval to True) if it does.  The
+        # EventMatchInfo further indicates whether pipeline debugging
+        # should be enabled.
         log = get_annotated_logger(self.log, event)
         if event.forced_pipeline:
             if event.forced_pipeline == self.pipeline.name:
                 log.debug("Event %s for change %s was directly assigned "
                           "to pipeline %s" % (event, change, self))
-                return True
+                return EventMatchInfo(debug=False)
             else:
                 return False
         for ef in self.pipeline.event_filters:
@@ -212,7 +219,7 @@ class PipelineManager(metaclass=ABCMeta):
             if match_result:
                 log.debug("Event %s for change %s matched %s "
                           "in pipeline %s" % (event, change, ef, self))
-                return True
+                return EventMatchInfo(debug=ef.debug)
             else:
                 log.debug("Event %s for change %s does not match %s "
                           "in pipeline %s because %s" % (
@@ -302,14 +309,18 @@ class PipelineManager(metaclass=ABCMeta):
             with contextlib.suppress(KeyError):
                 del self._change_cache[key]
 
-    def isChangeAlreadyInPipeline(self, change):
+    def isChangeAlreadyInPipeline(self, change, event):
         # Checks live items in the pipeline
         for item in self.state.getAllItems():
             if not item.live:
                 continue
             for c in item.changes:
                 if change.equals(c):
-                    return True
+                    if event and item.event:
+                        if item.event.isSuperset(event):
+                            return True
+                    else:
+                        return True
         return False
 
     def isChangeRelevantToPipeline(self, change):
@@ -327,7 +338,7 @@ class PipelineManager(metaclass=ABCMeta):
                         return True
         return False
 
-    def isChangeAlreadyInQueue(self, change, change_queue, item=None):
+    def isChangeAlreadyInQueue(self, change, change_queue, event, item=None):
         # Checks any item in the specified change queue
         # If item is supplied, only consider items ahead of the
         # supplied item (ie, is the change already in the queue ahead
@@ -337,7 +348,11 @@ class PipelineManager(metaclass=ABCMeta):
                 break
             for c in queue_item.changes:
                 if change.equals(c):
-                    return True
+                    if event and queue_item.event:
+                        if queue_item.event.isSuperset(event):
+                            return True
+                    else:
+                        return True
         return False
 
     def refreshDeps(self, change, event):
@@ -428,12 +443,13 @@ class PipelineManager(metaclass=ABCMeta):
                     report_errors.append(str(e))
         return report_errors
 
-    def areChangesReadyToBeEnqueued(self, changes, event):
+    def areChangesReadyToBeEnqueued(self, changes, event,
+                                    warnings=None, debug=False):
         return True
 
     def enqueueChangesAhead(self, change, event, quiet, ignore_requirements,
                             change_queue, history=None, dependency_graph=None,
-                            warnings=None):
+                            warnings=None, debug=False):
         return True
 
     def enqueueChangesBehind(self, change, event, quiet, ignore_requirements,
@@ -652,7 +668,8 @@ class PipelineManager(metaclass=ABCMeta):
     def addChange(self, change, event, quiet=False, enqueue_time=None,
                   ignore_requirements=False, live=True,
                   change_queue=None, history=None, dependency_graph=None,
-                  skip_presence_check=False, warnings=None):
+                  skip_presence_check=False, warnings=None,
+                  debug=False):
         log = get_annotated_logger(self.log, event)
         log.debug("Considering adding change %s" % change)
 
@@ -670,7 +687,7 @@ class PipelineManager(metaclass=ABCMeta):
         # anywhere in the pipeline.  Otherwise, we will perform the
         # duplicate check below on the specific change_queue.
         if (live and
-            self.isChangeAlreadyInPipeline(change) and
+            self.isChangeAlreadyInPipeline(change, event) and
             not skip_presence_check):
             log.debug("Change %s is already in pipeline, ignoring" % change)
             return True
@@ -712,14 +729,28 @@ class PipelineManager(metaclass=ABCMeta):
                             continue
                         match_result = f.matches(cycle_change)
                         if not match_result:
-                            log.debug("Change %s does not match pipeline "
-                                      "requirement %s because %s",
-                                      cycle_change, f, str(match_result))
+                            msg = (
+                                f"Change {cycle_change} "
+                                "does not match pipeline "
+                                f"requirement {f} because {match_result}"
+                            )
+                            log.debug(msg)
+                            if debug:
+                                warnings.append(msg)
+                                if not history:
+                                    self._reportNonEnqueuedItem(
+                                        change_queue, change, event, warnings)
                             return False
 
-            if not self.areChangesReadyToBeEnqueued(cycle, event):
+            if not self.areChangesReadyToBeEnqueued(
+                    cycle, event,
+                    warnings=warnings, debug=debug):
                 log.debug("Cycle %s is not ready to be enqueued, ignoring" %
                           cycle)
+                if warnings:
+                    if not history:
+                        self._reportNonEnqueuedItem(change_queue, change,
+                                                    event, warnings)
                 return False
 
             if len(cycle) > 1:
@@ -756,7 +787,7 @@ class PipelineManager(metaclass=ABCMeta):
                     ignore_requirements,
                     change_queue, history=history,
                     dependency_graph=dependency_graph,
-                    warnings=warnings):
+                    warnings=warnings, debug=debug):
                 log.debug("Failed to enqueue changes ahead of %s" % change)
                 if warnings:
                     self._reportNonEnqueuedItem(change_queue, change,
@@ -765,7 +796,7 @@ class PipelineManager(metaclass=ABCMeta):
 
             log.debug("History after enqueuing changes ahead: %s", history)
 
-            if self.isChangeAlreadyInQueue(change, change_queue):
+            if self.isChangeAlreadyInQueue(change, change_queue, event):
                 if not skip_presence_check:
                     log.debug("Change %s is already in queue, ignoring",
                               change)
@@ -785,7 +816,8 @@ class PipelineManager(metaclass=ABCMeta):
 
             item = change_queue.enqueueChanges(cycle, event,
                                                span_info=span_info,
-                                               enqueue_time=enqueue_time)
+                                               enqueue_time=enqueue_time,
+                                               debug=debug)
 
             with item.activeContext(self.current_context):
                 if enqueue_time:
@@ -1165,6 +1197,8 @@ class PipelineManager(metaclass=ABCMeta):
         return True
 
     def _useNodepoolFallback(self, log, job):
+        if not self.tenant.use_nodepool:
+            return False
         labels = {n.label for n in job.nodeset.getNodes()}
         for provider in self.tenant.layout.providers.values():
             labels -= set(provider.labels.keys())
@@ -1385,8 +1419,7 @@ class PipelineManager(metaclass=ABCMeta):
                     files,
                     additional_project_branches,
                     self.sched.ansible_manager,
-                    include_config_projects=True,
-                    zuul_event_id=None)
+                    include_config_projects=True)
                 trusted_errors = len(filter_severity(
                     trusted_layout.loading_errors.errors,
                     errors=True, warnings=False)) > 0
@@ -1400,8 +1433,7 @@ class PipelineManager(metaclass=ABCMeta):
                     files,
                     additional_project_branches,
                     self.sched.ansible_manager,
-                    include_config_projects=False,
-                    zuul_event_id=None)
+                    include_config_projects=False)
                 untrusted_errors = len(filter_severity(
                     untrusted_layout.loading_errors.errors,
                     errors=True, warnings=False)) > 0
@@ -2175,6 +2207,13 @@ class PipelineManager(metaclass=ABCMeta):
         build_set = build.build_set
 
         if build.retry:
+            if build.unreachable and build.job.incrementNodesetIndex():
+                # If we are retrying a build because it encountered an
+                # unreachable host, increment the nodeset.
+                log.info("Next node request for retried build of job "
+                         f"{build.job.name} of item {build_set.item} "
+                         f"with nodeset alternative {build.job.nodeset_index}")
+
             if build_set.getJobNodeSetInfo(build.job):
                 build_set.removeJobNodeSetInfo(build.job)
 
@@ -2272,13 +2311,9 @@ class PipelineManager(metaclass=ABCMeta):
                 build_set.repo_state_state = build_set.COMPLETE
 
     def _handleNodeRequestFallback(self, log, build_set, job, old_request):
-        if len(job.nodeset_alternatives) <= job.nodeset_index + 1:
+        if not job.incrementNodesetIndex():
             # No alternatives to fall back upon
             return False
-
-        # Increment the nodeset index and remove the old request
-        with job.activeContext(self.current_context):
-            job.nodeset_index = job.nodeset_index + 1
 
         log.info("Re-attempting node request for job "
                  f"{job.name} of item {build_set.item} "

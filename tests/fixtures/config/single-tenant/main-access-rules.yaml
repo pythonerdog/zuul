@@ -4,7 +4,8 @@
       - groups: users
 
 - api-root:
-    access-rules: user-rule
+    access-rules:
+      - user-rule
 
 - tenant:
     name: tenant-one

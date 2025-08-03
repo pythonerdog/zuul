@@ -52,3 +52,22 @@ can simply be used by listing ``zuul`` as the trigger.
       Only available for ``parent-change-enqueued`` events.  This is
       the name of the pipeline in which the parent change was
       enqueued.
+
+   .. attr:: debug
+      :default: false
+
+      When set to `true`, this will cause debug messages to be
+      included when the queue item is reported.  These debug messages
+      may be used to help diagnose why certain jobs did or did not
+      run, and in many cases, why the item was not ultimately enqueued
+      into the pipeline.
+
+      Setting this value also effectively sets
+      :attr:`project.<pipeline>.debug` for affected queue items.
+
+      This only applies to items that arrive at a pipeline via this
+      particular trigger.  Since the output is very verbose and
+      typically not needed or desired, this allows for a configuration
+      where typical pipeline triggers omit the debug output, but
+      triggers that match certain specific criteria may be used to
+      request debug information.

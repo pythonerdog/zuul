@@ -2,10 +2,12 @@
 *.egg
 *.egg-info
 *.pyc
+*.retry
 .idea
 .mypy_cache
 .test
 .testrepository
+.nox
 .tox
 .venv
 .coverage
@@ -18,6 +20,9 @@ zuul/versioninfo
 dist/
 cover/
 htmlcov/
-zuul/web/static
+web/build
+zuul/web/static/*
+!.keep
 node_modules
 yarn-error.log
+tools/ca/

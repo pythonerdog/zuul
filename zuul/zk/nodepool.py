@@ -15,7 +15,7 @@ import logging
 import os
 import time
 from enum import Enum
-from typing import Optional, List
+from typing import Optional
 import threading
 
 from kazoo.exceptions import NoNodeError, LockTimeout
@@ -266,28 +266,15 @@ class ZooKeeperNodepool(ZooKeeperBase):
             path = self.HOLD_REQUEST_ROOT + "/" + request.id
             self.kazoo_client.set(path, request.serialize())
 
-    def _markHeldNodesAsUsed(self, request: HoldRequest):
+    def _markHeldNodesAsUsed(self, hold_request, node_group):
         """
         Changes the state for each held node for the hold request to 'used'.
 
         :returns: True if all nodes marked USED, False otherwise.
         """
-        def getHeldNodeIDs(req: HoldRequest) -> List[str]:
-            node_ids: List[str] = []
-            for data in req.nodes:
-                # TODO(Shrews): Remove type check at some point.
-                # When autoholds were initially changed to be stored in ZK,
-                # the node IDs were originally stored as a list of strings.
-                # A later change embedded them within a dict. Handle both
-                # cases here to deal with the upgrade.
-                if isinstance(data, dict):
-                    node_ids += data['nodes']
-                else:
-                    node_ids.append(data)
-            return node_ids
 
         failure = False
-        for node_id in getHeldNodeIDs(request):
+        for node_id in node_group['nodes']:
             node = self._getNodeData(node_id)
             if not node or node['state'] == zuul.model.STATE_USED:
                 continue
@@ -310,7 +297,7 @@ class ZooKeeperNodepool(ZooKeeperBase):
             except Exception:
                 self.log.exception("Cannot change HELD node state to USED "
                                    "for node %s in request %s",
-                                   node_obj.id, request.id)
+                                   node_obj.id, hold_request.id)
                 failure = True
             finally:
                 try:
@@ -319,22 +306,33 @@ class ZooKeeperNodepool(ZooKeeperBase):
                 except Exception:
                     self.log.exception(
                         "Failed to unlock HELD node %s for request %s",
-                        node_obj.id, request.id)
+                        node_obj.id, hold_request.id)
 
         return not failure
 
-    def deleteHoldRequest(self, request: HoldRequest):
+    def deleteHoldRequest(self, hold_request, launcher_client):
         """
         Delete a hold request.
 
         :param HoldRequest request: Object representing the hold request.
         """
-        if not self._markHeldNodesAsUsed(request):
-            self.log.info("Unable to delete hold request %s because "
-                          "not all nodes marked as USED.", request.id)
-            return
+        for node_group in hold_request.nodes:
+            if node_group.get('niz', False):
+                if not launcher_client.markHeldNodesAsUsed(
+                        hold_request, node_group):
+                    self.log.info("Unable to delete hold request %s because "
+                                  "not all nodes marked as USED.",
+                                  hold_request.id)
+                    return
+            else:
+                if not self._markHeldNodesAsUsed(
+                        hold_request, node_group):
+                    self.log.info("Unable to delete hold request %s because "
+                                  "not all nodes marked as USED.",
+                                  hold_request.id)
+                    return
 
-        path = self.HOLD_REQUEST_ROOT + "/" + request.id
+        path = self.HOLD_REQUEST_ROOT + "/" + hold_request.id
         try:
             self.kazoo_client.delete(path, recursive=True)
         except NoNodeError:

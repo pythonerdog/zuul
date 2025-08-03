@@ -18,9 +18,26 @@
 # symbols, and is quite a bit larger).
 ARG IMAGE_FLAVOR=
 
+# Base images, defined as separate stages to allow for mirror selection or
+# downstream customization via named contexts when built with docker buildx.
+
 # This is a mirror of:
-# FROM docker.io/library/node:23-bookworm as js-builder
-FROM quay.io/opendevmirror/node:23-bookworm as js-builder
+# FROM docker.io/opendevorg/python-base:3.11-bookworm${IMAGE_FLAVOR} AS zuul-base
+FROM quay.io/opendevmirror/python-base:3.11-bookworm${IMAGE_FLAVOR} AS zuul-base
+
+# This is a mirror of:
+# FROM docker.io/library/node:22-bookworm AS node-base
+FROM quay.io/opendevmirror/node:22-bookworm AS node-base
+
+# This is a mirror of:
+# FROM golang:1.22-bookworm AS go-base
+FROM quay.io/opendevmirror/golang:1.22-bookworm AS go-base
+
+# This is a mirror of:
+# FROM docker.io/opendevorg/python-builder:3.11-bookworm AS builder-base
+FROM quay.io/opendevmirror/python-builder:3.11-bookworm AS builder-base
+
+FROM node-base AS js-builder
 
 COPY web /tmp/src
 # Explicitly run the Javascript build
@@ -28,9 +45,7 @@ RUN cd /tmp/src && yarn install -d && yarn build
 
 # We need skopeo >=v1.14.0 to negotioate with newer docker; once this
 # is available in debian we can drop the custom build.
-# This is a mirror of:
-# FROM golang:1.22-bookworm as go-builder
-FROM quay.io/opendevmirror/golang:1.22-bookworm as go-builder
+FROM go-base AS go-builder
 
 # Keep this in sync with zuul-jobs ensure-skopeo
 ARG SKOPEO_VERSION=v1.14.2
@@ -43,9 +58,7 @@ RUN apt-get update && \
     git checkout $SKOPEO_VERSION && \
     make bin/skopeo
 
-# This is a mirror of:
-# FROM docker.io/opendevorg/python-builder:3.11-bookworm as builder
-FROM quay.io/opendevmirror/python-builder:3.11-bookworm as builder
+FROM builder-base AS builder
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Optional location of Zuul API endpoint.
@@ -75,9 +88,7 @@ RUN /output/install-from-bindep \
   && echo $OPENSHIFT_SHA /tmp/openshift-install/openshift-client.tgz | sha256sum --check \
   && tar xvfz openshift-client.tgz -C /tmp/openshift-install
 
-# This is a mirror of:
-# FROM docker.io/opendevorg/python-base:3.11-bookworm${IMAGE_FLAVOR} as zuul
-FROM quay.io/opendevmirror/python-base:3.11-bookworm${IMAGE_FLAVOR} as zuul
+FROM zuul-base AS zuul
 ENV DEBIAN_FRONTEND=noninteractive
 ARG IMAGE_FLAVOR=
 
@@ -100,7 +111,7 @@ RUN /output/install-from-bindep zuul_base \
 VOLUME /var/lib/zuul
 CMD ["/usr/local/bin/zuul"]
 
-FROM zuul as zuul-executor
+FROM zuul AS zuul-executor
 ENV DEBIAN_FRONTEND=noninteractive
 COPY --from=builder /usr/local/lib/zuul/ /usr/local/lib/zuul
 COPY --from=builder /tmp/openshift-install/oc /usr/local/bin/oc
@@ -120,17 +131,17 @@ RUN apt-get update \
 
 CMD ["/usr/local/bin/zuul-executor", "-f"]
 
-FROM zuul as zuul-fingergw
+FROM zuul AS zuul-fingergw
 CMD ["/usr/local/bin/zuul-fingergw", "-f"]
 
-FROM zuul as zuul-launcher
+FROM zuul AS zuul-launcher
 CMD ["/usr/local/bin/zuul-launcher", "-f"]
 
-FROM zuul as zuul-merger
+FROM zuul AS zuul-merger
 CMD ["/usr/local/bin/zuul-merger", "-f"]
 
-FROM zuul as zuul-scheduler
+FROM zuul AS zuul-scheduler
 CMD ["/usr/local/bin/zuul-scheduler", "-f"]
 
-FROM zuul as zuul-web
+FROM zuul AS zuul-web
 CMD ["/usr/local/bin/zuul-web", "-f"]

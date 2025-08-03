@@ -16,16 +16,4 @@ documentation instead.
 .. toctree::
    :maxdepth: 1
 
-   circular-dependencies
-   circular-dependencies-refactor
-   community-matrix
-   configure-projects
-   enhanced-regional-executors
-   kubernetes-operator
    nodepool-in-zuul
-   status-page-2.0
-   tenant-resource-quota
-   tenant-scoped-admin-web-API
-   tracing
-   zuul-runner
-   zuul-workload-identity-federation

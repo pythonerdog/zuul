@@ -53,13 +53,13 @@ class SimpleTreeCache(ZuulTreeCache):
         object_path = path[len(self.root):].strip("/")
         parts = object_path.split('/')
         if not parts:
-            return None
-        return tuple(parts)
+            return None, False
+        return tuple(parts), True
 
 
 class SimpleSubnodeTreeCache(SimpleTreeCache):
     def preCacheHook(self, event, exists, data=None, stat=None):
-        parts = self.parsePath(event.path)
+        parts, shouldFetch = self.parsePath(event.path)
         if len(parts) > 1:
             cache_key = (parts[0],)
             if exists:

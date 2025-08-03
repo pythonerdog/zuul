@@ -95,6 +95,10 @@ class QuotaException(Exception):
     pass
 
 
+class AlgorithmNotSupportedException(Exception):
+    pass
+
+
 # Authentication Exceptions
 class AuthTokenException(Exception):
     defaultMsg = 'Unknown Error'
@@ -244,6 +248,40 @@ class MaxTimeoutError(ConfigurationSyntaxError):
         super(MaxTimeoutError, self).__init__(message)
 
 
+class PreTimeoutExceedsTimeoutError(ConfigurationSyntaxError):
+    zuul_error_name = 'Pre-Timeout Exceeds Timeout'
+
+    def __init__(self, job):
+        message = textwrap.dedent("""\
+        The job "{job}" has a pre-timeout of {pre_timeout}
+        that exceeds its timeout of {timeout}.""")
+        message = textwrap.fill(message.format(
+            job=job.name, pre_timeout=job.pre_timeout, timeout=job.timeout))
+        super(PreTimeoutExceedsTimeoutError, self).__init__(message)
+
+
+class MaxOIDCTTLError(ConfigurationSyntaxError):
+    zuul_error_name = 'Max OIDC TTL Exceeded'
+
+    def __init__(self, secret, tenant):
+        message = textwrap.dedent("""\
+        The oidc secret "{secret}" exceeds tenant max-oidc-ttl {max_ttl}.""")
+        message = textwrap.fill(message.format(
+            secret=secret.name, max_ttl=tenant.max_oidc_ttl))
+        super(MaxOIDCTTLError, self).__init__(message)
+
+
+class OIDCIssuerNotAllowedError(ConfigurationSyntaxError):
+    zuul_error_name = 'OIDC issuer not allowed'
+
+    def __init__(self, secret, issuer):
+        message = textwrap.dedent("""\
+        The iss "{issuer}" in oidc secret "{secret}" is not allowed.""")
+        message = textwrap.fill(message.format(
+            secret=secret.name, issuer=issuer))
+        super(OIDCIssuerNotAllowedError, self).__init__(message)
+
+
 class DuplicateGroupError(ConfigurationSyntaxError):
     zuul_error_name = 'Duplicate Nodeset Group'
 
@@ -302,6 +340,17 @@ class NodesetNotFoundError(ConfigurationSyntaxError):
         """)
         message = textwrap.fill(message.format(nodeset=nodeset))
         super(NodesetNotFoundError, self).__init__(message)
+
+
+class LabelNotFoundError(ConfigurationSyntaxError):
+    zuul_error_name = 'Label Not Found'
+
+    def __init__(self, label):
+        message = textwrap.dedent("""\
+        The label "{label}" was not found.
+        """)
+        message = textwrap.fill(message.format(label=label))
+        super(LabelNotFoundError, self).__init__(message)
 
 
 class PipelineNotPermittedError(ConfigurationSyntaxError):

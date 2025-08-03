@@ -12,6 +12,9 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+import concurrent.futures
+import time
+
 import fixtures
 import testtools
 from kazoo.exceptions import NoNodeError
@@ -147,7 +150,7 @@ class BaseCloudDriverTest(ZuulTestCase):
         with testtools.ExpectedException(Exception):
             self.waitForNodeRequest(request2, 10)
         request2 = client.getRequest(request2.uuid)
-        self.assertEqual(request2.state, model.NodesetRequest.State.ACCEPTED)
+        self.assertEqual(request2.state, model.NodesetRequest.State.REQUESTED)
 
         client.returnNodeset(nodeset1)
         self.waitUntilSettled()
@@ -194,3 +197,66 @@ class BaseCloudDriverTest(ZuulTestCase):
         self.assertEqual(artifacts[0].uuid, uploads[0].artifact_uuid)
         self.assertIsNotNone(uploads[0].external_id)
         self.assertTrue(uploads[0].validated)
+
+    def _drive_state_machine(self, ctx, node, future_names, provider, create):
+        executed_future_names = set()
+        next_future_names = set()
+        for _ in iterate_timeout(60, "create state machine to complete"):
+            with node.activeContext(ctx):
+                # Re-create the SM from the state in ZK
+                if create:
+                    sm = provider.getCreateStateMachine(
+                        node, None, self.log)
+                    node.create_state_machine = sm
+                else:
+                    sm = provider.getDeleteStateMachine(
+                        node, self.log)
+                    node.delete_state_machine = sm
+
+                with self._block_futures():
+                    sm.advance()
+                # If there are pending futures we will try to re-create
+                # the SM once from the state and then advance it once
+                # more so the futures can complete.
+                pending_futures = {
+                    name: future
+                    for name in future_names
+                    if (future := getattr(sm, name, None))
+                }
+                this_futures = {
+                    name: future for (name, future)
+                    in pending_futures.items()
+                    if name in next_future_names
+                }
+                if this_futures:
+                    concurrent.futures.wait(this_futures.values())
+                    executed_future_names.update(this_futures.keys())
+                    sm.advance()
+                next_future_names = (set(pending_futures.keys()) -
+                                     executed_future_names)
+            if sm.complete:
+                break
+            # Avoid busy-looping as we have to wait for the TTL
+            # cache to expire.
+            time.sleep(0.5)
+
+    def _test_state_machines(self, label_name, provider_name,
+                             node_class, future_names):
+        # Stop the launcher main loop, so we can drive the state machine
+        # on our own.
+        self.waitUntilSettled()
+        self.launcher._running = False
+        self.launcher.wake_event.set()
+        self.launcher.launcher_thread.join()
+
+        layout = self.scheds.first.sched.abide.tenants.get('tenant-one').layout
+        provider = layout.providers[provider_name]
+        # Start the endpoint since we're going to use the scheduler's endpoint.
+        provider.getEndpoint().start()
+
+        with self.createZKContext(None) as ctx:
+            node = node_class.new(ctx, label=label_name,
+                                  uuid='1234',
+                                  tags={'zuul_node_uuid': '1234'})
+            self._drive_state_machine(ctx, node, future_names, provider, True)
+            self._drive_state_machine(ctx, node, future_names, provider, False)

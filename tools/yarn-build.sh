@@ -24,7 +24,7 @@ then
     # Initialize nodeenv and tell it to re-use the currently active virtualenv
     attempts=0
     set +e
-    until nodeenv --python-virtualenv -n 23.10.0 ; do
+    until nodeenv --python-virtualenv -n 22.11.0 ; do
         ((attempts++))
         if [[ $attempts > 2 ]]
         then

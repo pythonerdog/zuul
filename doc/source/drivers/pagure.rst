@@ -28,7 +28,7 @@ Each project to be integrated with Zuul needs:
 - "Open metadata access to all" set to off (optional, expected if approval
   based on PR a metadata tag)
 - "Minimum score to merge pull-request" set to the same value than
-  the score requierement (optional, expected if score requierement is
+  the score requirement (optional, expected if score requirement is
   defined in a pipeline)
 
 Furthermore, the user must be added as project collaborator
@@ -91,7 +91,7 @@ The supported options in ``zuul.conf`` connections are:
    .. attr:: source_whitelist
       :default: ''
 
-      A comma separated list of source ip adresses from which webhook
+      A comma separated list of source ip addresses from which webhook
       calls are whitelisted. If the source is not whitelisted, then
       call payload's signature is verified using the project webhook
       token. An admin access to the project is required by Zuul to read
@@ -193,6 +193,26 @@ the following options.
       a regular expression and multiple refs may be listed. Pagure
       always sends full ref name, eg. ``refs/tags/bar`` and this
       string is matched against the regular expression.
+
+   .. attr:: debug
+      :default: false
+
+      When set to `true`, this will cause debug messages to be
+      included when the queue item is reported.  These debug messages
+      may be used to help diagnose why certain jobs did or did not
+      run, and in many cases, why the item was not ultimately enqueued
+      into the pipeline.
+
+      Setting this value also effectively sets
+      :attr:`project.<pipeline>.debug` for affected queue items.
+
+      This only applies to items that arrive at a pipeline via this
+      particular trigger.  Since the output is very verbose and
+      typically not needed or desired, this allows for a configuration
+      where typical pipeline triggers omit the debug output, but
+      triggers that match certain specific criteria may be used to
+      request debug information.
+
 
 Reporter Configuration
 ----------------------

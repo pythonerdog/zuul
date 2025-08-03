@@ -230,6 +230,7 @@ class ComponentRegistry(ZooKeeperBase):
     def __init__(self, client):
         super().__init__(client)
 
+        self.callbacks = set()
         self.client = client
         self._component_tree = None
         # kind -> hostname -> component
@@ -315,6 +316,7 @@ class ComponentRegistry(ZooKeeperBase):
 
             self._cached_components[kind][hostname] = component
             self._updateMinimumModelApi()
+            self._handleCallbacks()
         elif (etype == EventType.DELETED or data is None):
             self.log.info(
                 "Noticed %s component %s disappeared",
@@ -325,6 +327,7 @@ class ComponentRegistry(ZooKeeperBase):
                 # If it's already gone, don't care
                 pass
             self._updateMinimumModelApi()
+            self._handleCallbacks()
             # Return False to stop the datawatch
             return False
 
@@ -394,3 +397,16 @@ class ComponentRegistry(ZooKeeperBase):
                                "data corruption is very likely to occur.")
                 # Should we exit here as well?
         self.model_api = version
+
+    def _handleCallbacks(self):
+        for cb in self.callbacks:
+            try:
+                cb()
+            except Exception:
+                self.log.exception("Error in component registry callback:")
+
+    def registerCallback(self, func):
+        self.callbacks.add(func)
+
+    def unregisterCallback(self, func):
+        self.callbacks.discard(func)

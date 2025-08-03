@@ -279,6 +279,13 @@ class ZooKeeperBase(ZooKeeperSimpleBase):
             self.client.on_reconnect_listeners.append(self._onReconnect)
             self.client.on_suspended_listeners.append(self._onSuspended)
 
+    def stop(self):
+        if self.client:
+            self.client.on_connect_listeners.remove(self._onConnect)
+            self.client.on_disconnect_listeners.remove(self._onDisconnect)
+            self.client.on_reconnect_listeners.remove(self._onReconnect)
+            self.client.on_suspended_listeners.remove(self._onSuspended)
+
     def _onConnect(self):
         pass
 

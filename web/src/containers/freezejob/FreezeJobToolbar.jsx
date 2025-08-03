@@ -90,6 +90,7 @@ function FreezeJobToolbar(props) {
   }
 
   function renderFreezeJobToolbar () {
+    const buttonText = props.buttonText || 'Freeze Job'
     return <>
       <Toolbar collapseListedFiltersBreakpoint="md">
         <ToolbarContent>
@@ -157,7 +158,7 @@ function FreezeJobToolbar(props) {
                 <Button
                   onClick={(event) => handleInputSend(event)}
                 >
-                  Freeze Job
+                  {buttonText}
                 </Button>
               </ToolbarItem>
 
@@ -184,6 +185,7 @@ FreezeJobToolbar.propTypes = {
   defaultProject: PropTypes.string,
   defaultBranch: PropTypes.string,
   defaultJob: PropTypes.string,
+  buttonText: PropTypes.string,
 }
 
 function mapStateToProps(state) {

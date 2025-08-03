@@ -59,15 +59,24 @@ class LockableZKObjectCache(ZuulTreeCache):
         return parts
 
     def parsePath(self, path):
+        key = None
+        fetch = False
         parts = self._parsePath(path)
         if parts is None:
-            return None
+            return (key, fetch)
         if len(parts) < 2:
-            return None
-        if parts[0] != self.items_path:
-            return None
-        item_uuid = parts[1]
-        return (item_uuid,)
+            return (key, fetch)
+
+        object_type, item_uuid, *_ = parts
+        if object_type == self.items_path:
+            key = (item_uuid,)
+            fetch = True
+        elif object_type == self.locks_path:
+            key = None
+            if len(parts) == 3:
+                fetch = True
+
+        return (key, fetch)
 
     def preCacheHook(self, event, exists, data=None, stat=None):
         parts = self._parsePath(event.path)
@@ -78,7 +87,7 @@ class LockableZKObjectCache(ZuulTreeCache):
         if len(parts) != 3:
             return
 
-        object_type, request_uuid, *_ = parts
+        object_type, request_uuid, contender, *_ = parts
         if object_type != self.locks_path:
             return
 
@@ -88,8 +97,31 @@ class LockableZKObjectCache(ZuulTreeCache):
         if not request:
             return
 
-        if request.is_locked != exists:
-            request._set(is_locked=exists)
+        if exists:
+            request._lock_contenders[contender] = data
+        else:
+            request._lock_contenders.pop(contender, None)
+
+        is_locked = bool(request._lock_contenders)
+        lock_holder = None
+        if is_locked:
+            # This is a very simplified contender lock algorithm that
+            # only works for exclusive locks.
+            sorted_names = sorted(request._lock_contenders.keys(),
+                                  key=lambda x: x[-10:])
+            if sorted_names:
+                lock_holder = request._lock_contenders[sorted_names[0]]
+                if lock_holder:
+                    lock_holder = lock_holder.decode('utf8')
+                else:
+                    lock_holder = None
+        update_args = {}
+        if request.is_locked != is_locked:
+            update_args['is_locked'] = is_locked
+        if request.lock_holder != lock_holder:
+            update_args['lock_holder'] = lock_holder
+        if update_args:
+            request._set(**update_args)
             if self.updated_event:
                 self.updated_event()
 

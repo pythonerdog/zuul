@@ -137,7 +137,7 @@ const JOB_STATE_ICON_CONFIGS = {
   },
   QUEUED: {
     icon: OutlinedClockIcon,
-    color: 'var(--zuul-color-pending)',
+    color: 'var(--zuul-color-disabled)',
     variant: 'pending',
     labelColor: 'grey',
   },
@@ -155,9 +155,9 @@ const JOB_STATE_ICON_CONFIGS = {
   },
   CANCELED: {
     icon: TimesIcon,
-    color: 'var(--zuul-color-warning)',
-    variant: 'warning',
-    labelColor: 'orange',
+    color: 'var(--zuul-color-disabled)',
+    variant: 'pending',
+    labelColor: 'grey',
   },
   POST_FAILURE: {
     icon: TimesIcon,
@@ -173,9 +173,9 @@ const JOB_STATE_ICON_CONFIGS = {
   },
   TIMED_OUT: {
     icon: TimesIcon,
-    color: 'var(--zuul-color-warning)',
-    variant: 'warning',
-    labelColor: 'orange',
+    color: 'var(--zuul-color-danger)',
+    variant: 'danger',
+    labelColor: 'red',
   },
   RETRY_LIMIT: {
     icon: TimesIcon,
@@ -188,6 +188,12 @@ const JOB_STATE_ICON_CONFIGS = {
     color: 'var(--zuul-color-warning)',
     variant: 'warning',
     labelColor: 'orange',
+  },
+  MERGE_CONFLICT: {
+    icon: TimesIcon,
+    color: 'var(--zuul-color-danger)',
+    variant: 'danger',
+    labelColor: 'red',
   },
 }
 

@@ -97,7 +97,7 @@ Here is an example ``queue`` configuration.
       Gerrit, some Zuul users may wish to emulate the behavior for
       some projects without enabling it for all of Gerrit.  In this
       case, setting ``dependencies-by-topic`` will cause Zuul to
-      approxiamate the Gerrit behavior only for changes enqueued into
+      approximate the Gerrit behavior only for changes enqueued into
       queues where this is set.
 
       This setting requires :attr:`queue.allow-circular-dependencies`

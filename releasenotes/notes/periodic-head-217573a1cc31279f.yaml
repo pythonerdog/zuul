@@ -1,0 +1,27 @@
+---
+features:
+  - |
+    An option has been added to allow multiple timer-triggered queue
+    items for the same project-branch may now be enqueued if the
+    branch head has advanced.
+
+    Previously timer-triggered items only included information about
+    the project and branch, and therefore if a job on such an item ran
+    longer than the timer interval, Zuul would not enqueue a second
+    copy of the item because it would have been seen as identical to
+    the first (even if the underlying repo had changed.
+
+    If the new ``dereference`` attribute of the timer trigger is set,
+    Zuul will now include information about the branch head SHA of the
+    queue item, so that now if a timer trigger fires while a queue
+    item for the same project-branch is already in the queue, the
+    second item will be enqueued if the branch has changed since the
+    first item was enqueued.  If the SHA of the branch head is the
+    same for both items, the second item will not be enqueued.
+
+    When set, the ``newrev`` is now available in the job's ``zuul``
+    variables for such queue items.
+
+    The previous behavior remains the default, where derefence is not
+    set, and ``newrev`` is not available.
+

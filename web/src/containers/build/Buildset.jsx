@@ -18,6 +18,10 @@ import { connect, useDispatch } from 'react-redux'
 import { Link } from 'react-router-dom'
 import {
   Button,
+  CodeBlock,
+  CodeBlockCode,
+  ExpandableSection,
+  ExpandableSectionToggle,
   Flex,
   FlexItem,
   List,
@@ -46,6 +50,8 @@ import { addNotification, addApiError } from '../../actions/notifications'
 import { ChartModal } from '../charts/ChartModal'
 import BuildsetGanttChart from '../charts/GanttChart'
 
+const BUILDSET_MESSAGE_PREVIEW_LINES = 8
+
 function getRefs(buildset) {
   // For backwards compat: get a list of this items changes.
   return 'refs' in buildset ? buildset.refs : [buildset]
@@ -57,7 +63,25 @@ function getRef(buildset) {
 
 function Buildset({ buildset, timezone, tenant, user, preferences }) {
   const [isGanttChartModalOpen, setIsGanttChartModalOpen] = useState(false)
+  const [isMessageExpanded, setIsMessageExpanded] = useState(false)
   const ref = getRef(buildset)
+
+  function onMessageToggle(isExpanded) {
+    setIsMessageExpanded(isExpanded)
+  }
+
+  function formatMessage() {
+    const lines = buildset.message ? buildset.message.split('\n') : []
+    if (lines.length > BUILDSET_MESSAGE_PREVIEW_LINES) {
+      const chunk = BUILDSET_MESSAGE_PREVIEW_LINES
+      const lines_preview = lines.slice(0, chunk)
+      const lines_expanded = lines.slice(chunk, chunk + lines.length)
+      return [lines_preview.join('\n'), lines_expanded.join('\n')]
+    }
+    return [buildset.message, null]
+  }
+
+  const [message, expandedMessage] = formatMessage()
 
   function renderBuildTimes() {
     const firstStartBuild = buildset.builds.reduce((prev, cur) =>
@@ -330,7 +354,28 @@ function Buildset({ buildset, timezone, tenant, user, preferences }) {
                   <>
                     <strong>Message:</strong>
                     <div className={preferences.darkMode ? 'zuul-console-dark' : ''}>
-                      <pre>{buildset.message}</pre>
+                      <CodeBlock>
+                        <CodeBlockCode>
+                          {message}
+                          {expandedMessage ?
+                            <ExpandableSection
+                              isExpanded={isMessageExpanded}
+                              isDetached
+                              contentId="message-expand"
+                            >
+                              {expandedMessage}
+                            </ExpandableSection> : ''}
+                        </CodeBlockCode>
+                        {expandedMessage ?
+                          <ExpandableSectionToggle
+                            isExpanded={isMessageExpanded}
+                            onToggle={onMessageToggle}
+                            contentId="message-expand"
+                            direction="up"
+                          >
+                            {isMessageExpanded ? 'Show Less' : 'Show More'}
+                          </ExpandableSectionToggle> : ''}
+                      </CodeBlock>
                     </div>
                   </>
                 }

@@ -117,6 +117,7 @@ class GerritTrigger(BaseTrigger):
                 ignore_deletes=ignore_deletes,
                 require=trigger.get('require'),
                 reject=trigger.get('reject'),
+                debug=trigger.get('debug'),
                 parse_context=parse_context,
             )
             efilters.append(f)
@@ -165,6 +166,7 @@ def getSchema():
         'removed': scalar_or_list(v.Any(ZUUL_REGEX, str)),
         'require': gerritsource.getRequireSchema(),
         'reject': gerritsource.getRejectSchema(),
+        'debug': bool,
     }
 
     return gerrit_trigger

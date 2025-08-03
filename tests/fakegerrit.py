@@ -29,8 +29,11 @@ import copy
 import http.server
 
 from zuul.lib.logutil import get_annotated_logger
-import zuul.driver.git.gitwatcher as gitwatcher
-import zuul.driver.gerrit.gerritconnection as gerritconnection
+from zuul.driver.git import gitwatcher
+from zuul.driver.gerrit import (
+    gerritconnection,
+    gerritreporter,
+)
 from tests.util import FIXTURE_DIR, random_sha1
 
 import git
@@ -938,7 +941,7 @@ class GerritWebServer(object):
 
                 message = data['message']
                 b_len = len(message.encode('utf-8'))
-                if b_len > gerritconnection.GERRIT_HUMAN_MESSAGE_LIMIT:
+                if b_len > gerritreporter.GERRIT_HUMAN_MESSAGE_LIMIT:
                     self.send_response(400, message='Message length exceeded')
                     self.end_headers()
                     return

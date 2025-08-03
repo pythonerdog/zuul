@@ -732,7 +732,10 @@ class TestMQTTConnection(ZuulTestCase):
     def test_mqtt_reporter(self):
         "Test the MQTT reporter"
         # Add a success result
-        A = self.fake_gerrit.addFakeChange('org/project', 'master', 'A')
+        A = self.fake_gerrit.addFakeChange('org/project',
+                                           'master',
+                                           'A',
+                                           topic='fake/topic')
         artifact = {'name': 'image',
                     'url': 'http://example.com/image',
                     'metadata': {
@@ -804,6 +807,10 @@ class TestMQTTConnection(ZuulTestCase):
         self.assertIn('uuid', mqtt_payload)
         self.assertEquals(dependent_test_job['dependencies'], ['test'])
         self.assertIn('test', dependent_test_job['job_dependencies'])
+
+        changes = mqtt_payload['changes']
+        self.assertEquals(len(changes), 1)
+        self.assertEquals(changes[0]['topic'], 'fake/topic')
 
         A.addApproval("Code-Review", 2)
         self.fake_gerrit.addEvent(A.addApproval("Approved", 1))
@@ -1064,6 +1071,7 @@ class TestConnectionsBranchCache(ZuulTestCase):
 
         # Ensure that the empty list of branches is valid and is not
         # seen as an error
+        self.init_repo("org/newproject")
         newproject = source.getProject('org/newproject')
         connection.addProject(newproject)
         tpc = zuul.model.TenantProjectConfig(newproject)

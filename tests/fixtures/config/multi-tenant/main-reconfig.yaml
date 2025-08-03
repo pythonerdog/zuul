@@ -1,6 +1,8 @@
 - tenant:
     name: tenant-one
+    web-root: https://tenant-one.example.com/
     max-job-timeout: 1800
+    max-oidc-ttl: 300
     allowed-reporters:
       - gerrit
     allowed-labels:

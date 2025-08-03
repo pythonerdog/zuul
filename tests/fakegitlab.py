@@ -33,7 +33,8 @@ import git
 from git.util import IterableList
 import requests
 
-FakeGitlabBranch = namedtuple('Branch', ('name', 'protected'))
+FakeGitlabBranch = namedtuple('Branch',
+                              ('name', 'protected', 'upstream_root'))
 
 
 class GitlabWebServer(object):
@@ -214,7 +215,17 @@ class GitlabWebServer(object):
                 owner, name = project.split('/')
                 if branch in fake_repos[(owner, name)]:
                     protected = fake_repos[(owner, name)][branch].protected
-                    self.send_data({'protected': protected})
+                    upstream_root = fake_repos[(owner, name)][
+                        branch].upstream_root
+                    repo_path = os.path.join(upstream_root, owner, name)
+                    repo = git.Repo(repo_path)
+                    sha = repo.heads[branch].commit.hexsha
+                    self.send_data({
+                        'protected': protected,
+                        'commit': {
+                            'id': sha,
+                        },
+                    })
                 else:
                     return self.send_data({}, code=404)
 
@@ -325,14 +336,14 @@ class FakeGitlabConnection(gitlabconnection.GitlabConnection):
     def addProjectByName(self, project_name):
         owner, proj = project_name.split('/')
         repo = self._test_web_server.fake_repos[(owner, proj)]
-        branch = FakeGitlabBranch('master', False)
+        branch = FakeGitlabBranch('master', False, self.upstream_root)
         if 'master' not in repo:
             repo.append(branch)
 
     def protectBranch(self, owner, project, branch, protected=True):
         if branch in self._test_web_server.fake_repos[(owner, project)]:
             del self._test_web_server.fake_repos[(owner, project)][branch]
-        fake_branch = FakeGitlabBranch(branch, protected=protected)
+        fake_branch = FakeGitlabBranch(branch, protected, self.upstream_root)
         self._test_web_server.fake_repos[(owner, project)].append(fake_branch)
 
     def deleteBranch(self, owner, project, branch):

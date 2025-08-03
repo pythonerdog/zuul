@@ -236,8 +236,9 @@ class ZuulTreeCache(abc.ABC):
             # fetch anything.
             fetch = False
 
-        key = self.parsePath(event.path)
-        if (key is None and event.type != EventType.NONE
+        key, should_fetch = self.parsePath(event.path)
+
+        if ((not should_fetch) and event.type != EventType.NONE
                 and event.path != self.sync_path):
             # The cache doesn't care about this path, so we don't need
             # to fetch (unless the type is none (re-initialization) in
@@ -393,8 +394,11 @@ class ZuulTreeCache(abc.ABC):
         A convention is to use a tuple of relevant path components as
         the key.
 
-        Return None to indicate the path is not relevant to the cache.
+        Returns a tuple: (key, should_fetch)
 
+        Return a key of None to indicate the path is not relevant to the cache.
+        The should_fetch return value indicates whether the cache should
+          fetch the contents of the path.
         """
         return None
 

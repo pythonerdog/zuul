@@ -137,9 +137,9 @@ class PagureTriggerEvent(TriggerEvent):
 class PagureEventFilter(EventFilter):
     def __init__(self, connection_name, trigger, types=[], refs=[],
                  statuses=[], comments=[], actions=[], tags=[],
-                 ignore_deletes=True):
+                 ignore_deletes=True, debug=None):
 
-        EventFilter.__init__(self, connection_name, trigger)
+        EventFilter.__init__(self, connection_name, trigger, debug)
 
         self._types = [x.pattern for x in types]
         self._refs = [x.pattern for x in refs]

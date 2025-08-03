@@ -1,0 +1,52 @@
+- pipeline:
+    name: check
+    manager: independent
+    trigger:
+      gitlab:
+        - event: gl_merge_request
+          action:
+            - opened
+          debug: true
+    success:
+      gitlab:
+        comment: true
+
+- pipeline:
+    name: gate
+    manager: dependent
+    trigger:
+      gitlab:
+        - event: gl_merge_request
+          action:
+            - labeled
+          labels:
+            - gateit
+          debug: true
+    success:
+      gitlab:
+        merge: true
+        comment: true
+    failure:
+      gitlab: {}
+
+- job:
+    name: base
+    parent: null
+    run: playbooks/base.yaml
+    nodeset:
+      nodes:
+        - label: ubuntu-xenial
+          name: controller
+
+- job:
+    name: check-job
+    run: playbooks/check.yaml
+
+- project:
+    name: org/project
+    check:
+      jobs:
+        - check-job
+    gate:
+      jobs:
+        - check-job

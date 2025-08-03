@@ -12,11 +12,23 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+import socket
 import threading
 
 import prometheus_client
 
 from zuul.lib.config import get_default
+
+
+def _get_best_family(address, port):
+    """Automatically select address family depending on address"""
+    # HTTPServer defaults to AF_INET, which will not start properly if
+    # binding an ipv6 address is requested.
+    # This function is based on what upstream python did for http.server
+    # in https://github.com/python/cpython/pull/11767
+    infos = socket.getaddrinfo(address, port)
+    family, _, _, _, sockaddr = next(iter(infos))
+    return family, sockaddr[0]
 
 
 class MonitoringServer:
@@ -32,10 +44,15 @@ class MonitoringServer:
 
         self.prometheus_app = prometheus_client.make_wsgi_app(
             prometheus_client.registry.REGISTRY)
+
+        class TmpServer(prometheus_client.exposition.ThreadingWSGIServer):
+            """Copy of ThreadingWSGIServer to update address_family locally"""
+        TmpServer.address_family, addr = _get_best_family(addr, port)
+
         self.httpd = prometheus_client.exposition.make_server(
             addr, port,
             self.handleRequest,
-            prometheus_client.exposition.ThreadingWSGIServer,
+            TmpServer,
             handler_class=prometheus_client.exposition._SilentHandler)
         # The unit tests pass in 0 for the port
         self.port = self.httpd.socket.getsockname()[1]

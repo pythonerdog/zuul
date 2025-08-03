@@ -104,6 +104,15 @@ Example::
 
   zuul-admin delete-keys gerrit old_project
 
+delete-oidc-signing-keys
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. program-output:: zuul-admin delete-oidc-signing-keys --help
+
+Example::
+
+  zuul-admin delete-oidc-signing-keys RS256
+
 delete-state
 ^^^^^^^^^^^^
 
@@ -224,7 +233,7 @@ repository (i.e. what you see from ``git show X.Y.Z``)::
 
   zuul-admin enqueue-ref --tenant openstack --trigger gerrit --pipeline release --project openstack/example_project --ref refs/tags/X.Y.Z --newrev abc123..
 
-The command can also be used asynchronosly trigger a job in a
+The command can also be used asynchronously trigger a job in a
 ``periodic`` pipeline that would usually be run at a specific time by
 the ``timer`` driver.  For example, the following command would
 trigger the ``periodic`` jobs against the current ``master`` branch

@@ -13,7 +13,6 @@
 # under the License.
 
 import base64
-import concurrent.futures
 import contextlib
 import ipaddress
 import time
@@ -61,9 +60,42 @@ class TestAwsDriver(BaseCloudDriverTest):
                         'type': 'zuul_image',
                         'image_name': 'debian-local',
                         'format': 'raw',
-                        'sha256': ('59984dd82f51edb3777b969739a92780'
-                                   'a520bb314b8d64b294d5de976bd8efb9'),
-                        'md5sum': '262278e1632567a907e4604e9edd2e83',
+                        'sha256': ImageMocksFixture.raw_sha256,
+                        'md5sum': ImageMocksFixture.raw_md5sum,
+                    }
+                },
+            ]
+        }
+    }
+    s3_debian_return_data = {
+        'zuul': {
+            'artifacts': [
+                {
+                    'name': 'raw image',
+                    'url': 's3://zuul/image.raw',
+                    'metadata': {
+                        'type': 'zuul_image',
+                        'image_name': 'debian-local',
+                        'format': 'raw',
+                        'sha256': ImageMocksFixture.raw_sha256,
+                        'md5sum': ImageMocksFixture.raw_md5sum,
+                    }
+                },
+            ]
+        }
+    }
+    s3_region_debian_return_data = {
+        'zuul': {
+            'artifacts': [
+                {
+                    'name': 'raw image',
+                    'url': 's3://zuulwest/image.raw',
+                    'metadata': {
+                        'type': 'zuul_image',
+                        'image_name': 'debian-local',
+                        'format': 'raw',
+                        'sha256': ImageMocksFixture.raw_sha256,
+                        'md5sum': ImageMocksFixture.raw_md5sum,
                     }
                 },
             ]
@@ -91,6 +123,9 @@ class TestAwsDriver(BaseCloudDriverTest):
         self.s3_client = boto3.client('s3', region_name='us-east-1')
         self.iam = boto3.resource('iam', region_name='us-east-1')
         self.s3.create_bucket(Bucket='zuul')
+        location = {'LocationConstraint': 'us-west-1'}
+        self.s3.create_bucket(Bucket="zuulwest",
+                              CreateBucketConfiguration=location)
 
         # A list of args to method calls for validation
         self.run_instances_calls = []
@@ -312,6 +347,56 @@ class TestAwsDriver(BaseCloudDriverTest):
         debian_return_data,
     )
     def test_aws_diskimage_ebs_direct(self):
+        self._test_diskimage()
+
+    @simple_layout('layouts/aws/nodepool-image-snapshot.yaml',
+                   enable_nodepool=True)
+    @return_data(
+        'build-debian-local-image',
+        'refs/heads/master',
+        s3_debian_return_data,
+    )
+    def test_aws_diskimage_snapshot_import(self):
+        self._test_diskimage()
+
+    @simple_layout('layouts/aws/nodepool-image-image.yaml',
+                   enable_nodepool=True)
+    @return_data(
+        'build-debian-local-image',
+        'refs/heads/master',
+        s3_debian_return_data,
+    )
+    def test_aws_diskimage_image_import(self):
+        self._test_diskimage()
+
+    @simple_layout('layouts/aws/nodepool-image-ebs-direct.yaml',
+                   enable_nodepool=True)
+    @return_data(
+        'build-debian-local-image',
+        'refs/heads/master',
+        s3_debian_return_data,
+    )
+    def test_aws_diskimage_s3_download(self):
+        # The ebs-direct method doesn't support an import from s3,
+        # which means if we supply an s3 url, we will download it.
+        bucket = self.s3.Bucket('zuul')
+        bucket.put_object(Body=ImageMocksFixture.raw_body.encode('utf8'),
+                          Key='image.raw')
+        self._test_diskimage()
+
+    @simple_layout('layouts/aws/nodepool-image-snapshot-region.yaml',
+                   enable_nodepool=True)
+    @return_data(
+        'build-debian-local-image',
+        'refs/heads/master',
+        s3_region_debian_return_data,
+    )
+    def test_aws_diskimage_s3_region_download(self):
+        # The image in a bucket in a different region should be
+        # downloaded without using a direct import.
+        bucket = self.s3.Bucket('zuulwest')
+        bucket.put_object(Body=ImageMocksFixture.raw_body.encode('utf8'),
+                          Key='image.raw')
         self._test_diskimage()
 
     @simple_layout('layouts/nodepool-multi-provider.yaml',
@@ -557,61 +642,21 @@ class TestAwsDriver(BaseCloudDriverTest):
 
     @simple_layout('layouts/nodepool.yaml', enable_nodepool=True)
     def test_state_machines_instance(self):
-        self._test_state_machines("debian-normal")
+        label_name = "debian-normal"
+        provider_name = "aws-us-east-1-main"
+        node_class = AwsProviderNode
+        future_names = ['host_create_future', 'create_future']
+        self._test_state_machines(label_name, provider_name,
+                                  node_class, future_names)
 
     @simple_layout('layouts/nodepool.yaml', enable_nodepool=True)
     def test_state_machines_dedicated_host(self):
-        self._test_state_machines("debian-dedicated")
-
-    def _test_state_machines(self, label):
-        # Stop the launcher main loop, so we can drive the state machine
-        # on our own.
-        self.waitUntilSettled()
-        self.launcher._running = False
-        self.launcher.wake_event.set()
-        self.launcher.launcher_thread.join()
-
-        layout = self.scheds.first.sched.abide.tenants.get('tenant-one').layout
-        provider = layout.providers['aws-us-east-1-main']
-        # Start the endpoint since we're going to use the scheduler's endpoint.
-        provider.getEndpoint().start()
-
-        with self.createZKContext(None) as ctx:
-            node = AwsProviderNode.new(ctx, label=label)
-            execute_future = False
-            for _ in iterate_timeout(60, "create state machine to complete"):
-                with node.activeContext(ctx):
-                    # Re-create the SM from the state in ZK
-                    sm = provider.getCreateStateMachine(node, None, self.log)
-                    node.create_state_machine = sm
-                    with self._block_futures():
-                        sm.advance()
-                    # If there are pending futures we will try to re-create
-                    # the SM once from the state and then advance it once
-                    # more so the futures can complete.
-                    pending_futures = [
-                        f for f in (sm.host_create_future, sm.create_future)
-                        if f]
-                    if pending_futures:
-                        if execute_future:
-                            concurrent.futures.wait(pending_futures)
-                            sm.advance()
-                        # Toggle future execution flag
-                        execute_future = not execute_future
-                if sm.complete:
-                    break
-
-            for _ in iterate_timeout(60, "delete state machine to complete"):
-                with node.activeContext(ctx):
-                    # Re-create the SM from the state in ZK
-                    sm = provider.getDeleteStateMachine(node, self.log)
-                    node.delete_state_machine = sm
-                    sm.advance()
-                if sm.complete:
-                    break
-                # Avoid busy-looping as we have to wait for the TTL
-                # cache to expire.
-                time.sleep(0.5)
+        label_name = "debian-dedicated"
+        provider_name = "aws-us-east-1-main"
+        node_class = AwsProviderNode
+        future_names = ['host_create_future', 'create_future']
+        self._test_state_machines(label_name, provider_name,
+                                  node_class, future_names)
 
     @contextlib.contextmanager
     def _block_futures(self):
@@ -622,3 +667,19 @@ class TestAwsDriver(BaseCloudDriverTest):
                 'zuul.driver.aws.awsendpoint.AwsProviderEndpoint.'
                 '_completeCreateInstance', return_value=None)):
             yield
+
+    @simple_layout('layouts/aws/nodepool-multi-image.yaml',
+                   enable_nodepool=True)
+    def test_aws_multi_image(self):
+        # Test that we can inherit aws attributes for both kinds of
+        # images
+        tenant = self.scheds.first.sched.abide.tenants.get("tenant-one")
+        errors = tenant.layout.loading_errors
+        self.assertEqual(len(errors), 0)
+
+        images = tenant.layout.providers['aws-us-east-1-main'].images
+        dl = images['debian-local']
+        dc = images['debian-cloud']
+        self.assertEqual('ebs-direct', dl.import_method)
+        self.assertFalse(hasattr(dc, 'import_method'))
+        self.waitUntilSettled()

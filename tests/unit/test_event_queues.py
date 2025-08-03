@@ -688,7 +688,8 @@ class TestConnectionEventQueue(EventQueueBaseTestCase):
 
     def test_connection_events(self):
         # Test enqueue/dequeue of the connection event queue.
-        queue = event_queues.ConnectionEventQueue(self.zk_client, "dummy")
+        queue = event_queues.ConnectionEventQueue(
+            self.zk_client, "dummy", None)
 
         self.assertEqual(len(queue), 0)
         self.assertFalse(queue.hasEvents())
@@ -713,7 +714,8 @@ class TestConnectionEventQueue(EventQueueBaseTestCase):
 
     def test_event_watch(self):
         # Test the registered function is called on new events.
-        queue = event_queues.ConnectionEventQueue(self.zk_client, "dummy")
+        queue = event_queues.ConnectionEventQueue(
+            self.zk_client, "dummy", None)
 
         event = threading.Event()
         queue.registerEventWatch(event.set)
@@ -725,7 +727,8 @@ class TestConnectionEventQueue(EventQueueBaseTestCase):
                 break
 
     def test_event_offset(self):
-        queue = event_queues.ConnectionEventQueue(self.zk_client, "dummy")
+        queue = event_queues.ConnectionEventQueue(
+            self.zk_client, "dummy", None)
         self.assertEqual(len(queue), 0)
         self.assertFalse(queue.hasEvents())
 

@@ -43,14 +43,20 @@ class GerritChange(Change):
         self.zuul_query_ltime = None
 
     def update(self, data, extra, connection):
-        self.zuul_query_ltime = data.zuul_query_ltime
-        if data.format == data.SSH:
-            self.updateFromSSH(data.data, connection)
-        else:
-            self.updateFromHTTP(data.data, data.files, data.commentable_files,
-                                connection)
-        for k, v in extra.items():
-            setattr(self, k, v)
+        if not (self.zuul_query_ltime and
+                self.zuul_query_ltime > data.zuul_query_ltime):
+            # If our query is older than the existing change data, it
+            # means that another scheduler raced us and won.  Skip the
+            # update to avoid having is_merged flap.
+            self.zuul_query_ltime = data.zuul_query_ltime
+            if data.format == data.SSH:
+                self.updateFromSSH(data.data, connection)
+            else:
+                self.updateFromHTTP(data.data, data.files,
+                                    data.commentable_files,
+                                    connection)
+            for k, v in extra.items():
+                setattr(self, k, v)
         key = ChangeKey(connection.connection_name, None,
                         'GerritChange', str(self.number), str(self.patchset))
         return key
@@ -395,9 +401,9 @@ class GerritEventFilter(EventFilter):
                  comments=[], emails=[], usernames=[], required_approvals=[],
                  reject_approvals=[], added=[], removed=[], uuid=None,
                  scheme=None, ignore_deletes=True, require=None, reject=None,
-                 parse_context=None):
+                 debug=None, parse_context=None):
 
-        EventFilter.__init__(self, connection_name, trigger)
+        EventFilter.__init__(self, connection_name, trigger, debug)
 
         # TODO: Backwards compat, remove after 9.x:
         if required_approvals and require is None:

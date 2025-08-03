@@ -17,7 +17,7 @@ or values may be added to Gerrit.  Zuul is very flexible and can take
 advantage of those.
 
 If ``change.submitWholeTopic`` is configured in Gerrit, Zuul will
-honor this by enqueing changes with the same topic as circular
+honor this by enqueuing changes with the same topic as circular
 dependencies.  However, it is still necessary to enable circular
 dependency support in any pipeline queues where such changes may
 appear.  See :attr:`queue.allow-circular-dependencies` for information
@@ -41,7 +41,7 @@ The appropriate connection methods must be configured to satisfy the
 interactions Zuul will have with Gerrit.  The recommended
 configuration is to configure both SSH and HTTP access.
 
-The section below describes commond configuration settings.  Specific
+The section below describes common configuration settings.  Specific
 settings for different connection methods follow.
 
 .. note::
@@ -126,7 +126,7 @@ The supported options in ``zuul.conf`` connections are:
 
       User name to use when accessing Gerrit.
 
-   .. replication_timeout
+   .. attr:: replication_timeout
       :default: 0
 
       When set to a positive value Zuul will become replication event
@@ -146,7 +146,7 @@ The supported options in ``zuul.conf`` connections are:
       One major limitation of this feature is that Gerrit replication
       events can only be mapped using project and ref values. This
       means if you have multiple replication updates to the same project
-      and ref occuring simultaneously Zuul must wait for all of them to
+      and ref occurring simultaneously Zuul must wait for all of them to
       complete before it continues. For this reason you should set this
       timeout to a small multiple (2 or 3) of your typical replication
       time.
@@ -538,6 +538,26 @@ Trigger Configuration
       not to match.  Those conditions may be satisfied by the event in
       question.  It follows the same syntax as
       :ref:`gerrit_requirements`.
+
+   .. attr:: debug
+      :default: false
+
+      When set to `true`, this will cause debug messages to be
+      included when the queue item is reported.  These debug messages
+      may be used to help diagnose why certain jobs did or did not
+      run, and in many cases, why the item was not ultimately enqueued
+      into the pipeline.
+
+      Setting this value also effectively sets
+      :attr:`project.<pipeline>.debug` for affected queue items.
+
+      This only applies to items that arrive at a pipeline via this
+      particular trigger.  Since the output is very verbose and
+      typically not needed or desired, this allows for a configuration
+      where typical pipeline triggers omit the debug output, but
+      triggers that match certain specific criteria may be used to
+      request debug information.
+
 
 Reporter Configuration
 ----------------------

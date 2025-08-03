@@ -35,7 +35,7 @@ services:
       - "lib-zuul-executor:/var/lib/zuul:z"
     # NOTE(pabelanger): Be sure to update this line each time we change the
     # default version of ansible for Zuul.
-    command: "/usr/local/lib/zuul/ansible/8/bin/ansible-playbook /var/playbooks/setup.yaml"
+    command: "/usr/local/lib/zuul/ansible/9/bin/ansible-playbook /var/playbooks/setup.yaml"
     networks:
       - zuul
   zk:
@@ -86,7 +86,6 @@ services:
       - "sshkey:/var/ssh:z"
       - "certs:/var/certs:z"
       - "lib-zuul-scheduler:/var/lib/zuul"
-      - "/root/zuul:/tmp"
     networks:
       - zuul
   web:

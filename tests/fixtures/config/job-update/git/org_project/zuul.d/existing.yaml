@@ -2,11 +2,15 @@
 
 - job:
     name: existing-files
+    include-vars: vars.yaml
+    run: playbook.yaml
     files:
       - README.txt
 
 - job:
     name: existing-irr
+    include-vars: vars.yaml
+    run: playbook.yaml
     irrelevant-files:
       - README
       - ^zuul.d/.*$

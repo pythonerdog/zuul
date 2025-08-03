@@ -52,6 +52,10 @@ class GitSource(BaseSource):
         return self.connection.getChange(change_key, refresh=refresh,
                                          event=event)
 
+    def getProjectBranchSha(self, project, branch_name):
+        return (self.connection.getRefSha(project, f'refs/heads/{branch_name}')
+                or None)
+
     def getChangeByURL(self, url, event):
         return None
 

@@ -120,7 +120,7 @@ success, the pipeline reports back to Gerrit with ``Verified`` vote of
 
       .. value:: serial
 
-         This pipeline manager supports shared queues (like depedent
+         This pipeline manager supports shared queues (like dependent
          pipelines) but only one item in each shared queue is
          processed at a time.
 
@@ -295,7 +295,7 @@ success, the pipeline reports back to Gerrit with ``Verified`` vote of
       pipeline (whether it is enqueued to run jobs or merely as a
       dependency) must be from one of the connections specified in the
       pipeline configuration (this includes any trigger, reporter, or
-      source requirement).  When used in conjuctions with
+      source requirement).  When used in conjunction with
       :attr:`pipeline.require`, this can ensure that pipeline
       requirements are exhaustive.
 

@@ -184,6 +184,19 @@ function fetchChangeStatus(apiPrefix, changeId) {
   return makeRequest(apiPrefix + 'status/change/' + changeId)
 }
 
+function setTenantState(apiPrefix, discardTriggerEvents, pauseTriggerQueue, pauseResultQueue, reason) {
+  return makeRequest(
+    apiPrefix + 'state',
+    'post',
+    {
+      trigger_queue_discarding: discardTriggerEvents,
+      trigger_queue_paused: pauseTriggerQueue,
+      result_queue_paused: pauseResultQueue,
+      reason: reason,
+    }
+  )
+}
+
 function fetchFreezeJob(apiPrefix, pipelineName, projectName, branchName, jobName) {
   return makeRequest(apiPrefix +
                    'pipeline/' + pipelineName +
@@ -198,6 +211,14 @@ function fetchBuild(apiPrefix, buildId) {
 
 function fetchBuilds(apiPrefix, queryString) {
   let path = 'builds'
+  if (queryString) {
+    path += '?' + queryString.slice(1)
+  }
+  return makeRequest(apiPrefix + path)
+}
+
+function fetchBuildTimes(apiPrefix, queryString) {
+  let path = 'build-times'
   if (queryString) {
     path += '?' + queryString.slice(1)
   }
@@ -281,10 +302,28 @@ function fetchLabels(apiPrefix) {
   return makeRequest(apiPrefix + 'labels')
 }
 
+function fetchNodesetRequests(apiPrefix) {
+  return makeRequest(apiPrefix + 'nodeset-requests')
+}
+
+function deleteNodesetRequest(apiPrefix, requestId) {
+  return makeRequest(
+    apiPrefix + '/nodeset-requests/' + requestId,
+    'delete'
+  )
+}
+
 function fetchNodes(apiPrefix) {
   return makeRequest(apiPrefix + 'nodes')
 }
 
+function setNodeState(apiPrefix, requestId, state) {
+  return makeRequest(
+    apiPrefix + '/nodes/' + requestId,
+    'put',
+    { state }
+  )
+}
 function fetchSemaphores(apiPrefix) {
   return makeRequest(apiPrefix + 'semaphores')
 }
@@ -389,6 +428,7 @@ export {
   buildImage,
   deleteImageBuildArtifact,
   deleteImageUpload,
+  deleteNodesetRequest,
   dequeue,
   dequeue_ref,
   enqueue,
@@ -396,6 +436,7 @@ export {
   fetchAutohold,
   fetchAutoholds,
   fetchBuild,
+  fetchBuildTimes,
   fetchBuilds,
   fetchBuildset,
   fetchBuildsets,
@@ -410,6 +451,7 @@ export {
   fetchJobGraph,
   fetchJobs,
   fetchLabels,
+  fetchNodesetRequests,
   fetchNodes,
   fetchOpenApi,
   fetchPipelines,
@@ -427,4 +469,6 @@ export {
   getLogFile,
   getStreamUrl,
   promote,
+  setNodeState,
+  setTenantState,
 }

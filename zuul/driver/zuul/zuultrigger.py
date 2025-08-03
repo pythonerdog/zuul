@@ -45,6 +45,7 @@ class ZuulTrigger(BaseTrigger):
                 trigger=self,
                 types=types,
                 pipelines=pipelines,
+                debug=trigger.get('debug'),
             )
             efilters.append(f)
 
@@ -61,6 +62,7 @@ def getSchema():
             'image-validate',
         )),
         'pipeline': scalar_or_list(v.Any(ZUUL_REGEX, str)),
+        'debug': bool,
     }
 
     return zuul_trigger

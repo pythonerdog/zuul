@@ -1284,14 +1284,14 @@ class ExecutorFactsMixin:
                           output)
 
 
-class TestExecutorFacts8(AnsibleZuulTestCase, ExecutorFactsMixin):
-    tenant_config_file = 'config/executor-facts/main8.yaml'
-    ansible_major_minor = '2.15'
-
-
 class TestExecutorFacts9(AnsibleZuulTestCase, ExecutorFactsMixin):
     tenant_config_file = 'config/executor-facts/main9.yaml'
     ansible_major_minor = '2.16'
+
+
+class TestExecutorFacts11(AnsibleZuulTestCase, ExecutorFactsMixin):
+    tenant_config_file = 'config/executor-facts/main11.yaml'
+    ansible_major_minor = '2.18'
 
 
 class AnsibleCallbackConfigsMixin:
@@ -1345,18 +1345,18 @@ class AnsibleCallbackConfigsMixin:
                           output)
 
 
-class TestAnsibleCallbackConfigs8(AnsibleZuulTestCase,
-                                  AnsibleCallbackConfigsMixin):
-    config_file = 'zuul-executor-ansible-callback.conf'
-    tenant_config_file = 'config/ansible-callbacks/main8.yaml'
-    ansible_major_minor = '2.15'
-
-
 class TestAnsibleCallbackConfigs9(AnsibleZuulTestCase,
                                   AnsibleCallbackConfigsMixin):
     config_file = 'zuul-executor-ansible-callback.conf'
     tenant_config_file = 'config/ansible-callbacks/main9.yaml'
     ansible_major_minor = '2.16'
+
+
+class TestAnsibleCallbackConfigs11(AnsibleZuulTestCase,
+                                   AnsibleCallbackConfigsMixin):
+    config_file = 'zuul-executor-ansible-callback.conf'
+    tenant_config_file = 'config/ansible-callbacks/main11.yaml'
+    ansible_major_minor = '2.18'
 
 
 class TestExecutorEnvironment(AnsibleZuulTestCase):

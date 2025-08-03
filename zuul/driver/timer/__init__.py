@@ -151,12 +151,12 @@ class TimerDriver(Driver, TriggerInterface):
 
                     self._addJobsInner(tenant, pipeline,
                                        cron_args, jitter, timespec,
-                                       jobs)
+                                       ef.dereference, jobs)
         self._removeJobs(tenant, jobs)
         self.tenant_jobs[tenant.name] = jobs
 
     def _addJobsInner(self, tenant, pipeline, cron_args, jitter,
-                      timespec, jobs):
+                      timespec, dereference, jobs):
         # jobs is a dict of args->job that we mutate
         existing_jobs = self.tenant_jobs.get(tenant.name, {})
         for project_name, pcs in tenant.layout.project_configs.items():
@@ -171,7 +171,7 @@ class TimerDriver(Driver, TriggerInterface):
             try:
                 for branch in tenant.getProjectBranches(project_name):
                     args = (tenant.name, pipeline.name, project_name,
-                            branch, timespec,)
+                            branch, dereference, timespec,)
                     existing_job = existing_jobs.get(args)
                     if jitter:
                         # Resolve jitter here so that it is the same
@@ -211,7 +211,7 @@ class TimerDriver(Driver, TriggerInterface):
                                    tenant, pipeline, project_name)
 
     def _onTrigger(self, tenant_name, pipeline_name, project_name, branch,
-                   timespec):
+                   dereference, timespec):
         if not self.election_won:
             return
 
@@ -226,13 +226,13 @@ class TimerDriver(Driver, TriggerInterface):
             with self.tracer.start_as_current_span(
                     "TimerEvent", attributes=attributes):
                 self._dispatchEvent(tenant_name, pipeline_name, project_name,
-                                    branch, timespec)
+                                    branch, dereference, timespec)
         except Exception:
             self.stop_event.set()
             self.log.exception("Error when dispatching timer event")
 
     def _dispatchEvent(self, tenant_name, pipeline_name, project_name,
-                       branch, timespec):
+                       branch, dereference, timespec):
         self.log.debug('Got trigger for tenant %s and pipeline %s '
                        'project %s branch %s with timespec %s',
                        tenant_name, pipeline_name, project_name,
@@ -255,6 +255,11 @@ class TimerDriver(Driver, TriggerInterface):
             # change cache.
             change_key = project.source.getChangeKey(event)
             with self.project_update_locks[project.canonical_name]:
+                if dereference:
+                    event.newrev = project.source.getProjectBranchSha(
+                        project, branch)
+                else:
+                    event.newrev = None
                 project.source.getChange(change_key, refresh=True,
                                          event=event)
             log = get_annotated_logger(self.log, event)

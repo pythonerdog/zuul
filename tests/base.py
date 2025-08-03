@@ -34,6 +34,7 @@ from typing import Generator, List
 from unittest.case import skipIf
 import zlib
 
+from apscheduler.triggers.interval import IntervalTrigger
 import prometheus_client
 import requests
 import responses
@@ -683,12 +684,15 @@ class FakeBuild(object):
         return False
 
     def writeReturnData(self):
-        changes = self.executor_server.return_data.get(self.name, {})
-        data = changes.get(self.parameters['zuul']['ref'])
-        if data is None:
+        data_changes = self.executor_server.return_data.get(self.name, {})
+        secret_data_changes = self.executor_server.return_secret_data.get(
+            self.name, {})
+        data = data_changes.get(self.parameters['zuul']['ref'])
+        secret_data = secret_data_changes.get(self.parameters['zuul']['ref'])
+        if data is None and secret_data is None:
             return
         with open(self.jobdir.result_data_file, 'w') as f:
-            f.write(json.dumps({'data': data}))
+            f.write(json.dumps({'data': data, 'secret_data': secret_data}))
 
     def hasChanges(self, *changes):
         """Return whether this build has certain changes in its git repos.
@@ -785,10 +789,10 @@ class RecordingAnsibleJob(zuul.executor.server.AnsibleJob):
         build = self.executor_server.job_builds[self.build_request.uuid]
         build.jobdir = self.jobdir
 
-        self.result, error_detail = super(
+        self.result, unreachable, error_detail = super(
             RecordingAnsibleJob, self).runPlaybooks(args)
         self.recordResult(self.result)
-        return self.result, error_detail
+        return self.result, unreachable, error_detail
 
     def runAnsible(self, cmd, timeout, playbook, ansible_version,
                    allow_pre_fail, wrapped=True, cleanup=False):
@@ -818,6 +822,14 @@ class RecordingAnsibleJob(zuul.executor.server.AnsibleJob):
         for host in hosts:
             if not host['host_vars'].get('ansible_connection'):
                 host['host_vars']['ansible_connection'] = 'local'
+                # Ansible will find our test venv python interpreter
+                # due to the "local" connection, but it won't be in
+                # the bwrap environment.  Force it to use the system
+                # python instead.
+                if host['host_vars'].get(
+                        'ansible_python_interpreter', 'auto') == 'auto':
+                    host['host_vars']['ansible_python_interpreter'] =\
+                        '/usr/bin/python3'
         return hosts
 
     def pause(self):
@@ -866,6 +878,10 @@ class TestingMergerApi(HoldableMergerApi):
 
     log = logging.getLogger("zuul.test.TestingMergerApi")
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.job_types_to_fail = []
+
     def _test_getMergeJobsInState(self, *states):
         # As this method is used for assertions in the tests, it should look up
         # the merge requests directly from ZooKeeper and not from a cache
@@ -878,6 +894,29 @@ class TestingMergerApi(HoldableMergerApi):
                 all_merge_requests.append(merge_request)
 
         return sorted(all_merge_requests)
+
+    def failJobs(self, job_type):
+        """
+        Lets all merge jobs of the given type fail.
+
+        The actual implementation is done by overriding reportResult().
+        """
+        # As the params of a merge job are cleared directly after it's
+        # picked up by a merger, we don't have much information to
+        # identify a running merge job. The easiest solution is to
+        # fail all merge jobs of a given type, which should be fine
+        # for test purposes.
+        # We are failing merge jobs by type as the params are directly
+        # cleared when the merge job is picked up by a merger. Thus, we
+        # cannot compare information like project or branch in
+        # reportResult() where we set the merge job's result to failed.
+        self.job_types_to_fail.append(job_type)
+
+    def reportResult(self, request, result):
+        # Set updated to False to mark a merge job as failed
+        if request.job_type in self.job_types_to_fail:
+            result["updated"] = False
+        return super().reportResult(request, result)
 
     def release(self, merge_request=None):
         """
@@ -1016,6 +1055,7 @@ class RecordingExecutorServer(zuul.executor.server.ExecutorServer):
     """
 
     _job_class = RecordingAnsibleJob
+    _merger_api_class = TestingMergerApi
 
     def __init__(self, *args, **kw):
         self._run_ansible = kw.pop('_run_ansible', False)
@@ -1033,6 +1073,7 @@ class RecordingExecutorServer(zuul.executor.server.ExecutorServer):
         self.fail_tests = {}
         self.retry_tests = {}
         self.return_data = {}
+        self.return_secret_data = {}
         self.job_builds = {}
 
     def failJob(self, name, change):
@@ -1061,7 +1102,7 @@ class RecordingExecutorServer(zuul.executor.server.ExecutorServer):
             dict(change=change,
                  retries=retries))
 
-    def returnData(self, name, change, data):
+    def returnData(self, name, change, data, secret_data={}):
         """Instruct the executor to return data for this build.
 
         :arg str name: The name of the job to return data.
@@ -1071,7 +1112,8 @@ class RecordingExecutorServer(zuul.executor.server.ExecutorServer):
         :arg dict data: The data to return
 
         """
-        changes = self.return_data.setdefault(name, {})
+        data_changes = self.return_data.setdefault(name, {})
+        secret_data_changes = self.return_secret_data.setdefault(name, {})
         if hasattr(change, 'number'):
             cid = change.data['currentPatchSet']['ref']
         elif isinstance(change, str):
@@ -1080,7 +1122,8 @@ class RecordingExecutorServer(zuul.executor.server.ExecutorServer):
             # Not actually a change, but a ref update event for tags/etc
             # In this case a key of None is used by writeReturnData
             cid = None
-        changes[cid] = data
+        data_changes[cid] = data
+        secret_data_changes[cid] = secret_data
 
     def release(self, regex=None, change=None):
         """Release a held build.
@@ -1628,7 +1671,7 @@ class ZuulWebFixture(fixtures.Fixture):
     def __init__(self, config, test_config,
                  additional_event_queues, upstream_root,
                  poller_events, git_url_with_auth, add_cleanup,
-                 test_root, info=None):
+                 test_root, info=None, stats_interval=None):
         super(ZuulWebFixture, self).__init__()
         self.config = config
         self.connections = TestConnectionRegistry(
@@ -1646,6 +1689,7 @@ class ZuulWebFixture(fixtures.Fixture):
         else:
             self.info = info
         self.test_root = test_root
+        self.stats_interval = stats_interval
 
     def _setUp(self):
         # Start the web server
@@ -1655,6 +1699,9 @@ class ZuulWebFixture(fixtures.Fixture):
             connections=self.connections,
             authenticators=self.authenticators)
         self.connections.load(self.web.zk_client, self.web.component_registry)
+        if self.stats_interval:
+            self.web._stats_interval = IntervalTrigger(
+                seconds=self.stats_interval)
         self.web.start()
         self.addCleanup(self.stop)
 
@@ -2464,9 +2511,14 @@ class ZuulTestCase(BaseTestCase):
         self.config.set('zookeeper', 'tls_ca',
                         self.zk_chroot_fixture.zookeeper_ca)
 
+        # Speed up operations in tests
         gerritsource.GerritSource.replication_timeout = 1.5
         gerritsource.GerritSource.replication_retry_interval = 0.5
         gerritconnection.GerritEventProcessor.delay = 0.0
+        zuul.driver.aws.awsendpoint.CACHE_TTL = 0.1
+        zuul.driver.openstack.openstackendpoint.CACHE_TTL = 0.1
+        zuul.launcher.server.NodescanWorker.TIMEOUT = 0.1
+        zuul.launcher.server.Launcher.MAX_SLEEP = 0.1
 
         if self.load_change_db:
             self.loadChangeDB()
@@ -2481,7 +2533,7 @@ class ZuulTestCase(BaseTestCase):
             self.zk_client.client, f"/test/{uuid.uuid4().hex}")
 
         self.connection_event_queues = DefaultKeyDict(
-            lambda cn: ConnectionEventQueue(self.zk_client, cn)
+            lambda cn: ConnectionEventQueue(self.zk_client, cn, None)
         )
         # requires zk client
         self.setupAllProjectKeys(self.config)
@@ -2801,7 +2853,7 @@ class ZuulTestCase(BaseTestCase):
 
         password = self.config.get("keystore", "password")
         keystore = zuul.lib.keystorage.KeyStorage(
-            self.zk_client, password=password)
+            self.zk_client, password=password, start_cache=False)
         import_keys = {}
         import_data = {'keys': import_keys}
 
@@ -2815,6 +2867,7 @@ class ZuulTestCase(BaseTestCase):
             import_keys[path] = json.load(i)
 
         keystore.importKeys(import_data, False)
+        keystore.stop()
 
     def copyDirToRepo(self, project, source_path):
         self.init_repo(project)
@@ -3005,6 +3058,14 @@ class ZuulTestCase(BaseTestCase):
                 log_str += "".join(traceback.format_stack(stack_frame))
             self.log.debug(log_str)
             raise Exception("More than one thread is running: %s" % threads)
+        self.cleanupTestServers()
+
+    def cleanupTestServers(self):
+        del self.executor_server
+        del self.scheds
+        del self.launcher
+        del self.fake_nodepool
+        del self.zk_client
 
     def assertCleanShutdown(self):
         pass
@@ -3129,6 +3190,7 @@ class ZuulTestCase(BaseTestCase):
         self.merger_api.hold_in_queue = hold_in_queue
         for app in self.scheds:
             app.sched.merger.merger_api.hold_in_queue = hold_in_queue
+        self.executor_server.merger_api.hold_in_queue = hold_in_queue
 
     @property
     def hold_nodeset_requests_in_queue(self):
@@ -3141,6 +3203,8 @@ class ZuulTestCase(BaseTestCase):
 
     def releaseNodesetRequests(self, *requests):
         ctx = self.createZKContext(None)
+        if not requests:
+            requests = self.launcher.api.getNodesetRequests()
         for req in requests:
             req.updateAttributes(ctx, state=req.State.REQUESTED)
 
@@ -3353,11 +3417,18 @@ class ZuulTestCase(BaseTestCase):
                 self.launcher.local_layout_state)
 
     def __areAllImagesUploaded(self):
-        # TODO: this may need to check for failed image uploads
         for upload in self.launcher.image_upload_registry.getItems():
+            if upload.uuid in getattr(
+                    self, '_finished_image_uploads', set()):
+                return True
             if not upload.external_id:
                 return False
         return True
+
+    def _addFinishedUpload(self, upload_uuid):
+        if not hasattr(self, '_finished_image_uploads'):
+            self._finished_image_uploads = set()
+        self._finished_image_uploads.add(upload_uuid)
 
     def waitUntilSettled(self, msg="", matcher=None) -> None:
         self.log.debug("Waiting until settled... (%s)", msg)
@@ -3950,9 +4021,15 @@ class ZuulTestCase(BaseTestCase):
                     return
 
     def requestNodes(self, labels, tenant="tenant-one", pipeline="check",
-                     timeout=10):
+                     provider=None, timeout=10):
         result_queue = PipelineResultEventQueue(
             self.zk_client, tenant, pipeline)
+
+        # Don't allow node request cleanup (since these requests
+        # will not appear in a pipeline):
+        if not hasattr(self, '_node_request_cleanup_lock'):
+            self._node_request_cleanup_lock =\
+                self.scheds.first.sched.node_request_cleanup_lock.acquire()
 
         with self.createZKContext(None) as ctx:
             # Lock the pipeline, so we can grab the result event
@@ -3960,7 +4037,7 @@ class ZuulTestCase(BaseTestCase):
                   pipeline_lock(self.zk_client, tenant, pipeline)):
                 request = model.NodesetRequest.new(
                     ctx,
-                    tenant_name="tenant-one",
+                    tenant_name=tenant,
                     pipeline_name="check",
                     buildset_uuid=uuid.uuid4().hex,
                     job_uuid=uuid.uuid4().hex,
@@ -3970,6 +4047,7 @@ class ZuulTestCase(BaseTestCase):
                     request_time=time.time(),
                     zuul_event_id=uuid.uuid4().hex,
                     span_info=None,
+                    preferred_provider=provider,
                 )
                 if timeout:
                     for _ in iterate_timeout(

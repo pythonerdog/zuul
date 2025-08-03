@@ -5,9 +5,10 @@
 # Copyright: (c) 2016, Toshio Kuratomi <tkuratomi@ansible.com>
 # GNU General Public License v3.0+ (see COPYING or https://www.gnu.org/licenses/gpl-3.0.txt)
 
-from __future__ import absolute_import, division, print_function
-__metaclass__ = type
+from __future__ import annotations
 
+import json
+import sys
 
 # flake8: noqa
 # This file shares a significant chunk of code with an upstream ansible
@@ -26,12 +27,11 @@ version_added: historical
 description:
      - The C(ansible.builtin.command) module takes the command name followed by a list of space-delimited arguments.
      - The given command will be executed on all selected nodes.
-     - The command(s) will not be
-       processed through the shell, so variables like C($HOSTNAME) and operations
-       like C("*"), C("<"), C(">"), C("|"), C(";") and C("&") will not work.
+     - The command(s) will not be processed through the shell, so operations like C("*"), C("<"), C(">"), C("|"), C(";") and C("&") will not work.
+       Also, environment variables are resolved via Python, not shell, see O(expand_argument_vars) and are left unchanged if not matched.
        Use the M(ansible.builtin.shell) module if you need these features.
-     - To create C(command) tasks that are easier to read than the ones using space-delimited
-       arguments, pass parameters using the C(args) L(task keyword,https://docs.ansible.com/ansible/latest/reference_appendices/playbooks_keywords.html#task)
+     - To create C(command) tasks that are easier to read than the ones using space-delimited arguments,
+       pass parameters using the C(args) L(task keyword,https://docs.ansible.com/ansible/latest/reference_appendices/playbooks_keywords.html#task)
        or use O(cmd) parameter.
      - Either a free form command or O(cmd) parameter is required, see the examples.
      - For Windows targets, use the M(ansible.windows.win_command) module instead.
@@ -52,8 +52,8 @@ attributes:
 options:
   expand_argument_vars:
     description:
-      - Expands the arguments that are variables, for example C($HOME) will be expanded before being passed to the
-        command to run.
+      - Expands the arguments that are variables, for example C($HOME) will be expanded before being passed to the command to run.
+      - If a variable is not matched, it is left unchanged, unlike shell substitution which would remove it.
       - Set to V(false) to disable expansion and treat the value as a literal argument.
     type: bool
     default: true
@@ -61,7 +61,7 @@ options:
   free_form:
     description:
       - The command module takes a free form string as a command to run.
-      - There is no actual parameter named 'free form'.
+      - There is no actual parameter named C(free_form).
   cmd:
     type: str
     description:
@@ -400,7 +400,8 @@ class StreamFollower:
 # so that we can dive in and figure out how to make appropriate hook points
 def zuul_run_command(self, args, zuul_log_id, zuul_ansible_split_streams, zuul_output_max_bytes, check_rc=False, close_fds=True, executable=None, data=None, binary_data=False, path_prefix=None, cwd=None,
                 use_unsafe_shell=False, prompt_regex=None, environ_update=None, umask=None, encoding='utf-8', errors='surrogate_or_strict',
-                expand_user_and_vars=True, pass_fds=None, before_communicate_callback=None, ignore_invalid_cwd=True):
+                expand_user_and_vars=True, pass_fds=None, before_communicate_callback=None, ignore_invalid_cwd=True, handle_exceptions=True):
+
     '''
     Execute a command, returns rc, stdout, and stderr.
 
@@ -454,6 +455,9 @@ def zuul_run_command(self, args, zuul_log_id, zuul_ansible_split_streams, zuul_o
     :kw ignore_invalid_cwd: This flag indicates whether an invalid ``cwd``
         (non-existent or not a directory) should be ignored or should raise
         an exception.
+    :kw handle_exceptions: This flag indicates whether an exception will
+        be handled inline and issue a failed_json or if the caller should
+        handle it.
     :returns: A 3-tuple of return code (integer), stdout (native string),
         and stderr (native string).  On python2, stdout and stderr are both
         byte strings.  On python3, stdout and stderr are text strings converted
@@ -463,7 +467,7 @@ def zuul_run_command(self, args, zuul_log_id, zuul_ansible_split_streams, zuul_o
     # used by clean args later on
     self._clean = None
 
-    if not isinstance(args, (list, binary_type, text_type)):
+    if not isinstance(args, (list, bytes, str)):
         msg = "Argument 'args' to run_command must be list or string"
         self.fail_json(rc=257, cmd=args, msg=msg)
 
@@ -472,7 +476,7 @@ def zuul_run_command(self, args, zuul_log_id, zuul_ansible_split_streams, zuul_o
 
         # stringify args for unsafe/direct shell usage
         if isinstance(args, list):
-            args = b" ".join([to_bytes(shlex_quote(x), errors='surrogate_or_strict') for x in args])
+            args = b" ".join([to_bytes(shlex.quote(x), errors='surrogate_or_strict') for x in args])
         else:
             args = to_bytes(args, errors='surrogate_or_strict')
 
@@ -486,14 +490,8 @@ def zuul_run_command(self, args, zuul_log_id, zuul_ansible_split_streams, zuul_o
             shell = True
     else:
         # ensure args are a list
-        if isinstance(args, (binary_type, text_type)):
-            # On python2.6 and below, shlex has problems with text type
-            # On python3, shlex needs a text type.
-            if PY2:
-                args = to_bytes(args, errors='surrogate_or_strict')
-            elif PY3:
-                args = to_text(args, errors='surrogateescape')
-            args = shlex.split(args)
+        if isinstance(args, (bytes, str)):
+            args = shlex.split(to_text(args, errors='surrogateescape'))
 
         # expand ``~`` in paths, and all environment vars
         if expand_user_and_vars:
@@ -503,11 +501,8 @@ def zuul_run_command(self, args, zuul_log_id, zuul_ansible_split_streams, zuul_o
 
     prompt_re = None
     if prompt_regex:
-        if isinstance(prompt_regex, text_type):
-            if PY3:
-                prompt_regex = to_bytes(prompt_regex, errors='surrogateescape')
-            elif PY2:
-                prompt_regex = to_bytes(prompt_regex, errors='surrogate_or_strict')
+        if isinstance(prompt_regex, str):
+            prompt_regex = to_bytes(prompt_regex, errors='surrogateescape')
         try:
             prompt_re = re.compile(prompt_regex, re.MULTILINE)
         except re.error:
@@ -546,7 +541,6 @@ def zuul_run_command(self, args, zuul_log_id, zuul_ansible_split_streams, zuul_o
         st_in = subprocess.PIPE
 
     def preexec():
-        self._restore_signal_handlers()
         if umask:
             os.umask(umask)
 
@@ -562,10 +556,8 @@ def zuul_run_command(self, args, zuul_log_id, zuul_ansible_split_streams, zuul_o
         preexec_fn=preexec,
         env=env,
     )
-    if PY3 and pass_fds:
+    if pass_fds:
         kwargs["pass_fds"] = pass_fds
-    elif PY2 and pass_fds:
-        kwargs['close_fds'] = False
 
     # make sure we're in the right working directory
     if cwd:

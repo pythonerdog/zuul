@@ -25,10 +25,10 @@
 # Discussion, issues and change requests at:
 #   https://github.com/nodesource/distributions
 #
-# Script to install the NodeSource Node.js 23.x repo onto an
+# Script to install the NodeSource Node.js 22.x repo onto an
 # Enterprise Linux or Fedora Core based system.
 #
-# This was downloaded from https://rpm.nodesource.com/setup_23.x
+# This was downloaded from https://rpm.nodesource.com/setup_22.x
 # A few modifications have been made.
 
 # Logger Function
@@ -72,7 +72,7 @@ rm -f /etc/yum.repos.d/nodesource*.repo
 log "Old repositories removed" "info"
 
 # Define Node.js version
-NODE_VERSION="23.x"
+NODE_VERSION="22.x"
 
 # Get system architecture
 SYS_ARCH=$(uname -m)

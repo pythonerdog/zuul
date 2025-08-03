@@ -2,7 +2,7 @@
 # Copyright 2013 OpenStack Foundation
 # Copyright 2013 Antoine "hashar" Musso
 # Copyright 2013 Wikimedia Foundation Inc.
-# Copyright 2021-2024 Acme Gating, LLC
+# Copyright 2021-2025 Acme Gating, LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may
 # not use this file except in compliance with the License. You may obtain
@@ -365,7 +365,8 @@ class Scheduler(threading.Thread):
             self.executor = self._executor_client_class(self.config, self)
             self.merger = self._merger_client_class(self.config, self)
             self.launcher = self._launcher_client_class(
-                self.zk_client, self.stop_event)
+                self.zk_client, self.stop_event,
+                component_info=self.component_info)
             self.nodepool = nodepool.Nodepool(
                 self.zk_client, self.system.system_id, self.statsd,
                 scheduler=True)
@@ -400,6 +401,7 @@ class Scheduler(threading.Thread):
 
     def stop(self):
         self.log.debug("Stopping scheduler")
+        self.keystore.stop()
         self._stopped = True
         self.wake_event.set()
         # Main thread, connections and layout update may be waiting
@@ -706,6 +708,8 @@ class Scheduler(threading.Thread):
             req = self.nodepool.zk_nodepool.getNodeRequest(req_id, cached=True)
             if req.requestor == self.system.system_id:
                 zk_requests.add(req_id)
+        for req_id in self.launcher.getRequestIds():
+            zk_requests.add(req_id)
         # Get all the current node requests in the queues
         outstanding_requests = set()
         for tenant in self.abide.tenants.values():
@@ -728,7 +732,12 @@ class Scheduler(threading.Thread):
         for req_id in leaked_requests:
             try:
                 self.log.warning("Deleting leaked node request: %s", req_id)
-                self.nodepool.zk_nodepool.deleteNodeRequest(req_id)
+                if self.nodepool.isNodeRequestID(req_id):
+                    self.nodepool.zk_nodepool.deleteNodeRequest(req_id)
+                else:
+                    req = self.launcher.getRequest(req_id)
+                    if req:
+                        self.launcher.deleteRequest(req)
             except Exception:
                 self.log.exception("Error deleting leaked node request: %s",
                                    req_id)
@@ -737,6 +746,7 @@ class Scheduler(threading.Thread):
         self.log.debug("Starting general cleanup")
         if self.general_cleanup_lock.acquire(blocking=False):
             try:
+                self._runOidcSigningKeyRotation()
                 self._runConfigCacheCleanup()
                 self._runExecutorApiCleanup()
                 self._runMergerApiCleanup()
@@ -751,6 +761,28 @@ class Scheduler(threading.Thread):
         # This has its own locking
         self._runNodeRequestCleanup()
         self.log.debug("Finished general cleanup")
+
+    def _runOidcSigningKeyRotation(self):
+        try:
+            self.log.debug("Running OIDC signing keys rotation")
+
+            # Get the max_ttl over all the tenants
+            max_ttl = max(t.max_oidc_ttl for t in self.abide.tenants.values())
+            for algorithm in self.globals.oidc_supported_signing_algorithms:
+                try:
+                    self.keystore.rotateOidcSigningKeys(
+                        algorithm,
+                        self.globals.oidc_signing_key_rotation_interval,
+                        max_ttl
+                    )
+                except exceptions.AlgorithmNotSupportedException:
+                    self.log.warning(
+                        "OIDC signing algorithm '%s' is not supported!",
+                        algorithm)
+
+            self.log.debug("Finished OIDC signing keys rotation")
+        except Exception:
+            self.log.exception("Error in OIDC signing keys rotation:")
 
     def _runConfigCacheCleanup(self):
         # TODO: The only way the config_object_cache can get smaller
@@ -1216,7 +1248,8 @@ class Scheduler(threading.Thread):
 
         self.log.debug("Removing autohold %s", hold_request)
         try:
-            self.nodepool.zk_nodepool.deleteHoldRequest(hold_request)
+            self.nodepool.zk_nodepool.deleteHoldRequest(
+                hold_request, self.launcher)
         except Exception:
             self.log.exception(
                 "Error removing autohold request %s:", hold_request)
@@ -2184,6 +2217,8 @@ class Scheduler(threading.Thread):
             if not tenant:
                 continue
 
+            tenant_state = self.event_watcher.tenant_state[tenant_name]
+
             # This will also forward events for the pipelines
             # (e.g. enqueue or dequeue events) to the matching
             # pipeline event queues that are processed afterwards.
@@ -2203,11 +2238,14 @@ class Scheduler(threading.Thread):
                     # Get tenant again, as it might have been updated
                     # by a tenant reconfig or layout change.
                     tenant = self.abide.tenants[tenant_name]
-
-                    if not self._stopped:
+                    if (not self._stopped and
+                        not tenant_state.trigger_queue_paused):
                         # This will forward trigger events to pipeline
                         # event queues that are processed below.
                         self.process_tenant_trigger_queue(tenant)
+                    elif tenant_state.trigger_queue_paused:
+                        self.log.info("Trigger queue paused for tenant %s",
+                                      tenant.name)
 
                     self.process_pipelines(tenant, tlock)
             except PendingReconfiguration:
@@ -2382,13 +2420,25 @@ class Scheduler(threading.Thread):
         if manager.state.old_queues:
             self._reenqueuePipeline(tenant, manager, ctx)
 
+        tenant_state = self.event_watcher.tenant_state[tenant.name]
+
         with self.statsd_timer(f'{stats_key}.event_process'):
             self.process_pipeline_management_queue(
                 tenant, tenant_lock, manager)
             # Give result events priority -- they let us stop builds,
             # whereas trigger events cause us to execute builds.
-            self.process_pipeline_result_queue(tenant, tenant_lock, manager)
-            self.process_pipeline_trigger_queue(tenant, tenant_lock, manager)
+            if not tenant_state.result_queue_paused:
+                self.process_pipeline_result_queue(
+                    tenant, tenant_lock, manager)
+            else:
+                self.log.info("Result queue paused for tenant %s",
+                              tenant.name)
+            if not tenant_state.trigger_queue_paused:
+                self.process_pipeline_trigger_queue(
+                    tenant, tenant_lock, manager)
+            else:
+                self.log.info("Trigger queue paused for tenant %s",
+                              tenant.name)
         self.abortIfPendingReconfig(tenant_lock)
         try:
             with self.statsd_timer(f'{stats_key}.process'):
@@ -2472,18 +2522,23 @@ class Scheduler(threading.Thread):
 
                 # Get the ltime of the last reconfiguration event
                 self.trigger_events[tenant.name].refreshMetadata()
+                tenant_state = self.event_watcher.tenant_state[tenant.name]
                 for event in self.trigger_events[tenant.name]:
                     log = get_annotated_logger(self.log, event.zuul_event_id)
-                    log.debug("Forwarding trigger event %s", event)
                     try:
-                        trigger_span = tracing.restoreSpanContext(
-                            event.span_context)
-                        with self.tracer.start_as_current_span(
-                                "TenantTriggerEventProcessing",
-                                links=[
-                                    trace.Link(trigger_span.get_span_context())
-                                ]):
-                            self._forward_trigger_event(event, tenant)
+                        if not tenant_state.trigger_queue_discarding:
+                            log.debug("Forwarding trigger event %s", event)
+                            trigger_span = tracing.restoreSpanContext(
+                                event.span_context)
+                            with self.tracer.start_as_current_span(
+                                    "TenantTriggerEventProcessing",
+                                    links=[
+                                        trace.Link(
+                                            trigger_span.get_span_context())
+                                    ]):
+                                self._forward_trigger_event(event, tenant)
+                        else:
+                            log.debug("Discarding trigger event %s", event)
                     except Exception:
                         log.exception("Unable to forward event %s "
                                       "to tenant %s", event, tenant.name)
@@ -2669,8 +2724,8 @@ class Scheduler(threading.Thread):
         if event.isPatchsetCreated() or event.isMessageChanged():
             manager.refreshDeps(change, event)
 
-        if manager.eventMatches(event, change):
-            manager.addChange(change, event)
+        if match_info := manager.eventMatches(event, change):
+            manager.addChange(change, event, debug=match_info.debug)
 
     def process_tenant_management_queue(self, tenant):
         try:
@@ -3008,11 +3063,13 @@ class Scheduler(threading.Thread):
         result_data = event_result.get("data", {})
         secret_result_data = event_result.get("secret_data", {})
         warnings = event_result.get("warnings", [])
+        unreachable = event_result.get("unreachable", False)
 
         log.info("Build complete, result %s, warnings %s", result, warnings)
 
         with build.activeContext(manager.current_context):
             build.error_detail = event_result.get("error_detail")
+            build.unreachable = unreachable
 
             if result is None:
                 build.retry = True
@@ -3079,8 +3136,13 @@ class Scheduler(threading.Thread):
             # removed from ZK.
             request_id = build.build_set.getJobNodeRequestID(build.job)
             if request_id:
-                self.nodepool.deleteNodeRequest(
-                    request_id, event_id=build.zuul_event_id)
+                if self.nodepool.isNodeRequestID(request_id):
+                    self.nodepool.deleteNodeRequest(
+                        request_id, event_id=build.zuul_event_id)
+                else:
+                    req = self.launcher.getRequest(request_id)
+                    if req:
+                        self.launcher.deleteRequest(req)
 
             # The build is completed and the nodes were already returned
             # by the executor. For consistency, also remove the node
@@ -3159,6 +3221,10 @@ class Scheduler(threading.Thread):
             nodeset_info = self.launcher.getNodesetInfo(request)
             if request.state == request.State.FAILED:
                 self.launcher.deleteRequest(request)
+
+            # End the NodesetRequest span
+            tracing.endSavedSpan(request.span_info,
+                                 attributes=request.getSpanAttributes())
 
         job = build_set.item.getJob(request.job_uuid)
         if build_set.getJobNodeSetInfo(job) is None:
@@ -3293,61 +3359,66 @@ class Scheduler(threading.Thread):
 
     def createImageUploads(self, iba):
         # iba is an ImageBuildArtifact
-        with iba.locked(self.zk_client) as lock:
-            with self.createZKContext(lock, self.log) as ctx:
-                # Providers may share image upload configurations, but
-                # these shared configurations may appear on distinct
-                # endpoints.  Identify the unique configurations for
-                # each endpoint and create one upload for each.
-                uploads = defaultdict(list)  # (endpoint, hash) -> [providers]
-                for tenant in self.abide.tenants.values():
-                    for provider in tenant.layout.providers.values():
-                        for image in provider.images.values():
-                            if (image.canonical_name == iba.canonical_name and
-                                image.format == iba.format):
-                                # This image is needed, add this endpoint
-                                endpoint = provider.getEndpoint()
-                                key = (endpoint.canonical_name,
-                                       image.config_hash)
-                                uploads[key].append(provider.canonical_name)
-                for (endpoint_name, config_hash), providers in uploads.items():
-                    upload_uuid = uuid.uuid4().hex
-                    self.log.info(
-                        "Storing image upload: "
-                        "uuid: %s name: %s artifact uuid: %s "
-                        "endpoint: %s config hash: %s",
-                        upload_uuid, iba.canonical_name, iba.uuid,
-                        endpoint_name, config_hash)
-                    ImageUpload.new(
-                        ctx,
-                        uuid=upload_uuid,
-                        canonical_name=iba.canonical_name,
-                        artifact_uuid=iba.uuid,
-                        endpoint_name=endpoint_name,
-                        providers=providers,
-                        config_hash=config_hash,
-                        timestamp=time.time(),
-                        validated=iba.validated,
-                        _state=ImageUpload.State.PENDING,
-                        state_time=time.time(),
-                    )
-                # Only mark the iba as ready once all the upload
-                # records for it have been created.
-                with iba.activeContext(ctx):
-                    iba.state = iba.State.READY
+        with self.createZKContext(None, self.log) as outer_ctx:
+            with iba.locked(outer_ctx) as lock:
+                with self.createZKContext(lock, self.log) as ctx:
+                    # Providers may share image upload configurations, but
+                    # these shared configurations may appear on distinct
+                    # endpoints.  Identify the unique configurations for
+                    # each endpoint and create one upload for each.
+                    # (endpoint, hash) -> [providers]
+                    uploads = defaultdict(list)
+                    for tenant in self.abide.tenants.values():
+                        for provider in tenant.layout.providers.values():
+                            for image in provider.images.values():
+                                if (image.canonical_name == iba.canonical_name
+                                    and image.format == iba.format):
+                                    # This image is needed, add this endpoint
+                                    endpoint = provider.getEndpoint()
+                                    key = (endpoint.canonical_name,
+                                           image.config_hash)
+                                    uploads[key].append(
+                                        provider.canonical_name)
+                    for (endpoint_name, config_hash), providers in \
+                            uploads.items():
+                        upload_uuid = uuid.uuid4().hex
+                        self.log.info(
+                            "Storing image upload: "
+                            "uuid: %s name: %s artifact uuid: %s "
+                            "endpoint: %s config hash: %s",
+                            upload_uuid, iba.canonical_name, iba.uuid,
+                            endpoint_name, config_hash)
+                        ImageUpload.new(
+                            ctx,
+                            uuid=upload_uuid,
+                            canonical_name=iba.canonical_name,
+                            artifact_uuid=iba.uuid,
+                            endpoint_name=endpoint_name,
+                            providers=providers,
+                            config_hash=config_hash,
+                            timestamp=time.time(),
+                            validated=iba.validated,
+                            _state=ImageUpload.State.PENDING,
+                            state_time=time.time(),
+                        )
+                    # Only mark the iba as ready once all the upload
+                    # records for it have been created.
+                    with iba.activeContext(ctx):
+                        iba.state = iba.State.READY
 
     def validateImageUpload(self, image_upload_uuid):
         with self.createZKContext(None, self.log) as ctx:
             upload = ImageUpload()
             upload._set(uuid=image_upload_uuid)
             upload.refresh(ctx)
-        with upload.locked(self.zk_client, blocking=True) as lock:
-            with self.createZKContext(lock, self.log) as ctx:
-                upload.updateAttributes(
-                    ctx,
-                    validated=True,
-                    timestamp=time.time(),
-                )
+        with self.createZKContext(None, self.log) as outer_ctx:
+            with upload.locked(outer_ctx, blocking=True) as lock:
+                with self.createZKContext(lock, self.log) as ctx:
+                    upload.updateAttributes(
+                        ctx,
+                        validated=True,
+                        timestamp=time.time(),
+                    )
 
     def createZKContext(self, lock, log):
         return ZKContext(self.zk_client, lock, self.stop_event, log)

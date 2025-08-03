@@ -481,7 +481,11 @@ class TestJob(BaseTestCase):
         pre_idx = job.pre_run[0]['secrets']['mysecret']
         pre_secret = yaml.encrypted_load(
             job.secrets[pre_idx]['encrypted_data'])
-        self.assertEqual(pre_secret, secret1_data)
+        expected = {
+            'secret_data': secret1_data,
+            'secret_oidc': {},
+        }
+        self.assertEqual(expected, pre_secret)
 
         # Verify that they were deduplicated
         pre2_idx = job.pre_run[0]['secrets']['othersecret']
@@ -491,7 +495,11 @@ class TestJob(BaseTestCase):
         run_idx = job.run[0]['secrets']['mysecret']
         run_secret = yaml.encrypted_load(
             job.secrets[run_idx]['encrypted_data'])
-        self.assertEqual(run_secret, secret2_data)
+        expected = {
+            'secret_data': secret2_data,
+            'secret_oidc': {},
+        }
+        self.assertEqual(expected, run_secret)
 
     def _test_job_override_control(self, attr, job_attr,
                                    default, default_value,

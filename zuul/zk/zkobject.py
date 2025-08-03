@@ -41,6 +41,7 @@ from zuul.zk.locks import SessionAwareLock
 class BaseZKContext:
     profile_logger = logging.getLogger('zuul.profile')
     profile_default = False
+    default_lock_identifier = None
     # Only changed by unit tests.
     # The default scales with number of procs.
     _max_workers = None
@@ -75,7 +76,8 @@ class BaseZKContext:
 
 
 class ZKContext(BaseZKContext):
-    def __init__(self, zk_client, lock, stop_event, log):
+    def __init__(self, zk_client, lock, stop_event, log,
+                 default_lock_identifier=None):
         super().__init__()
         if isinstance(zk_client, ZooKeeperClient):
             client = zk_client.client
@@ -95,6 +97,7 @@ class ZKContext(BaseZKContext):
         self.cumulative_write_bytes = 0
         self.build_references = False
         self.profile = self.profile_default
+        self.default_lock_identifier = default_lock_identifier
 
     def sessionIsValid(self):
         return (not self.lock or self.lock.is_still_valid())
@@ -150,7 +153,6 @@ class ZKObject:
     _retry_interval = 5
     _zkobject_compressed_size = 0
     _zkobject_uncompressed_size = 0
-    _deleted = False
     io_reader_class = sharding.RawZKIO
     io_writer_class = sharding.RawZKIO
     truncate_on_create = False
@@ -304,7 +306,6 @@ class ZKObject:
             context.log.error(
                 "Exception deleting ZKObject %s at %s", self, path)
             raise
-        self._set(_deleted=True)
 
     def estimateDataSize(self, seen=None):
         """Attempt to find all ZKObjects below this one and sum their
@@ -328,7 +329,7 @@ class ZKObject:
                 compressed, uncompressed = obj.estimateDataSize(seen)
             elif (isinstance(obj, dict) or
                   isinstance(obj, types.MappingProxyType)):
-                for sub in obj.values():
+                for sub in list(obj.values()):
                     c, u = walk(sub)
                     compressed += c
                     uncompressed += u
@@ -517,6 +518,12 @@ class ShardedZKObject(ZKObject):
 
 class LockableZKObject(ZKObject):
     _lock = None
+    _deleted = False
+
+    def __new__(klass, *args, **kwargs):
+        zko = super().__new__(klass)
+        zko._set(_lock_contenders=dict())
+        return zko
 
     def getLockPath(self):
         """Return the path for the lock of this object in ZK
@@ -581,16 +588,19 @@ class LockableZKObject(ZKObject):
             except Exception:
                 context.log.exception("Failed to release lock on %s", self)
 
-    def acquireLock(self, context, blocking=True, timeout=None):
+    def acquireLock(self, context, blocking=True, timeout=None,
+                    identifier=None):
         have_lock = False
         lock = None
         path = self.getLockPath()
+        identifier = identifier or context.default_lock_identifier
         try:
             # We create the lock path when we create the object in ZK,
             # so there is no need to ensure the path on lock.  This
             # lets us avoid re-creating the lock if the object was
             # deleted behind our back.
             lock = SessionAwareLock(context.client, path,
+                                    identifier=identifier,
                                     ensure_path=False)
             have_lock = lock.acquire(blocking, timeout)
         except NoNodeError:
@@ -616,6 +626,18 @@ class LockableZKObject(ZKObject):
         if self._deleted:
             # If we are releasing the lock after deleting the object,
             # also cleanup the lock path.
+            try:
+                self._deleteLockPath(context.client)
+            except Exception:
+                context.log.error("Unable to delete lock path for %s", self)
+
+    def delete(self, context):
+        super().delete(context)
+        self._set(_deleted=True)
+        # Most lockable zkobjects are deleted while holding the lock,
+        # so we let releaseLock delete the lock path.  But for those
+        # that aren't, we should delete the lock path now.
+        if not self.hasLock():
             try:
                 self._deleteLockPath(context.client)
             except Exception:

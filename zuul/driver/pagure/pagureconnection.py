@@ -384,9 +384,9 @@ class PagureAPIClient():
                     verb, url, code, data
                 ))
 
-    def get(self, url):
+    def get(self, url, params=None):
         self.log.debug("Getting resource %s ..." % url)
-        ret = self.session.get(url, headers=self.headers)
+        ret = self.session.get(url, params=params, headers=self.headers)
         self.log.debug("GET returned (code: %s): %s" % (
             ret.status_code, ret.text))
         return ret.json(), ret.status_code, ret.url, 'GET'
@@ -405,9 +405,13 @@ class PagureAPIClient():
         self._manage_error(*resp)
         return resp[0]['username']
 
-    def get_project_branches(self):
+    def get_project_branches(self, with_commits=False):
         path = '%s/git/branches' % self.project
-        resp = self.get(self.base_url + path)
+        if with_commits:
+            params = dict(with_commits=True)
+        else:
+            params = None
+        resp = self.get(self.base_url + path, params=params)
         self._manage_error(*resp)
         return resp[0].get('branches', [])
 
@@ -514,9 +518,12 @@ class PagureConnection(ZKChangeCacheMixin, ZKBranchCacheMixin, BaseConnection):
         self._branch_cache = BranchCache(zk_client, self, component_registry)
 
         self.log.info('Creating Zookeeper event queue')
+        if self.sched:
+            component_info = self.sched.component_info
+        else:
+            component_info = None
         self.event_queue = ConnectionEventQueue(
-            zk_client, self.connection_name
-        )
+            zk_client, self.connection_name, component_info)
 
         # If the connection was not loaded by a scheduler, but by e.g.
         # zuul-web, we want to stop here.
@@ -610,6 +617,13 @@ class PagureConnection(ZKChangeCacheMixin, ZKBranchCacheMixin, BaseConnection):
         branch_infos = [BranchInfo(name, present=True)
                         for name in branches]
         return BranchFlag.PRESENT, branch_infos
+
+    def getProjectBranchSha(self, project, branch_name):
+        pagure = self.get_project_api_client(project.name)
+        branches = pagure.get_project_branches(with_commits=True)
+
+        self.log.info("Got branches with commits for %s" % project.name)
+        return branches[branch_name]
 
     def isBranchProtected(self, project_name, branch_name,
                           zuul_event_id=None):
@@ -849,7 +863,8 @@ class PagureWebController(BaseWebController):
         self.zuul_web = zuul_web
         self.event_queue = ConnectionEventQueue(
             self.zuul_web.zk_client,
-            self.connection.connection_name
+            self.connection.connection_name,
+            None
         )
 
     def _source_whitelisted(self, remote_ip, forwarded_ip):

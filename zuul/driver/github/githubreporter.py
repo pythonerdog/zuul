@@ -160,7 +160,7 @@ class GithubReporter(BaseReporter):
             return ':%s: [%s](%s) %s%s%s%s\n' % (
                 (emoji,) + job_fields[:6])
 
-    def _formatItemReportJobs(self, item):
+    def _formatItemReportJobs(self, item, short):
         # Return the list of jobs portion of the report
         ret = ''
         jobs_fields, skipped = self._getItemReportJobsFields(item)

@@ -108,7 +108,7 @@ The zuul-jobs and zuul-base-jobs repositories contain a standard
 library of reusable job components which are designed to be used in a
 wide variety of situations.
 
-Changes to these repositories require consideriation of the various
+Changes to these repositories require consideration of the various
 environments in which the jobs may be used as well as policies which
 promote the consistency and stability of the components therein, but
 not necessarily the full scope of Zuul development.  To that end,

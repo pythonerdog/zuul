@@ -17,12 +17,14 @@ from zuul.model import EventFilter, TriggerEvent
 
 
 class TimerEventFilter(EventFilter):
-    def __init__(self, connection_name, trigger, types=[], timespecs=[]):
-        EventFilter.__init__(self, connection_name, trigger)
+    def __init__(self, connection_name, trigger, types=[], timespecs=[],
+                 dereference=False, debug=None):
+        EventFilter.__init__(self, connection_name, trigger, debug)
 
         self._types = [x.pattern for x in types]
         self.types = types
         self.timespecs = timespecs
+        self.dereference = dereference
 
     def __repr__(self):
         ret = '<TimerEventFilter'

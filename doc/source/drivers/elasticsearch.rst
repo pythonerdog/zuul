@@ -18,7 +18,7 @@ Elasticsearch supports a number of different datatypes for the fields in a
 document. Please refer to its `documentation`_.
 
 The Elasticsearch reporter uses new ES client, that is only supporting
-`current version`_ of Elastisearch. In that case the
+`current version`_ of Elasticsearch. In that case the
 reporter  has been tested on ES cluster version 7. Lower version may
 be working, but we can not give tu any guarantee of that.
 

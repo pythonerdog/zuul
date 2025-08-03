@@ -171,7 +171,7 @@ This is a reference for object layout in Zookeeper.
    .. path:: general
    .. path:: merge_requests
    .. path:: node_request
-   .. path:: sempahores
+   .. path:: semaphores
 
 .. path:: zuul/components
 
@@ -196,7 +196,7 @@ This is a reference for object layout in Zookeeper.
    The unparsed config cache.  This contains the contents of every
    Zuul config file returned by the mergers for use in configuration.
    Organized by repo canonical name, branch, and filename.  The files
-   themeselves are sharded.
+   themselves are sharded.
 
 .. path:: zuul/config/lock
 
@@ -255,6 +255,11 @@ This is a reference for object layout in Zookeeper.
 
    The pipeline trigger event queue.
 
+.. path:: zuul/events/tenant/<tenant>/state
+
+   A Znode that, if exists, can be used to pause event
+   processing.
+
 .. path:: zuul/executor/unzoned
    :type: JobRequestQueue
 
@@ -270,7 +275,7 @@ This is a reference for object layout in Zookeeper.
       :type: Lock
 
       A consumer will create a lock under this node before processing
-      a request.  The znode containing the lock and the requent znode
+      a request.  The znode containing the lock and the request znode
       have the same UUID.  This is a side-channel lock so that the
       lock can be held while the request itself is deleted.
 
@@ -468,7 +473,7 @@ This is a reference for object layout in Zookeeper.
 .. path:: zuul/tenant/<tenant>/pipeline/<pipeline>/item/<item uuid>
 
    Items belong to queues, but are held in their own hierarchy since
-   they may shift to differrent queues during reconfiguration.
+   they may shift to different queues during reconfiguration.
 
 .. path:: zuul/tenant/<tenant>/pipeline/<pipeline>/item/<item uuid>/buildset/<buildset uuid>
 
@@ -530,7 +535,7 @@ This is a reference for object layout in Zookeeper.
    provider supports.  It is the combination of the provider stanza
    plus any inherited sections.
 
-   References to images, labels, and flavors are made using canonincal
+   References to images, labels, and flavors are made using canonical
    names since the same short names may be different in different
    tenants.  Since the same canonically-named provider may appear in
    different tenants with different images, labels, and flavors, the

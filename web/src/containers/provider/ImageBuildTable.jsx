@@ -39,6 +39,15 @@ import { fetchProviders } from '../../actions/providers'
 import { addNotification, addApiError } from '../../actions/notifications'
 import { deleteImageBuildArtifact } from '../../api'
 
+const STATE_STYLES = {
+  ready: {
+    color: 'var(--pf-global--success-color--100)',
+  },
+  deleting: {
+    color: 'var(--pf-global--info-color--100)',
+  },
+}
+
 function ImageBuildTable(props) {
   const { buildArtifacts, fetching } = props
   const [collapsedRows, setCollapsedRows] = useState([])
@@ -70,6 +79,18 @@ function ImageBuildTable(props) {
       dataLabel: 'Validated',
     },
     {
+      title: 'State',
+      dataLabel: 'State',
+    },
+    {
+      title: 'State Time',
+      dataLabel: 'State Time',
+    },
+    {
+      title: 'Locked',
+      dataLabel: 'Locked',
+    },
+    {
       title: 'Build',
       dataLabel: 'Build',
     },
@@ -83,6 +104,7 @@ function ImageBuildTable(props) {
           </Link>
           :
           build.build_uuid
+    const state_style = STATE_STYLES[build.state] || {}
     return {
       _uuid: build.uuid,
       id: rows.length,
@@ -96,7 +118,16 @@ function ImageBuildTable(props) {
           title: build.timestamp
         },
         {
-          title: build.validated.toString()
+          title: build.validated ? 'validated' : 'unvalidated'
+        },
+        {
+          title: <span style={state_style}>{build.state}</span>
+        },
+        {
+          title: build.state_time
+        },
+        {
+          title: build.locke_holder
         },
         {
           title: buildUUID

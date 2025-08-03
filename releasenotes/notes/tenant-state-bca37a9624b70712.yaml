@@ -1,0 +1,5 @@
+---
+features:
+  - |
+    Tenant administrators may now use the web UI or zuul-client
+    commands to pause and unpause event processing for a tenant.

@@ -48,13 +48,24 @@ class DependentPipelineManager(SharedQueuePipelineManager):
     def getNodePriority(self, item, change):
         return item.queue.queue.index(item)
 
-    def areChangesReadyToBeEnqueued(self, changes, event):
+    def areChangesReadyToBeEnqueued(self, changes, event,
+                                    warnings=None, debug=False):
         log = get_annotated_logger(self.log, event)
         for change in changes:
             source = change.project.source
-            if not source.canMerge(change, self.getSubmitAllowNeeds(),
-                                   event=event):
-                log.debug("Change %s can not merge", change)
+            can_merge = source.canMerge(change, self.getSubmitAllowNeeds(),
+                                        event=event)
+            if not can_merge:
+                msg = (
+                    f"Change {change._id()} "
+                    f"in project {change.project} "
+                    "can not be merged"
+                )
+                if isinstance(can_merge, model.FalseWithReason):
+                    msg += f" due to: {can_merge}"
+                log.debug("  " + msg)
+                if debug and warnings is not None:
+                    warnings.append(msg)
                 return False
         return True
 
@@ -146,7 +157,7 @@ class DependentPipelineManager(SharedQueuePipelineManager):
 
     def enqueueChangesAhead(self, changes, event, quiet, ignore_requirements,
                             change_queue, history=None, dependency_graph=None,
-                            warnings=None):
+                            warnings=None, debug=False):
         log = get_annotated_logger(self.log, event)
 
         history = history if history is not None else []
@@ -160,7 +171,7 @@ class DependentPipelineManager(SharedQueuePipelineManager):
         abort, needed_changes = self.getMissingNeededChanges(
             changes, change_queue, event,
             dependency_graph=dependency_graph,
-            warnings=warnings)
+            warnings=warnings, debug=debug)
         if abort:
             return False
 
@@ -178,14 +189,14 @@ class DependentPipelineManager(SharedQueuePipelineManager):
                                    ignore_requirements=ignore_requirements,
                                    change_queue=change_queue, history=history,
                                    dependency_graph=dependency_graph,
-                                   warnings=warnings)
+                                   warnings=warnings, debug=debug)
                 if not r:
                     return False
         return True
 
     def getMissingNeededChanges(self, changes, change_queue, event,
                                 dependency_graph=None, warnings=None,
-                                item=None):
+                                item=None, debug=False):
         log = get_annotated_logger(self.log, event)
         changes_needed = []
         abort = False
@@ -215,7 +226,7 @@ class DependentPipelineManager(SharedQueuePipelineManager):
                             msg = ("Change %s in project %s does not "
                                    "share a change queue with %s "
                                    "in project %s" %
-                                   (needed_change.number,
+                                   (needed_change._id(),
                                     needed_change.project,
                                     change.number,
                                     change.project))
@@ -225,30 +236,48 @@ class DependentPipelineManager(SharedQueuePipelineManager):
                             changes_needed.append(needed_change)
                             abort = True
                     if not needed_change.is_current_patchset:
-                        log.debug("  Needed change is not "
-                                  "the current patchset")
+                        msg = (
+                            f"Needed change {needed_change._id()} "
+                            f"in project {needed_change.project} is not "
+                            "the current patchset"
+                        )
+                        log.debug("  " + msg)
                         changes_needed.append(needed_change)
+                        if debug and warnings is not None:
+                            warnings.append(msg)
                         abort = True
                     if needed_change in changes:
                         log.debug("  Needed change is in cycle")
                         continue
                     if self.isChangeAlreadyInQueue(
-                            needed_change, change_queue, item):
+                            needed_change, change_queue, event, item):
                         log.debug("  Needed change is already "
                                   "ahead in the queue")
                         continue
-                    if needed_change.project.source.canMerge(
-                            needed_change, self.getSubmitAllowNeeds(),
-                            event=event):
-                        log.debug("  Change %s is needed", needed_change)
+                    can_merge = needed_change.project.source.canMerge(
+                        needed_change, self.getSubmitAllowNeeds(),
+                        event=event)
+                    if can_merge:
+                        msg = (
+                            f"Change {needed_change._id()} "
+                            f"in project {needed_change.project} is needed "
+                        )
+                        log.debug("  " + msg)
                         if needed_change not in changes_needed:
                             changes_needed.append(needed_change)
                         continue
                     else:
                         # The needed change can't be merged.
-                        log.debug("  Change %s is needed "
-                                  "but can not be merged",
-                                  needed_change)
+                        msg = (
+                            f"Change {needed_change._id()} "
+                            f"in project {needed_change.project} is needed "
+                            "but can not be merged"
+                        )
+                        if isinstance(can_merge, model.FalseWithReason):
+                            msg += f" due to: {can_merge}"
+                        log.debug("  " + msg)
+                        if debug and warnings is not None:
+                            warnings.append(msg)
                         changes_needed.append(needed_change)
                         abort = True
         return abort, changes_needed

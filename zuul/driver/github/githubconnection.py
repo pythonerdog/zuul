@@ -52,7 +52,7 @@ from zuul.lib import tracing
 from zuul.web.handler import BaseWebController
 from zuul.lib.logutil import get_annotated_logger
 from zuul import model
-from zuul.model import Ref, Branch, Tag, Project
+from zuul.model import Ref, Branch, Tag, Project, FalseWithReason
 from zuul.exceptions import MergeFailure
 from zuul.driver.github.githubmodel import PullRequest, GithubTriggerEvent
 from zuul.model import DequeueEvent
@@ -1304,9 +1304,12 @@ class GithubConnection(ZKChangeCacheMixin, ZKBranchCacheMixin, BaseConnection):
         self._branch_cache = BranchCache(zk_client, self, component_registry)
 
         self.log.debug('Creating Zookeeper event queue')
+        if self.sched:
+            component_info = self.sched.component_info
+        else:
+            component_info = None
         self.event_queue = ConnectionEventQueue(
-            zk_client, self.connection_name
-        )
+            zk_client, self.connection_name, component_info)
 
         # If the connection was not loaded by a scheduler, but by e.g.
         # zuul-web, we want to stop here.
@@ -1840,6 +1843,25 @@ class GithubConnection(ZKChangeCacheMixin, ZKBranchCacheMixin, BaseConnection):
         resp = resp.json()
         return resp['default_branch']
 
+    def getProjectBranchSha(self, project, branch_name):
+        github = self.getGithubClient(project.name)
+        url = github.session.build_url('repos', project.name, 'branches',
+                                       branch_name)
+        resp = github.session.get(url)
+
+        if resp.status_code == 403:
+            self.log.error(str(resp))
+            rate_limit = github.rate_limit()
+            if rate_limit['resources']['core']['remaining'] == 0:
+                self.log.warning("Rate limit exceeded")
+            return None
+        elif resp.status_code == 404:
+            raise Exception("Got status code 404 when fetching "
+                            "project %s branch %s", project.name, branch_name)
+
+        resp = resp.json()
+        return resp['commit']['sha']
+
     def isBranchProtected(self, project_name: str, branch_name: str,
                           zuul_event_id=None) -> Optional[bool]:
         github = self.getGithubClient(
@@ -1939,31 +1961,32 @@ class GithubConnection(ZKChangeCacheMixin, ZKBranchCacheMixin, BaseConnection):
         # If the PR is a draft it cannot be merged.
         if change.draft:
             log.debug('Change %s can not merge because it is a draft', change)
-            return False
+            return FalseWithReason('draft state')
 
         if not change.mergeable:
             log.debug('Change %s can not merge because Github detected a '
                       'merge conflict', change)
-            return False
+            return FalseWithReason('Github detected a merge conflict')
 
         missing_status_checks = self._getMissingStatusChecks(
             change, allow_needs)
         if missing_status_checks:
             log.debug('Change %s can not merge because required status checks '
                       'are missing: %s', change, missing_status_checks)
-            return False
+            return FalseWithReason(
+                f'required status checks are missing {missing_status_checks}')
 
         if change.review_decision and change.review_decision != 'APPROVED':
             # If we got a review decision it must be approved
             log.debug('Change %s can not merge because it is not approved',
                       change)
-            return False
+            return FalseWithReason('approval state')
 
         if change.unresolved_conversations:
             log.debug('Change %s can not merge because '
                       'it has unresolved conversations',
                       change)
-            return False
+            return FalseWithReason('unresolved conversations')
 
         return True
 
@@ -2062,16 +2085,13 @@ class GithubConnection(ZKChangeCacheMixin, ZKBranchCacheMixin, BaseConnection):
                 # previous review was 'approved' or 'changes_requested', as
                 # the GitHub model does not change the vote if a comment is
                 # added after the fact. THANKS GITHUB!
-                if review['grantedOn'] > reviews[login]['grantedOn']:
-                    if (review['type'] == 'commented' and
+                if (review['type'] == 'commented' and
                         reviews[login]['type'] in
                         ('approved', 'changes_requested')):
-                        log.debug("Discarding comment review %s due to "
-                                  "an existing vote %s" % (review,
-                                                           reviews[login]))
-                        pass
-                    else:
-                        reviews[login] = review
+                    log.debug("Discarding comment review %s due to "
+                              "an existing vote %s", review, reviews[login])
+                else:
+                    reviews[login] = review
 
         return reviews.values()
 
@@ -2554,7 +2574,8 @@ class GithubWebController(BaseWebController):
         self.zuul_web = zuul_web
         self.event_queue = ConnectionEventQueue(
             self.zuul_web.zk_client,
-            self.connection.connection_name
+            self.connection.connection_name,
+            None
         )
         self.token = self.connection.connection_config.get('webhook_token')
 

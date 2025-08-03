@@ -1,0 +1,21 @@
+- pipeline:
+    name: image
+    manager: independent
+    trigger:
+      zuul:
+        - event: image-build
+    success:
+      zuul:
+        image-built: true
+        image-validated: true
+
+- project:
+    name: common-config
+    image:
+      jobs:
+        # These jobs should run
+        - build-debian-local-image
+        - build-ubuntu-local-image
+        # This job should not because we don't emit a trigger event
+        # for this image.
+        - build-fedora-local-image

@@ -42,9 +42,55 @@ Zuul implements the timer using `apscheduler`_, Please check the
       words, it is not guaranteed to vary from one run of the timer
       trigger to the next).
 
+   .. attr:: dereference
+      :default: false
+
+      Whether the branch tip should be dereferenced when enqueued.
+
+      This controls the behavior when the timer trigger for a given
+      project-branch activates a second or more time for a given
+      project-branch while a queue item for that project-branch is
+      still in the pipeline.
+
+      If set to the default value of ``false``, then the triggering
+      event and queue item will only include the name of the branch;
+      this means that Zuul will see an identical queue item in the
+      pipeline and will not enqueue a duplicate entry.
+
+      If set to ``true`` then Zuul will look up the current Git sha of
+      the tip of each project-branch when enqueueing that
+      project-branch and include that information in the triggering
+      event and queue item.  If the timer trigger activates a second
+      time while a given project-branch is still in the pipeline, the
+      behavior then depends on whether the Git commit sha differs.  If
+      the branch has changed between the two activations, Zuul will
+      treat the second activation as distinct and enqueue a new item
+      for the same project-branch (but with a different ``newrev``
+      value).  If the Git commit sha is the same on both activations,
+      Zuul will not enqueue a second entry.
+
    .. warning::
-       Be aware the day-of-week value differs from from cron.
+       Be aware the day-of-week value differs from cron.
        The first weekday is Monday (0), and the last is Sunday (6).
+
+   .. attr:: debug
+      :default: false
+
+      When set to `true`, this will cause debug messages to be
+      included when the queue item is reported.  These debug messages
+      may be used to help diagnose why certain jobs did or did not
+      run, and in many cases, why the item was not ultimately enqueued
+      into the pipeline.
+
+      Setting this value also effectively sets
+      :attr:`project.<pipeline>.debug` for affected queue items.
+
+      This only applies to items that arrive at a pipeline via this
+      particular trigger.  Since the output is very verbose and
+      typically not needed or desired, this allows for a configuration
+      where typical pipeline triggers omit the debug output, but
+      triggers that match certain specific criteria may be used to
+      request debug information.
 
 
 .. _apscheduler: https://apscheduler.readthedocs.io/

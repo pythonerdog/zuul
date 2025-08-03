@@ -14,7 +14,7 @@ Configure GitHub
 
 Zuul needs to receive notification of events from GitHub, and it needs
 to interact with GitHub in response to those events.  There are two
-options aviable for configuring these connections.  A GitHub project's
+options available for configuring these connections.  A GitHub project's
 owner can either manually setup a web-hook or install a GitHub
 Application.  In the first case, the project's owner needs to know
 the Zuul endpoint and the webhook secrets and configure them manually.
@@ -38,7 +38,7 @@ various Zuul Github functionality:
 
   * Reporting: Requires authentication with write access to the project so
     that comments can be posted.
-  * Enqueing a pull request (including Depends-On: of a pull request): The
+  * Enqueuing a pull request (including Depends-On: of a pull request): The
     API queries needed to examine PR's so that Zuul can enqueue them
     requires authentication with read access.
   * :attr:`job.required-projects` listing: No authentication required.
@@ -245,7 +245,7 @@ The supported options in ``zuul.conf`` connections are:
       Because the repository cache may be several minutes behind the
       canonical site, enabling this setting automatically sets the
       default :attr:`<github connection>.repo_retry_timeout` to 600
-      seconds.  That setting may still be overidden to specify a
+      seconds.  That setting may still be overridden to specify a
       different value.
 
    .. attr:: repo_retry_timeout
@@ -478,6 +478,25 @@ the following options.
       question.  It follows the same syntax as
       :ref:`github_requirements`.
 
+   .. attr:: debug
+      :default: false
+
+      When set to `true`, this will cause debug messages to be
+      included when the queue item is reported.  These debug messages
+      may be used to help diagnose why certain jobs did or did not
+      run, and in many cases, why the item was not ultimately enqueued
+      into the pipeline.
+
+      Setting this value also effectively sets
+      :attr:`project.<pipeline>.debug` for affected queue items.
+
+      This only applies to items that arrive at a pipeline via this
+      particular trigger.  Since the output is very verbose and
+      typically not needed or desired, this allows for a configuration
+      where typical pipeline triggers omit the debug output, but
+      triggers that match certain specific criteria may be used to
+      request debug information.
+
 
 Reporter Configuration
 ----------------------
@@ -549,7 +568,7 @@ itself. Status name, description, and context is taken from the pipeline.
       :default: false
 
       Boolean value that determines if the reporter should merge the
-      pull reqeust. Only used for Pull Request based items.
+      pull request. Only used for Pull Request based items.
 
    .. attr:: label
 
@@ -796,7 +815,7 @@ Zuul provides the attribute
 attribute is by default set to ``false`` but we recommend to set it to
 ``true`` for the whole tenant. By doing so Zuul will benefit from:
 
- - exluding in-repo development branches used to open Pull requests. This will
+ - excluding in-repo development branches used to open Pull requests. This will
    prevent Zuul to fetch and read useless branches data to find Zuul
    configuration files.
  - reading protection rules configuration from the Github API for a given branch
@@ -858,7 +877,7 @@ Github check suites are opaque and the current status, duration and
 the overall conclusion are all calculated and set automatically
 whenever an included check run is updated.  Most importantly, there
 can only be one check suite per commit SHA, per app.  Thus there is no
-facility for for Zuul to create multiple check suite results for a
+facility for Zuul to create multiple check suite results for a
 change, e.g. one check suite for each pipeline such as check and gate.
 
 The Github check suite thus does not map well to Zuul's concept of
@@ -994,7 +1013,7 @@ execution (which would result in duplicated entries in the status section below
 the comments of a PR).
 
 In case the update on a check run fails (e.g. request timeout when reporting
-success or failure to Github), the check run will stay in status "in_progess"
+success or failure to Github), the check run will stay in status "in_progress"
 and there will be no way to re-run the check run via the Github UI as the
 predefined actions are only available on failed check runs.
 Thus, it's recommended to configure a

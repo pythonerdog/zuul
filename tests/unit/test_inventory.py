@@ -100,7 +100,7 @@ class TestInventoryGithub(TestInventoryBase):
             self.assertIn(node_name, inventory['all']['hosts'])
             node_vars = inventory['all']['hosts'][node_name]
             self.assertEqual(
-                'auto', node_vars['ansible_python_interpreter'])
+                '/usr/bin/python3', node_vars['ansible_python_interpreter'])
         self.assertIn('zuul', inventory['all']['vars'])
         self.assertIn('attempts', inventory['all']['vars']['zuul'])
         self.assertEqual(1, inventory['all']['vars']['zuul']['attempts'])
@@ -198,7 +198,7 @@ class InventoryAutoPythonMixin:
             self.assertIn(node_name, inventory['all']['hosts'])
             node_vars = inventory['all']['hosts'][node_name]
             self.assertEqual(
-                'auto', node_vars['ansible_python_interpreter'])
+                '/usr/bin/python3', node_vars['ansible_python_interpreter'])
 
         self.assertIn('zuul', inventory['all']['vars'])
         z_vars = inventory['all']['vars']['zuul']
@@ -213,14 +213,14 @@ class InventoryAutoPythonMixin:
         self.waitUntilSettled()
 
 
-class TestInventoryAutoPythonAnsible8(TestInventoryBase,
-                                      InventoryAutoPythonMixin):
-    ansible_version = '8'
-
-
 class TestInventoryAutoPythonAnsible9(TestInventoryBase,
                                       InventoryAutoPythonMixin):
     ansible_version = '9'
+
+
+class TestInventoryAutoPythonAnsible11(TestInventoryBase,
+                                       InventoryAutoPythonMixin):
+    ansible_version = '11'
 
 
 class TestInventory(TestInventoryBase):
@@ -237,7 +237,7 @@ class TestInventory(TestInventoryBase):
             self.assertIn(node_name, inventory['all']['hosts'])
             node_vars = inventory['all']['hosts'][node_name]
             self.assertEqual(
-                'auto', node_vars['ansible_python_interpreter'])
+                '/usr/bin/python3', node_vars['ansible_python_interpreter'])
             self.assertNotIn(
                 'ansible_shell_type', node_vars)
         self.assertIn('zuul', inventory['all']['vars'])
@@ -313,7 +313,7 @@ class TestInventory(TestInventoryBase):
                           inventory['all']['children']
                           ['ceph-monitor']['hosts'])
         self.assertEqual(
-            'auto',
+            '/usr/bin/python3',
             inventory['all']['hosts']['controller']
             ['ansible_python_interpreter'])
         self.assertEqual(
@@ -321,7 +321,7 @@ class TestInventory(TestInventoryBase):
             inventory['all']['hosts']['controller']
             ['ceph_var'])
         self.assertEqual(
-            'auto',
+            '/usr/bin/python3',
             inventory['all']['hosts']['compute1']
             ['ansible_python_interpreter'])
         self.assertNotIn(
@@ -366,7 +366,7 @@ class TestInventory(TestInventoryBase):
                     inventory['all']['hosts'][node_name]['ansible_connection'])
 
             self.assertEqual(
-                'auto',
+                '/usr/bin/python3',
                 inventory['all']['hosts'][node_name]
                 ['ansible_python_interpreter'])
             self.assertEqual(

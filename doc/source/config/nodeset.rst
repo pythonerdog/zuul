@@ -42,11 +42,14 @@ branch will not immediately produce a configuration error.
 
 Nodesets may also be used to express that Zuul should use the first of
 multiple alternative node configurations to run a job.  When a Nodeset
-specifies a list of :attr:`nodeset.alternatives`, Zuul will request the
-first Nodeset in the series, and if allocation fails for any reason,
-Zuul will re-attempt the request with the subsequent Nodeset and so
-on.  The first Nodeset which is sucessfully supplied by Nodepool will
-be used to run the job.  An example of such a configuration follows.
+specifies a list of :attr:`nodeset.alternatives`, Zuul will request
+the first Nodeset in the series, and if allocation fails for any
+reason, Zuul will re-attempt the request with the subsequent Nodeset
+and so on.  The first Nodeset which is successfully supplied by
+Nodepool will be used to run the job.  Additionally, if Zuul
+encounters an unrechable node during the build, it will use the next
+alternative when retrying the job.  An example of a nodeset
+configuration with alternatives follows.
 
 .. code-block:: yaml
 
@@ -88,7 +91,7 @@ specify nodes and groups, or alternative nodesets, but not both.
 
    .. attr:: nodes
 
-      This attribute is required unless `alteranatives` is supplied.
+      This attribute is required unless `alternatives` is supplied.
 
       A list of node definitions, each of which has the following format:
 

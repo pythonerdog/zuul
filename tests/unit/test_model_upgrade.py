@@ -13,6 +13,7 @@
 # under the License.
 
 import json
+import os
 
 from zuul.zk.components import (
     COMPONENT_REGISTRY,
@@ -26,6 +27,7 @@ from tests.base import (
     simple_layout,
     iterate_timeout,
     model_version,
+    FIXTURE_DIR,
     ZOOKEEPER_SESSION_TIMEOUT,
 )
 from zuul import model
@@ -489,3 +491,31 @@ class TestSemaphoreReleaseUpgrade(ZuulTestCase):
                 dict(name='test-global-semaphore',
                      result='SUCCESS', changes='2,1'),
             ], ordered=False)
+
+
+class TestOidcSecretSupport(ZuulTestCase):
+    tenant_config_file = 'config/secrets/main.yaml'
+
+    @model_version(34)
+    def test_model_34(self):
+        self._run_test()
+
+    @model_version(35)
+    def test_model_35(self):
+        self._run_test()
+
+    def _run_test(self):
+        with open(os.path.join(FIXTURE_DIR,
+                               'config/secrets/git/',
+                               'org_project2/zuul-secret.yaml')) as f:
+            config = f.read()
+        file_dict = {'zuul.yaml': config}
+
+        A = self.fake_gerrit.addFakeChange('org/project2', 'master', 'A',
+                                           files=file_dict)
+        self.fake_gerrit.addEvent(A.getPatchsetCreatedEvent(1))
+        self.waitUntilSettled()
+        self.assertEqual(A.reported, 1, "A should report success")
+        self.assertHistory([
+            dict(name='project2-secret', result='SUCCESS', changes='1,1'),
+        ])

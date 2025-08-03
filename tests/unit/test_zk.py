@@ -46,11 +46,12 @@ from zuul.zk.change_cache import (
     ConcurrentUpdateError,
 )
 from zuul.zk.config_cache import SystemConfigCache, UnparsedConfigCache
+from zuul.zk.election import SessionAwareElection, RendezvousElection
 from zuul.zk.exceptions import LockException
 from zuul.zk.executor import ExecutorApi
 from zuul.zk.job_request_queue import JobRequestEvent
 from zuul.zk.merger import MergerApi
-from zuul.zk.launcher import LauncherApi
+from zuul.zk.launcher import LauncherApi, LockableZKObjectCache
 from zuul.zk.layout import LayoutStateStore, LayoutState
 from zuul.zk.locks import locked
 from zuul.zk.nodepool import ZooKeeperNodepool
@@ -65,6 +66,7 @@ from zuul.zk.components import (
     ComponentRegistry,
     ExecutorComponent,
     LauncherComponent,
+    SchedulerComponent,
     COMPONENT_REGISTRY
 )
 from tests.base import (
@@ -76,7 +78,11 @@ from tests.base import (
     ZOOKEEPER_SESSION_TIMEOUT,
 )
 from zuul.zk.zkobject import (
-    ShardedZKObject, PolymorphicZKObjectMixin, ZKObject, ZKContext
+    LockableZKObject,
+    PolymorphicZKObjectMixin,
+    ShardedZKObject,
+    ZKContext,
+    ZKObject,
 )
 from zuul.zk.locks import tenant_write_lock
 
@@ -171,7 +177,7 @@ class TestNodepool(ZooKeeperBaseTestCase):
         self.assertIsNone(req2.lock)
 
         # Test deleting the request
-        self.zk_nodepool.deleteHoldRequest(req1)
+        self.zk_nodepool.deleteHoldRequest(req1, None)
         self.assertEqual([], self.zk_nodepool.getHoldRequests())
 
 
@@ -1598,6 +1604,9 @@ class TestSystemConfigCache(ZooKeeperBaseTestCase):
             "default_ansible_version": "X",
             "web_root": "/web/root",
             "websocket_url": "/web/socket",
+            "oidc_signing_key_rotation_interval": 3600,
+            "oidc_supported_signing_algorithms": ["RS256", "ES256"],
+            "oidc_default_signing_algorithm": "RS256",
         })
         self.config_cache.set(uac, attrs)
 
@@ -2968,3 +2977,260 @@ class TestLauncherApi(ZooKeeperBaseTestCase):
             used = self.api.nodes_cache.getQuota(provider)
             if used.quota.get('instances') == 0:
                 break
+
+
+class DummyLockable(LockableZKObject):
+    ROOT = "/test/dummy"
+    DUMMY_PATH = "dummy"
+    LOCKS_PATH = "locks"
+
+    def __init__(self):
+        super().__init__()
+        self._set(
+            uuid=uuid.uuid4().hex,
+            is_locked=False,
+            lock_holder=None,
+        )
+
+    def serialize(self, context):
+        return json.dumps({
+            "uuid": self.uuid,
+        }).encode("utf8")
+
+    def getPath(self):
+        return f"{self.ROOT}/{self.DUMMY_PATH}/{self.uuid}"
+
+    def getLockPath(self):
+        return f"{self.ROOT}/{self.LOCKS_PATH}/{self.uuid}"
+
+
+class TestLockableZKObjectCache(ZooKeeperBaseTestCase):
+
+    def test_is_locked_contenders(self):
+        cache = LockableZKObjectCache(
+            self.zk_client,
+            None,
+            root=DummyLockable.ROOT,
+            items_path=DummyLockable.DUMMY_PATH,
+            locks_path=DummyLockable.LOCKS_PATH,
+            zkobject_class=DummyLockable)
+
+        ctx = ZKContext(self.zk_client, None, None, self.log)
+        dummy = DummyLockable.new(ctx)
+
+        for _ in iterate_timeout(10, "cache to sync"):
+            if cache.getItems():
+                break
+
+        # Acquire lock for all items
+        for item in cache.getItems():
+            item.acquireLock(ctx)
+
+        for _ in iterate_timeout(10, "cache to sync"):
+            if all(d.is_locked for d in cache.getItems()):
+                break
+
+        # Create a dummy lock contender
+        contender_path = f"{dummy.getLockPath()}/deadbeef__lock__0000000001"
+        self.zk_client.client.create(contender_path)
+
+        # Make sure items are still considered locked
+        for _ in iterate_timeout(10, "cache to sync"):
+            if all(d.is_locked for d in cache.getItems()):
+                break
+
+        # Discard the pending lock and make sure items are still
+        # considered locked
+        self.zk_client.client.delete(contender_path)
+        for _ in iterate_timeout(10, "cache to sync"):
+            if all(d.is_locked for d in cache.getItems()):
+                break
+
+        # Release the lock and confirm items are no longer considered locked
+        for item in cache.getItems():
+            item.releaseLock(ctx)
+
+        for _ in iterate_timeout(10, "cache to sync"):
+            if not any(d.is_locked for d in cache.getItems()):
+                break
+
+
+class TestRendezvousElection(ZooKeeperBaseTestCase):
+    def test_rendezvous_election(self):
+        # The strings foo and bar are not entirely arbitrary; they
+        # rendezvous hash with the path to produce a list of
+        # components in the order expected by the test.
+        c1 = SchedulerComponent(self.zk_client, "foo")
+        c1.register()
+        c2 = SchedulerComponent(self.zk_client, "bar")
+        c2.register()
+
+        e1 = RendezvousElection(
+            self.zk_client.client,
+            '/test/election/lock',
+            'scheduler',
+            c1,
+        )
+        e2 = RendezvousElection(
+            self.zk_client.client,
+            '/test/election/lock',
+            'scheduler',
+            c2,
+        )
+
+        self.assertEqual(0, len(e1._getScores()))
+        self.assertEqual(None, e1._getWinner())
+        self.assertFalse(e1.is_still_valid())
+
+        self.assertEqual(0, len(e2._getScores()))
+        self.assertEqual(None, e2._getWinner())
+        self.assertFalse(e2.is_still_valid())
+
+        # c2 will be the winner since it's the only one running
+        c2.state = c2.RUNNING
+        time.sleep(1)
+        self.assertEqual(1, len(e1._getScores()))
+        self.assertEqual(c2.hostname, e1._getWinner().hostname)
+        self.assertFalse(e1.is_still_valid())
+
+        self.assertEqual(1, len(e2._getScores()))
+        self.assertEqual(c2.hostname, e2._getWinner().hostname)
+        self.assertTrue(e2.is_still_valid())
+
+        # Once both are enabled, c1 is the winner
+        c1.state = c1.RUNNING
+        time.sleep(1)
+        self.assertEqual(2, len(e1._getScores()))
+        self.assertEqual(c1.hostname, e1._getWinner().hostname)
+        self.assertTrue(e1.is_still_valid())
+
+        self.assertEqual(2, len(e2._getScores()))
+        self.assertEqual(c1.hostname, e2._getWinner().hostname)
+        self.assertFalse(e2.is_still_valid())
+
+        event1 = threading.Event()
+        event2 = threading.Event()
+
+        def run1():
+            event1.set()
+            while e1.is_still_valid():
+                time.sleep(0.1)
+
+        def run2():
+            event2.set()
+            while e2.is_still_valid():
+                time.sleep(0.1)
+
+        t1 = threading.Thread(
+            target=e1.run,
+            args=(run1,),
+        )
+        t1.start()
+        t2 = threading.Thread(
+            target=e2.run,
+            args=(run2,),
+        )
+        t2.start()
+
+        # Wait for the thread to start
+        event1.wait()
+        # Second component should still be waiting
+        self.assertFalse(event2.is_set())
+
+        # Stop the thread
+        e1.cancel()
+        # Wait for the thread to stop
+        t1.join()
+
+        # The second election still should not have started yet since
+        # the first component is still running.
+        self.assertFalse(event2.is_set())
+
+        self.log.debug("Stop c1")
+        # Let the second election win
+        c1.state = c1.STOPPED
+        event2.wait()
+
+        self.log.debug("Stop c2")
+        # Stop the second election by stopping the second component
+        e2.running = False
+        c2.state = c2.STOPPED
+        t2.join()
+
+    def test_rendezvous_election_upgrade(self):
+        # Test that we can upgrade from a "regular" election to a
+        # rendezvous election.
+
+        # The numbers (e1, e2) mirror the test above, but "1" is the
+        # regular election and "2" is the rendezvous.
+        c2 = SchedulerComponent(self.zk_client, "bar")
+        c2.register()
+
+        e1 = SessionAwareElection(
+            self.zk_client.client,
+            '/test/election/lock',
+        )
+        e2 = RendezvousElection(
+            self.zk_client.client,
+            '/test/election/lock',
+            'scheduler',
+            c2,
+        )
+
+        self.assertEqual(0, len(e2._getScores()))
+        self.assertEqual(None, e2._getWinner())
+        self.assertFalse(e2.is_still_valid())
+
+        # c2 will be the winner since it's the only one running
+        c2.state = c2.RUNNING
+        time.sleep(1)
+        self.assertEqual(1, len(e2._getScores()))
+        self.assertEqual(c2.hostname, e2._getWinner().hostname)
+        self.assertTrue(e2.is_still_valid())
+
+        event1 = threading.Event()
+        event2 = threading.Event()
+        e1._test_stop = False
+
+        def run1():
+            event1.set()
+            while not e1._test_stop:
+                time.sleep(0.1)
+
+        def run2():
+            event2.set()
+            while e2.is_still_valid():
+                time.sleep(0.1)
+
+        t1 = threading.Thread(
+            target=e1.run,
+            args=(run1,),
+        )
+        t1.start()
+        # Wait for the thread to start
+        event1.wait()
+
+        t2 = threading.Thread(
+            target=e2.run,
+            args=(run2,),
+        )
+        t2.start()
+
+        time.sleep(1)
+        # Second component should still be waiting
+        self.assertFalse(event2.is_set())
+
+        # Stop the thread
+        self.log.debug("Stop c1")
+        e1._test_stop = True
+        # Wait for the thread to stop
+        t1.join()
+
+        # Wait for the second election to win
+        event2.wait()
+
+        self.log.debug("Stop c2")
+        # Stop the second election by stopping the second component
+        e2.running = False
+        c2.state = c2.STOPPED
+        t2.join()

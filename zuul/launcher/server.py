@@ -19,6 +19,7 @@ import collections
 from contextlib import nullcontext
 import errno
 import fcntl
+import hashlib
 import logging
 import os
 import random
@@ -34,12 +35,14 @@ import cachetools
 import mmh3
 import paramiko
 import requests
+from opentelemetry import trace
 
 from zuul import exceptions, model
 import zuul.lib.repl
 from zuul.lib import commandsocket, tracing
 from zuul.lib.collections import DefaultKeyDict
 from zuul.lib.config import get_default
+from zuul.lib.monitoring import MonitoringServer
 from zuul.zk.image_registry import (
     ImageBuildRegistry,
     ImageUploadRegistry,
@@ -99,6 +102,11 @@ class ProviderNodeError(Exception):
     pass
 
 
+class LaunchTimeoutError(ProviderNodeError):
+    """The node exceeded the provider's launch-timeout"""
+    pass
+
+
 class LauncherStatsElection(SessionAwareElection):
     """Election for emitting launcher stats."""
 
@@ -126,13 +134,15 @@ class DeleteJob:
             with self.launcher.createZKContext(None, self.log) as ctx:
                 try:
                     with self.upload.locked(ctx, blocking=False):
+                        self.upload.refresh(ctx)
                         self.log.info("Deleting image upload %s", self.upload)
                         with self.upload.activeContext(ctx):
                             self.upload.state = self.upload.State.DELETING
                         provider_cname = self.upload.providers[0]
                         provider = self.launcher.\
                             _getProviderByCanonicalName(provider_cname)
-                        provider.deleteImage(self.upload.external_id)
+                        if self.upload.external_id:
+                            provider.deleteImage(self.upload.external_id)
                         self.upload.delete(ctx)
                         self.launcher.upload_deleted_event.set()
                         self.launcher.wake_event.set()
@@ -155,67 +165,238 @@ class UploadJob:
             self._run()
         except Exception:
             self.log.exception("Error in upload job")
+        try:
+            for upload in self.uploads:
+                self.launcher.upload_uuids_in_queue.discard(upload.uuid)
+        except Exception:
+            self.log.exception("Error in upload job")
+
+    def _acquireUploadLocks(self, ctx, uploads):
+        try:
+            with self.image_build_artifact.locked(ctx, blocking=False):
+                for upload in self.uploads:
+                    if upload.acquireLock(ctx, blocking=False):
+                        upload.refresh(ctx)
+                        if upload.external_id:
+                            # Someone else finished it
+                            upload.releaseLock(ctx)
+                        elif upload.state != upload.State.PENDING:
+                            # Someone else failed it (or otherwise)
+                            upload.releaseLock(ctx)
+                        else:
+                            uploads.append(upload)
+                            self.log.debug(
+                                "Acquired upload lock for %s",
+                                upload)
+                            with upload.activeContext(ctx):
+                                upload.state = upload.State.UPLOADING
+        except LockException:
+            # We may have raced another launcher; set the
+            # event to try again.
+            self.launcher.image_updated_event.set()
+
+    def _getUploadArguments(self, uploads, upload_args):
+        for upload in uploads:
+            # The upload has a list of providers with identical
+            # configurations.  Pick one of them as a representative.
+            provider_cname = upload.providers[0]
+            provider = self.launcher._getProviderByCanonicalName(
+                provider_cname)
+            provider_image = None
+            for image in provider.images.values():
+                if image.canonical_name == upload.canonical_name:
+                    provider_image = image
+            if provider_image is None:
+                raise Exception(
+                    f"Unable to find image {upload.canonical_name}")
+            metadata = {
+                'zuul_system_id': self.launcher.system.system_id,
+                'zuul_upload_uuid': upload.uuid,
+            }
+            artifact = self.image_build_artifact
+            image_name = f'{provider_image.name}-{upload.uuid}'
+
+            upload_args[upload.uuid] = dict(
+                provider=provider,
+                provider_image=provider_image,
+                image_name=image_name,
+                url=artifact.url,
+                image_format=artifact.format,
+                metadata=metadata,
+                md5=artifact.md5sum,
+                sha256=artifact.sha256,
+            )
+
+    def _handleImports(self, uploads, upload_args, futures):
+        for upload in uploads[:]:
+            args = upload_args[upload.uuid]
+            job = args['provider'].getImageImportJob(
+                args['provider_image'],
+                args['image_name'],
+                args['url'],
+                args['image_format'],
+                args['metadata'],
+                args['md5'],
+                args['sha256'],
+            )
+            if job:
+                uploads.remove(upload)
+                self.log.debug("Scheduling import for %s", upload)
+                future = self.launcher.endpoint_upload_executor.submit(
+                    EndpointUploadJob(self.launcher, upload, job).run
+                )
+                futures.append((upload, future))
+
+    def _handleUploads(self, uploads, upload_args, futures, path):
+        for upload in uploads[:]:
+            args = upload_args[upload.uuid]
+            job = args['provider'].getImageUploadJob(
+                args['provider_image'],
+                args['image_name'],
+                path,
+                args['image_format'],
+                args['metadata'],
+                args['md5'],
+                args['sha256'],
+            )
+            if job:
+                uploads.remove(upload)
+                self.log.debug("Scheduling upload for %s", upload)
+                future = self.launcher.endpoint_upload_executor.submit(
+                    EndpointUploadJob(self.launcher, upload, job).run
+                )
+                futures.append((upload, future))
+
+    def _handleDownload(self):
+        url = self.image_build_artifact.url
+        url_components = urlparse(url)
+        ext = url_components.path.split('.')[-1]
+        path = os.path.join(self.launcher.temp_dir,
+                            self.image_build_artifact.uuid)
+        path = f'{path}.{ext}'
+        self.log.info("Downloading artifact %s from %s into %s",
+                      self.image_build_artifact, url, path)
+        try:
+            if ret := self.launcher.downloadArtifact(url, path):
+                return ret
+        except Exception as e:
+            self.log.info("Unable to download %s: %s", url, e)
+
+        # We can't download the file using requests, see if any of the
+        # tenant's connections can download it using internal methods.
+        providers = self.launcher.tenant_providers[
+            self.image_build_artifact.build_tenant_name]
+        for provider in providers:
+            try:
+                if ret := provider.downloadUrl(url, path):
+                    return ret
+            except Exception as e:
+                self.log.info("Unable to download %s via %s: %s",
+                              url, provider, e)
+
+    def _handleCompression(self, path):
+        if path.endswith('.zst'):
+            orig_path = path
+            try:
+                subprocess.run(["zstd", "-dq", path],
+                               cwd=self.launcher.temp_dir, check=True,
+                               capture_output=True)
+                path = path[:-len('.zst')]
+                self.log.debug("Decompressed image to %s", path)
+            finally:
+                # Regardless of whether the decompression succeeded,
+                # delete the original.  If it did succeed, the
+                # original may already be gone.
+                if os.path.exists(orig_path):
+                    os.unlink(orig_path)
+                    self.log.info("Deleted %s", orig_path)
+        return path
+
+    def _validateChecksum(self, path):
+        artifact = self.image_build_artifact
+        if not artifact.sha256:
+            self.log.debug("Image build artifact %s has no sha256 checksum, "
+                           "skipping validation", artifact)
+            return
+        h = hashlib.sha256()
+        with open(path, 'rb') as f:
+            while data := f.read(4096):
+                h.update(data)
+        digest = h.hexdigest()
+        if digest != artifact.sha256:
+            raise Exception(
+                f"Downloaded file {path} sha256 "
+                f"digest {digest} does not match "
+                f"artifact {artifact} digest {artifact.sha256}")
 
     def _run(self):
-        # TODO: check if endpoint can handle direct import from URL,
-        # and skip download
-        acquired = []
         path = None
+        uploads = []
         with self.launcher.createZKContext(None, self.log) as ctx:
             try:
-                try:
-                    with self.image_build_artifact.locked(ctx, blocking=False):
-                        for upload in self.uploads:
-                            if upload.acquireLock(ctx, blocking=False):
-                                if upload.external_id:
-                                    upload.releaseLock(ctx)
-                                else:
-                                    acquired.append(upload)
-                                    self.log.debug(
-                                        "Acquired upload lock for %s",
-                                        upload)
-                                    with upload.activeContext(ctx):
-                                        upload.state = upload.State.UPLOADING
-                except LockException:
-                    # We may have raced another launcher; set the
-                    # event to try again.
-                    self.launcher.image_updated_event.set()
+                self.log.debug("Starting upload job for %s",
+                               self.image_build_artifact)
+                # Get a list of uploads we hold locks for
+                self._acquireUploadLocks(ctx, uploads)
+                if not uploads:
                     return
 
-                if not acquired:
-                    return
+                # Prepare the arguments for all the import/upload jobs
+                upload_args = {}
+                self._getUploadArguments(uploads, upload_args)
 
-                path = self.launcher.downloadArtifact(
-                    self.image_build_artifact)
                 futures = []
-                for upload in acquired:
-                    future = self.launcher.endpoint_upload_executor.submit(
-                        EndpointUploadJob(
-                            self.launcher, self.image_build_artifact,
-                            upload, path).run)
-                    futures.append((upload, future))
+                remaining_uploads = uploads[:]
+
+                # Try a direct import if the provider supports it for
+                # this url.
+                self._handleImports(remaining_uploads, upload_args, futures)
+
+                # Any uploads remaining need to be handled by
+                # downloading the artifact and uploading.
+                if remaining_uploads:
+                    path = self._handleDownload()
+                    if not path:
+                        raise Exception("Unable to download artifact %s" % (
+                            self.image_build_artifact,))
+                    path = self._handleCompression(path)
+                    self._validateChecksum(path)
+                    self._handleUploads(
+                        remaining_uploads, upload_args, futures, path)
+
                 for upload, future in futures:
                     try:
+                        self.log.debug("Waiting for upload %s", upload)
                         future.result()
-                        self.log.info("Finished upload %s", upload)
                     except Exception:
                         self.log.exception("Unable to upload image %s", upload)
             finally:
-                for upload in acquired:
+                self.log.debug("Finalizing upload job for %s",
+                               self.image_build_artifact)
+                for upload in uploads:
+                    try:
+                        with upload.activeContext(ctx):
+                            if upload.external_id:
+                                self.log.debug(
+                                    "Marking upload %s ready", upload)
+                                upload.state = upload.State.READY
+                            else:
+                                new_upload = upload.copy(ctx)
+                                self.log.debug(
+                                    "Replacing upload %s with %s",
+                                    upload, new_upload)
+                                self.log.debug(
+                                    "Marking upload %s deleting", upload)
+                                upload.state = upload.State.DELETING
+                                self.launcher.upload_deleted_event.set()
+                    except Exception:
+                        self.log.exception("Unable to update state for %s",
+                                           upload)
                     try:
                         upload.releaseLock(ctx)
                         self.log.debug("Released upload lock for %s", upload)
                     except Exception:
                         self.log.exception("Unable to release lock for %s",
-                                           upload)
-                    try:
-                        with upload.activeContext(ctx):
-                            if upload.external_id:
-                                upload.state = upload.State.READY
-                            else:
-                                upload.state = upload.State.PENDING
-                    except Exception:
-                        self.log.exception("Unable to update state for %s",
                                            upload)
                 if path:
                     try:
@@ -223,16 +404,17 @@ class UploadJob:
                         self.log.info("Deleted %s", path)
                     except Exception:
                         self.log.exception("Unable to delete %s", path)
+                self.log.debug("Finished upload job for %s",
+                               self.image_build_artifact)
 
 
 class EndpointUploadJob:
     log = logging.getLogger("zuul.Launcher")
 
-    def __init__(self, launcher, artifact, upload, path):
+    def __init__(self, launcher, upload, job):
         self.launcher = launcher
-        self.artifact = artifact
         self.upload = upload
-        self.path = path
+        self.job = job
 
     def run(self):
         try:
@@ -244,29 +426,12 @@ class EndpointUploadJob:
         # The upload has a list of providers with identical
         # configurations.  Pick one of them as a representative.
         self.log.info("Starting upload %s", self.upload)
-        provider_cname = self.upload.providers[0]
-        provider = self.launcher._getProviderByCanonicalName(provider_cname)
-        provider_image = None
-        for image in provider.images.values():
-            if image.canonical_name == self.upload.canonical_name:
-                provider_image = image
-        if provider_image is None:
-            raise Exception(
-                f"Unable to find image {self.upload.canonical_name}")
-
-        metadata = {
-            'zuul_system_id': self.launcher.system.system_id,
-            'zuul_upload_uuid': self.upload.uuid,
-        }
-        image_name = f'{provider_image.name}-{self.artifact.uuid}'
-        external_id = provider.uploadImage(
-            provider_image, image_name, self.path, self.artifact.format,
-            metadata, self.artifact.md5sum, self.artifact.sha256)
+        external_id = self.job.run()
+        self.log.info("Finished upload %s", self.upload)
         with self.launcher.createZKContext(self.upload._lock, self.log) as ctx:
             self.upload.updateAttributes(
                 ctx,
-                external_id=external_id,
-                timestamp=time.time())
+                external_id=external_id)
         if not self.upload.validated:
             self.launcher.addImageValidateEvent(self.upload)
 
@@ -571,6 +736,7 @@ class NodescanWorker:
     # overload, we set a max value for concurrent requests.
     # Simultaneous requests higher than this value will be queued.
     MAX_REQUESTS = 100
+    TIMEOUT = 1
 
     def __init__(self):
         # Remember to close all pipes to prevent leaks in tests.
@@ -593,8 +759,15 @@ class NodescanWorker:
 
     def join(self):
         self.thread.join()
-        os.close(self.wake_read)
-        os.close(self.wake_write)
+
+        for fd in (self.wake_read, self.wake_write):
+            try:
+                os.close(fd)
+            except OSError as e:
+                # If the nodescan worker is joined multiple times the
+                # file descriptors have already been closed.
+                if e.errno != errno.EBADF:
+                    raise
 
     def addRequest(self, request):
         """Submit a nodescan request"""
@@ -650,7 +823,7 @@ class NodescanWorker:
             # Set the poll timeout to 1 second so that we check all
             # requests for timeouts every second.  This could be
             # increased to a few seconds without significant impact.
-            timeout = 1
+            timeout = self.TIMEOUT
             while (self._pending_requests and
                    len(self._active_requests) < self.MAX_REQUESTS):
                 # If we have room for more requests, add them and set
@@ -669,7 +842,8 @@ class NodescanWorker:
                         os.read(self.wake_read, 1024)
                     except BlockingIOError:
                         break
-            process_unready = time.monotonic() - last_unready_check > 1.0
+            process_unready = (time.monotonic() - last_unready_check >
+                               self.TIMEOUT)
             for request in self._active_requests:
                 try:
                     socket_ready = (request.sock and
@@ -821,6 +995,7 @@ class CleanupWorker:
 
 class Launcher:
     log = logging.getLogger("zuul.Launcher")
+    tracer = trace.get_tracer("zuul")
     # Max. time to wait for a cache to sync
     CACHE_SYNC_TIMEOUT = 10
     # Max. time the main event loop is allowed to sleep
@@ -851,7 +1026,11 @@ class Launcher:
         else:
             self.statsd_timer = nullcontext
 
+        # Raw provider quota
         self._provider_quota_cache = cachetools.TTLCache(
+            maxsize=8192, ttl=self.MAX_QUOTA_AGE)
+        # Provider quota - unmanaged usage
+        self._provider_available_cache = cachetools.TTLCache(
             maxsize=8192, ttl=self.MAX_QUOTA_AGE)
 
         self.tracing = tracing.Tracing(self.config)
@@ -875,6 +1054,12 @@ class Launcher:
         self.wake_event = threading.Event()
         self.stop_event = threading.Event()
         self.join_event = threading.Event()
+
+        COMPONENT_REGISTRY.registry.registerCallback(self.wake_event.set)
+
+        self.monitoring_server = MonitoringServer(config, 'launcher',
+                                                  self.component_info)
+        self.monitoring_server.start()
 
         self.connection_filter = get_default(
             self.config, "launcher", "connection_filter")
@@ -918,10 +1103,13 @@ class Launcher:
         )
 
         self.nodescan_worker = NodescanWorker()
+        self._run_lock = threading.Lock()
         self.launcher_thread = threading.Thread(
             target=self.run,
             name="Launcher",
         )
+        # Avoid submitting duplicate upload jobs
+        self.upload_uuids_in_queue = set()
         # Simultaneous image artifact processes (download+upload)
         self.upload_executor = ThreadPoolExecutor(
             max_workers=1,
@@ -952,7 +1140,8 @@ class Launcher:
         while self._running:
             loop_start = time.monotonic()
             try:
-                self._run()
+                with self._run_lock:
+                    self._run()
             except Exception:
                 self.log.exception("Error in main thread:")
             loop_duration = time.monotonic() - loop_start
@@ -990,6 +1179,12 @@ class Launcher:
                         log.debug("Failed to lock matching request %s",
                                   request)
                         continue
+                    request.refresh(ctx)
+
+                request_span = tracing.restoreSpan(request.span_info)
+                with trace.use_span(request_span):
+                    request._set(_span=self.tracer.start_span(
+                        "NodesetRequestProcessing"))
 
             if not self._cachesReadyForRequest(request):
                 self.log.debug("Caches are not up-to-date for %s", request)
@@ -1013,6 +1208,8 @@ class Launcher:
             except Exception:
                 log.exception("Error processing request %s", request)
             if request.state in request.FINAL_STATES:
+                request._span.set_attributes(request.getSpanAttributes())
+                request._span.end()
                 with self.createZKContext(None, log) as ctx:
                     request.releaseLock(ctx)
 
@@ -1023,46 +1220,74 @@ class Launcher:
             for n in request.nodes
         )
 
+    def _filterReadyNodes(self, ready_nodes, request):
+        # This returns a nested defaultdict like:
+        # {label_name: {node: [node_providers]}}
+        request_ready_nodes = collections.defaultdict(
+            lambda: collections.defaultdict(list))
+        if request.image_upload_uuid:
+            # This is a request for an image validation job.
+            # Don't use any ready nodes for that.
+            return request_ready_nodes
+        providers = self.tenant_providers.get(request.tenant_name)
+        if not providers:
+            return request_ready_nodes
+        label_names = set(request.labels)
+        for label_name in label_names:
+            ready_for_label = list(ready_nodes.get(label_name, []))
+            if not ready_for_label:
+                continue
+            # TODO: sort by age? use old nodes first? random to reduce
+            # chance of thundering herd?
+            for node in ready_for_label:
+                if node.is_locked:
+                    continue
+                if node.hasExpired():
+                    continue
+                # Check to see if this node is valid in this tenant
+                for provider in providers:
+                    if node.isPermittedForProvider(provider):
+                        # This node is usable with this provider
+                        request_ready_nodes[label_name][node].append(provider)
+        return request_ready_nodes
+
     def _acceptRequest(self, request, log, ready_nodes):
-        log.debug("Accepting request %s", request)
+        log.debug("Considering request %s", request)
+        request_ready_nodes = self._filterReadyNodes(ready_nodes, request)
         # Create provider nodes for the requested labels
-        label_providers = self._selectProviders(request, log)
+        label_providers = self._selectProviders(
+            request, request_ready_nodes, log)
         with (self.createZKContext(request._lock, log) as ctx,
               request.activeContext(ctx)):
             for i, (label, provider) in enumerate(label_providers):
+                ready_for_label = request_ready_nodes[label.name]
                 # TODO: sort by age? use old nodes first? random to reduce
                 # chance of thundering herd?
-                for node in list(ready_nodes.get(label.name, [])):
-                    if node.is_locked:
-                        continue
-                    if node.hasExpired():
-                        continue
-                    for provider in self.tenant_providers[request.tenant_name]:
-                        if provider.connection_name != node.connection_name:
-                            continue
-                        if not (plabel := provider.labels.get(label.name)):
-                            continue
-                        if node.label_config_hash != plabel.config_hash:
-                            continue
-                        break
-                    else:
-                        continue
-
+                for node, providers in ready_for_label.items():
                     if not node.acquireLock(ctx, blocking=False):
                         log.debug("Failed to lock matching ready node %s",
                                   node)
                         continue
                     try:
+                        node.refresh(ctx)
+                        # Double check if it's still available
+                        if (node.request_id or
+                            node.state != node.State.READY):
+                            request_ready_nodes[label.name].pop(node)
+                            ready_nodes[label.name].remove(node)
+                            continue
                         tags = provider.getNodeTags(
                             self.system.system_id, label, node.uuid,
                             provider, request)
                         with self.createZKContext(node._lock, self.log) as ctx:
                             node.updateAttributes(
                                 ctx,
+                                provider=provider.canonical_name,
                                 request_id=request.uuid,
                                 tenant_name=request.tenant_name,
                                 tags=tags,
                             )
+                        request_ready_nodes[label.name].pop(node)
                         ready_nodes[label.name].remove(node)
                         log.debug("Assigned ready node %s", node.uuid)
                         break
@@ -1072,67 +1297,182 @@ class Launcher:
                     finally:
                         node.releaseLock(ctx)
                 else:
+                    # If we have not assigned any nodes to this
+                    # request we don't have to proceed if there is no
+                    # quota.
+                    if not bool(request.provider_node_data):
+                        try:
+                            has_quota = self.doesProviderHaveQuotaForLabel(
+                                provider, label, log)
+                        except Exception:
+                            self.log.exception(
+                                "Error checking quota for label %s "
+                                "in provider %s", label, provider)
+                            raise NodesetRequestError(
+                                "Unable to determine quota")
+                        if not has_quota:
+                            log.debug("Deferring request %s "
+                                      "due to insufficient quota", request)
+                            # TODO: We may want to consider all the
+                            # labels at once so that if we can
+                            # fulfilly any label immediately, we
+                            # accept the request; currently this will
+                            # happen only if we can fulfill the first
+                            # label immediately.
+                            return
                     node = self._requestNode(
                         label, request, provider, log, ctx)
                     log.debug("Requested node %s", node.uuid)
                 request.addProviderNode(node)
-            request.state = model.NodesetRequest.State.ACCEPTED
+            if request.provider_node_data:
+                log.debug("Accepting request %s", request)
+                request.state = model.NodesetRequest.State.ACCEPTED
 
-    def _selectProviders(self, request, log):
+    def _shuffleProviders(self, providers):
+        # This is to allow unit test control of this process.
+        providers = providers[:]
+        random.shuffle(providers)
+        return providers
+
+    def _selectProviders(self, request, request_ready_nodes, log):
         providers = self.tenant_providers.get(request.tenant_name)
         if not providers:
             raise NodesetRequestError(
                 f"No provider for tenant {request.tenant_name}")
 
         # Start with a randomized list of providers so that different
-        # requsets may have different behavior.
-        random.shuffle(providers)
+        # requests may have different behavior.
+        providers = self._shuffleProviders(providers)
 
         # Sort that list by quota
         providers.sort(key=lambda p: self.getQuotaPercentage(p))
 
+        # Then if there are ready nodes, sort so that we can use the
+        # most ready nodes.
+        if request_ready_nodes:
+            # provider -> total ready nodes
+            usable_provider_ready_nodes = collections.Counter()
+            for label_name in set(request.labels):
+                for node, node_providers in request_ready_nodes[
+                        label_name].items():
+                    for node_provider in node_providers:
+                        usable_provider_ready_nodes[
+                            node_provider.canonical_name] += 1
+            providers.sort(
+                key=lambda p: usable_provider_ready_nodes[p.canonical_name],
+                reverse=True
+            )
+
         # A list of providers that could work for all labels in the request
+        ideal_providers_for_all_labels = set(providers)
+        # The same, but omit providers with failures
         providers_for_all_labels = set(providers)
         # A list of providers for each label in the request, indexed
         # by label index number
+        ideal_providers_for_label = {}
+        # The same, but omit providers with failures
         providers_for_label = {}
         # Which providers are used by existing nodes in this request
-        existing_providers = collections.Counter()
+        existing_provider_names = collections.Counter()
 
         for i, label_name in enumerate(request.labels):
-            provider_failures = collections.Counter()
+            provider_failure_names = collections.Counter()
             pnd = request.getProviderNodeData(i)
             if pnd:
-                provider_failures.update(pnd['failed_providers'])
+                provider_failure_names.update(pnd['failed_providers'])
                 if pnd['uuid']:
                     existing_node = self.api.getProviderNode(pnd['uuid'])
                     # Special case for the current node just failed
                     if existing_node.state == existing_node.State.FAILED:
-                        provider_failures[existing_node.provider] += 1
-                    existing_providers[existing_node.provider] += 1
+                        provider_failure_names[existing_node.provider] += 1
+                    if existing_node.state not in existing_node.FAILED_STATES:
+                        existing_provider_names[existing_node.provider] += 1
             candidate_providers = [
                 p for p in providers
                 if p.hasLabel(label_name)
-                and provider_failures[p.canonical_name] < p.launch_attempts
+                and (provider_failure_names[p.canonical_name] <
+                     p.launch_attempts)
             ]
-            providers_for_label[i] = candidate_providers
-            providers_for_all_labels &= set(candidate_providers)
+            ideal_providers_for_label[i] = []
+            providers_for_label[i] = []
+            for provider in providers:
+                if not (label := provider.labels.get(label_name)):
+                    continue
+                image = provider.images[label.image]
+                if (request.image_upload_uuid
+                        and image.name in request.image_names):
+                    image_cname = image.canonical_name
+                    uploads = self.image_upload_registry.getUploadsForImage(
+                        image_cname)
+                    # Check that the given provider can actually supply
+                    # the requested image.
+                    valid_uploads = (
+                        u for u in uploads
+                        if u.uuid == request.image_upload_uuid
+                    )
+                    if not any(valid_uploads):
+                        continue
+                # Check if the provider could possibly handle the
+                # request based on quota but not current zuul usage.
+                # TODO: consider the impact of a multi-node request
+                # for the same label where that single request is
+                # larger than the capacity.
+                try:
+                    if not self.doesProviderHaveQuotaForLabel(
+                            provider, label, log, include_usage=False):
+                        continue
+                except Exception:
+                    self.log.exception(
+                        "Error checking quota for label %s "
+                        "in provider %s", label, provider)
+                    continue
+                ideal_providers_for_label[i].append(provider)
+                if (provider_failure_names[provider.canonical_name]
+                        >= provider.launch_attempts):
+                    continue
+                providers_for_label[i].append(provider)
+            ideal_providers_for_all_labels &= set(ideal_providers_for_label[i])
+            providers_for_all_labels &= set(providers_for_label[i])
+
+        # If there is at least one provider that can provide all the
+        # labels for this request, then we will ensure that we use the
+        # same provider for all.
+        if require_same_provider := bool(ideal_providers_for_all_labels):
+            log.debug("Requiring same provider for all labels")
 
         # Turn the reduced set union of providers that work for all
         # labels back into an ordered list.
         providers_for_all_labels = [
             p for p in providers if p in providers_for_all_labels]
 
+        main_provider_name = None
         main_provider = None
-        most_common = existing_providers.most_common(1)
+        most_common = existing_provider_names.most_common()
         if most_common:
-            main_provider = most_common[0][0]
+            main_provider_name = most_common[0][0]
+            log.debug("Using most common provider %s from %s",
+                      main_provider_name, most_common)
+        elif request.preferred_provider:
+            main_provider_name = request.preferred_provider
+            log.debug("Using requested provider %s", main_provider_name)
+        if main_provider_name:
+            for main_provider in providers:
+                if main_provider.canonical_name == main_provider_name:
+                    break
+            else:
+                raise Exception(
+                    f"Unable to find provider {main_provider_name}")
         elif providers_for_all_labels:
             main_provider = providers_for_all_labels[0]
+            log.debug("Using first provider for all labels %s from %s",
+                      main_provider.canonical_name, providers_for_all_labels)
 
         label_providers = []
         for i, label_name in enumerate(request.labels):
-            candidate_providers = providers_for_label[i]
+            if require_same_provider:
+                candidate_providers = providers_for_all_labels
+            else:
+                candidate_providers = providers_for_label[i]
             if not candidate_providers:
                 raise NodesetRequestError(
                     f"No provider found for label {label_name}")
@@ -1140,14 +1480,14 @@ class Launcher:
                 provider = main_provider
                 log.debug(
                     "Selected request main provider %s "
-                    "from candidate providers: %s",
-                    provider, candidate_providers)
+                    "for label %s index %s from candidate providers: %s",
+                    provider, label_name, i, candidate_providers)
             else:
                 provider = candidate_providers[0]
                 log.debug(
                     "Selected provider %s "
-                    "from candidate providers: %s",
-                    provider, candidate_providers)
+                    "for label %s index %s from candidate providers: %s",
+                    provider, label_name, i, candidate_providers)
             label = provider.labels[label_name]
             label_providers.append((label, provider))
 
@@ -1161,6 +1501,10 @@ class Launcher:
         tags = provider.getNodeTags(
             self.system.system_id, label, node_uuid, provider, request)
         node_class = provider.driver.getProviderNodeClass()
+        label_quota = provider.getQuotaForLabel(label)
+        with trace.use_span(request._span):
+            node_span = self.tracer.start_span("ProviderNode")
+        span_info = tracing.getSpanInfo(node_span)
         node = node_class.new(
             ctx,
             uuid=node_uuid,
@@ -1173,45 +1517,52 @@ class Launcher:
             executor_zone=label.executor_zone,
             request_id=request.uuid,
             zuul_event_id=request.zuul_event_id,
+            span_info=span_info,
             connection_name=provider.connection_name,
             tenant_name=request.tenant_name,
             provider=provider.canonical_name,
             tags=tags,
+            image_upload_uuid=request.image_upload_uuid,
             # Set any node attributes we already know here
             connection_port=image.connection_port,
             connection_type=image.connection_type,
+            quota=label_quota,
         )
         log.debug("Requested node %s", node)
         return node
 
     def _checkRequest(self, request, log):
-        requested_nodes = [self.api.getProviderNode(p)
-                           for p in request.nodes]
-
-        requested_nodes = []
-        for i, node_id in enumerate(request.nodes):
-            node = self.api.getProviderNode(node_id)
-            if node.state in (node.State.FAILED, node.State.TEMPFAILED):
-                # In all cases, delete the old node
-                # if this was a tempfail, retry again as normal
-                # otherwise, add to the failed providers list in the request
-                label_providers = self._selectProviders(request, log)
+        requested_nodes = [self.api.getProviderNode(node_id) for
+                           node_id in request.nodes]
+        if any(n.state in n.FAILED_STATES for n in requested_nodes):
+            # If any nodes failed, see if we need to change providers
+            # for any or all of them.
+            label_providers = self._selectProviders(request, None, log)
+            for i, node in enumerate(requested_nodes):
                 label, provider = label_providers[i]
-                if node.state == node.State.FAILED:
-                    add_failed_provider = node.provider
-                else:
-                    add_failed_provider = None
-                log.info("Retrying request with provider %s", provider)
-                with self.createZKContext(request._lock, log) as ctx:
-                    node = self._requestNode(
-                        label, request, provider, log, ctx)
-                    with request.activeContext(ctx):
-                        request.updateProviderNode(
-                            i, node,
-                            add_failed_provider=add_failed_provider,
-                        )
-
-            requested_nodes.append(node)
+                if (node.state in node.FAILED_STATES or
+                    provider.canonical_name != node.provider):
+                    # We're either retrying this node or we're
+                    # changing providers.
+                    log.info(
+                        "Retrying node for label %s index %s with provider %s",
+                        label, i, provider)
+                    with self.createZKContext(request._lock, log) as ctx:
+                        if node.state == node.State.FAILED:
+                            add_failed_provider = node.provider
+                        else:
+                            add_failed_provider = None
+                        node = self._requestNode(
+                            label, request, provider, log, ctx)
+                        requested_nodes[i] = node
+                        # if this was a tempfail, retry again as
+                        # normal; otherwise, add to the failed
+                        # providers list in the request
+                        with request.activeContext(ctx):
+                            request.updateProviderNode(
+                                i, node,
+                                add_failed_provider=add_failed_provider,
+                            )
 
         if not all(n.state in n.FINAL_STATES for n in requested_nodes):
             return
@@ -1245,6 +1596,7 @@ class Launcher:
                     if not node.acquireLock(ctx, blocking=False):
                         log.debug("Failed to lock matching node %s", node)
                         continue
+                    node.refresh(ctx)
 
             request = self.api.getNodesetRequest(node.request_id)
             if ((request or node.request_id is None)
@@ -1258,13 +1610,31 @@ class Launcher:
                         with node.activeContext(ctx):
                             node.setState(state)
                         self.wake_event.set()
-                except Exception:
+                except Exception as e:
                     state = node.State.FAILED
-                    log.exception("Marking node %s as %s", node, state)
+                    if isinstance(e, LaunchTimeoutError):
+                        log.error("Marking node %s as %s", node, state)
+                    else:
+                        log.exception("Marking node %s as %s", node, state)
                     with self.createZKContext(node._lock, self.log) as ctx:
                         with node.activeContext(ctx):
                             node.setState(state)
                         self.wake_event.set()
+
+                # Export span for node creation phase
+                if (node.state in node.FINAL_STATES and
+                        node.create_state_machine):
+                    with trace.use_span(tracing.restoreSpan(node.span_info)):
+                        with self.tracer.start_as_current_span(
+                            "ProviderNodeCreate",
+                            start_time=node.create_state_machine.start_time,
+                            attributes=node.getSpanAttributes()
+                        ):
+                            # Nothing to do here; ctx manager is just
+                            # a shorthand for span start/end. The
+                            # start time is dated back to the start
+                            # of the create state machine.
+                            pass
             # Deallocate ready node w/o a request for re-use
             if (node.request_id and not request
                     and node.state == node.State.READY):
@@ -1318,6 +1688,11 @@ class Launcher:
         if node.state in node.LAUNCHER_STATES:
             return True
 
+        if node.state == node.State.HOLD:
+            if node.hasHoldExpired():
+                return True
+            return False
+
         if node.request_id:
             request_exists = bool(self.api.getNodesetRequest(node.request_id))
             return not request_exists
@@ -1334,13 +1709,11 @@ class Launcher:
         return False
 
     def _checkNode(self, node, log):
-        # TODO: check timeout
         with self.createZKContext(node._lock, self.log) as ctx:
             with node.activeContext(ctx):
-                provider = None
+                provider = self._getProviderForNode(node)
                 if not node.create_state_machine:
                     log.debug("Building node %s", node)
-                    provider = self._getProviderForNode(node)
                     image_external_id = self.getImageExternalId(node, provider)
                     log.debug("Node %s external id %s",
                               node, image_external_id)
@@ -1349,7 +1722,6 @@ class Launcher:
 
                 old_state = node.create_state_machine.state
                 if old_state == node.create_state_machine.START:
-                    provider = provider or self._getProviderForNode(node)
                     if not self.doesProviderHaveQuotaForNode(
                             provider, node, log):
                         # Consider this provider paused, don't attempt
@@ -1357,6 +1729,8 @@ class Launcher:
                         # quota.
                         self.wake_event.set()
                         return
+                    # Start the clock for launch-timeout from this point.
+                    node.create_state_machine.start_time = time.time()
                 instance = node.create_state_machine.advance()
                 new_state = node.create_state_machine.state
                 if old_state != new_state:
@@ -1369,12 +1743,19 @@ class Launcher:
                     node.setState(node.State.BUILDING)
 
                 if not node.create_state_machine.complete:
+                    if provider.launch_timeout:
+                        now = time.time()
+                        if (now - node.create_state_machine.start_time >
+                            provider.launch_timeout):
+                            log.error("Timeout creating node %s", node)
+                            raise LaunchTimeoutError("Timeout creating node")
                     self.wake_event.set()
                     return
                 # Note this method has the side effect of updating
                 # node info from the instance.
                 if self._checkNodescanRequest(node, instance, log):
                     node.setState(node.State.READY)
+                    node.nodescan_request = None
                     self.wake_event.set()
                     log.debug("Marking node %s as %s", node, node.state)
                 else:
@@ -1432,11 +1813,17 @@ class Launcher:
                     node.delete_state_machine.complete = True
 
                 if not node.delete_state_machine.complete:
-                    node.delete_state_machine.advance()
-                    new_state = node.delete_state_machine.state
-                    if old_state != new_state:
-                        log.debug("Node %s advanced from %s to %s",
-                                  node, old_state, new_state)
+                    try:
+                        node.delete_state_machine.advance()
+                        new_state = node.delete_state_machine.state
+                        if old_state != new_state:
+                            log.debug("Node %s advanced from %s to %s",
+                                      node, old_state, new_state)
+                    except Exception:
+                        log.exception("Error in delete state machine:")
+                        node.delete_state_machine.state =\
+                            node.delete_state_machine.COMPLETE
+                        node.delete_state_machine.complete = True
 
             if not node.delete_state_machine.complete:
                 self.wake_event.set()
@@ -1459,6 +1846,21 @@ class Launcher:
                 log.debug("Removing provider node %s", node)
                 node.delete(ctx)
                 node.releaseLock(ctx)
+                # Export provider node spans
+                node_span = tracing.restoreSpan(node.span_info)
+                with trace.use_span(node_span, end_on_exit=True):
+                    node_span.set_attributes(node.getSpanAttributes())
+                    if node.delete_state_machine:
+                        with self.tracer.start_as_current_span(
+                            "ProviderNodeDelete",
+                            start_time=node.delete_state_machine.start_time,
+                            attributes=node.getSpanAttributes()
+                        ):
+                            # Nothing to do here; ctx manager is just
+                            # a shorthand for span start/end. The
+                            # start time is dated back to the start
+                            # of the create state machine.
+                            pass
 
     def _processMinReady(self):
         if not self.api.nodes_cache.waitForSync(
@@ -1576,23 +1978,20 @@ class Launcher:
         return ready_nodes
 
     def _getProviderForNode(self, node, ignore_label=False):
-        for tenant_name, tenant_providers in self.tenant_providers.items():
-            # Min-ready nodes don't have an assigned tenant
-            if node.tenant_name and tenant_name != node.tenant_name:
+        # Common case when a node is assigned to a provider
+        if node.provider:
+            return self._getProviderByCanonicalName(node.provider)
+
+        # Fallback for min-ready nodes w/o a assigned provider
+        for provider in self._getProviders():
+            if provider.connection_name != node.connection_name:
                 continue
-            for provider in tenant_providers:
-                # Common case when a node is assigned to a provider
-                if provider.canonical_name == node.provider:
-                    return provider
-                # Fallback for min-ready nodes w/o a assigned provider
-                if provider.connection_name != node.connection_name:
-                    continue
-                if ignore_label:
-                    return provider
-                if not (label := provider.labels.get(node.label)):
-                    continue
-                if label.config_hash == node.label_config_hash:
-                    return provider
+            if ignore_label:
+                return provider
+            if not (label := provider.labels.get(node.label)):
+                continue
+            if label.config_hash == node.label_config_hash:
+                return provider
         raise ProviderNodeError(f"Unable to find provider for node {node}")
 
     def _updateNodeFromInstance(self, node, instance):
@@ -1648,9 +2047,24 @@ class Launcher:
             f"Unable to find {provider_name} in tenant {tenant_name}")
 
     def _getProviders(self):
+        # The same provider can behave differently in different
+        # tenants because, for example, different image definitions
+        # may appear in the different tenants.  This method will
+        # return all of the providers.
         for providers in self.tenant_providers.values():
             for provider in providers:
                 yield provider
+
+    def _getUniqueProviders(self):
+        # Sometimes (eg, when generating stats) we may not care about
+        # the differences between the same provider in different
+        # tenants.  This returns unique providers.
+        seen = set()
+        for providers in self.tenant_providers.values():
+            for provider in providers:
+                if provider.canonical_name not in seen:
+                    yield provider
+                    seen.add(provider.canonical_name)
 
     def _hasProvider(self, node):
         try:
@@ -1660,6 +2074,10 @@ class Launcher:
         return True
 
     def _getProviderByCanonicalName(self, provider_cname):
+        # Note this scans all tenants, and identical providers in
+        # different tenants may have different python objects, so only
+        # use this method if the call site doesn't care which
+        # tenant-provider object is returned.
         for tenant_providers in self.tenant_providers.values():
             for provider in tenant_providers:
                 if provider.canonical_name == provider_cname:
@@ -1705,6 +2123,7 @@ class Launcher:
         self.endpoint_upload_executor.shutdown()
         self.nodescan_worker.stop()
         self.connections.stop()
+        self.monitoring_server.stop()
         # Endpoints are stopped by drivers
         self.log.debug("Stopped launcher")
 
@@ -1718,6 +2137,7 @@ class Launcher:
         self.zk_client.disconnect()
         self.tracing.stop()
         self.nodescan_worker.join()
+        self.monitoring_server.join()
         self.log.debug("Joined launcher")
 
     def runCommand(self):
@@ -1742,7 +2162,8 @@ class Launcher:
         self.repl = None
 
     def createZKContext(self, lock, log):
-        return ZKContext(self.zk_client, lock, self.join_event, log)
+        return ZKContext(self.zk_client, lock, self.join_event, log,
+                         default_lock_identifier=self.component_info.hostname)
 
     def updateTenantProviders(self):
         # We need to handle new and deleted tenants, so we need to
@@ -1831,8 +2252,32 @@ class Launcher:
                       tenant_name, iba.name)
         self.trigger_events[tenant_name].put(event.trigger_name, event)
 
+    def _waitForStableImageRegistry(self):
+        # Wait for any non-ready IBAs to become ready.  This resolves
+        # a race condition where the scheduler might have created the
+        # first of more than one IBA in a buildset, and we were
+        # immediately triggered.  Wait until the scheduler is finished
+        # so that if a buildset creates more than one IBA we have all
+        # the info.
+        now = time.time()
+        while True:
+            done = True
+            for iba in self.image_build_registry.getAllArtifacts():
+                if iba.state is not None:
+                    continue
+                if now - iba.timestamp > 30:
+                    # We'll only wait 30 seconds for this so we don't
+                    # get stuck.
+                    continue
+                done = False
+                break
+            if done:
+                return
+            time.sleep(1)
+
     def checkMissingImages(self):
         self.log.debug("Checking for missing images")
+        self._waitForStableImageRegistry()
         for tenant_name, providers in self.tenant_providers.items():
             images_by_project_branch = {}
             for provider in providers:
@@ -1871,8 +2316,11 @@ class Launcher:
         self.log.debug("Checking for old images")
         self.upload_deleted_event.clear()
         keep_uploads = set()
+        known_uploads = set(self.image_upload_registry.getItems())
+        known_providers = set()
         for tenant_name, providers in self.tenant_providers.items():
             for provider in providers:
+                known_providers.add(provider.canonical_name)
                 for image in provider.images.values():
                     if image.type == 'zuul':
                         self.checkOldImage(tenant_name, provider, image,
@@ -1887,7 +2335,7 @@ class Launcher:
 
         uploads_by_artifact = collections.defaultdict(list)
         latest_upload_timestamp = 0
-        for upload in self.image_upload_registry.getItems():
+        for upload in known_uploads:
             if upload.timestamp > latest_upload_timestamp:
                 latest_upload_timestamp = upload.timestamp
             uploads_by_artifact[upload.artifact_uuid].append(upload)
@@ -1896,10 +2344,23 @@ class Launcher:
                 self.log.warning("Unable to find artifact for upload %s",
                                  upload.artifact_uuid)
                 continue
+            if set(upload.providers).isdisjoint(known_providers):
+                # An orphaned upload means that either
+                # a) the provider was removed without following the
+                #    provider removal procedure (clear out images before
+                #    deleting the provider)
+                # or
+                # b) that we could not load the provider e.g. due to a
+                #    config error.
+                # In both cases we want to keep the uploads in case the
+                # provider shows up again.
+                self.log.warning(
+                    "Keeping orphaned upload %s with unknown providers %s",
+                    upload, upload.providers)
+                continue
             if (iba.state == iba.State.DELETING or
                 upload.state == upload.State.DELETING or
-                (upload.state == upload.State.READY and
-                 upload not in keep_uploads)):
+                upload not in keep_uploads):
                 self.upload_executor.submit(DeleteJob(self, iba, upload).run)
         for iba in active_ibas:
             if (iba.timestamp > latest_upload_timestamp or
@@ -1918,13 +2379,12 @@ class Launcher:
 
     def checkOldImage(self, tenant_name, provider, image,
                       keep_uploads):
-        self.log.debug("Checking for old artifacts for image %s",
-                       image.canonical_name)
         image_cname = image.canonical_name
         uploads = self.image_upload_registry.getUploadsForImage(image_cname)
         valid_uploads = [
             upload for upload in uploads
-            if (provider.canonical_name in upload.providers and
+            if (upload.isPermittedForProvider(image, provider) and
+                upload.state == upload.State.READY and
                 upload.validated and
                 upload.external_id)
         ]
@@ -1940,7 +2400,7 @@ class Launcher:
             oldest_good_timestamp = 0
         new_uploads = [
             upload for upload in uploads
-            if (provider.canonical_name in upload.providers and
+            if (upload.isPermittedForProvider(image, provider) and
                 upload.timestamp > oldest_good_timestamp)
         ]
         keep_uploads.update(set(new_uploads))
@@ -1950,6 +2410,8 @@ class Launcher:
         uploads_by_artifact_id = collections.defaultdict(list)
         self.image_updated_event.clear()
         for upload in self.image_upload_registry.getItems():
+            if upload.uuid in self.upload_uuids_in_queue:
+                continue
             if upload.endpoint_name not in self.endpoints:
                 continue
             iba = self.image_build_registry.getItem(upload.artifact_uuid)
@@ -1965,11 +2427,12 @@ class Launcher:
                 if not upload.is_locked:
                     with self.createZKContext(None, self.log) as ctx:
                         try:
-                            with (upload.locked(ctx, blocking=False),
-                                  upload.activeContext(ctx)):
+                            with upload.locked(ctx, blocking=False):
                                 # Double check the state after lock.
+                                upload.refresh(ctx)
                                 if upload.state == upload.State.UPLOADING:
-                                    upload.state = upload.State.PENDING
+                                    with upload.activeContext(ctx):
+                                        upload.state = upload.State.PENDING
                         except LockException:
                             # Upload locked again (lock / cache update race)
                             pass
@@ -1980,6 +2443,8 @@ class Launcher:
 
         for artifact_uuid, uploads in uploads_by_artifact_id.items():
             iba = self.image_build_registry.getItem(artifact_uuid)
+            for upload in uploads:
+                self.upload_uuids_in_queue.add(upload.uuid)
             self.upload_executor.submit(UploadJob(self, iba, uploads).run)
 
     def _downloadArtifactChunk(self, url, start, end, path):
@@ -1991,22 +2456,15 @@ class Launcher:
                 for chunk in resp.iter_content(chunk_size=DOWNLOAD_BLOCK_SIZE):
                     f.write(chunk)
 
-    def downloadArtifact(self, image_build_artifact):
-        url_components = urlparse(image_build_artifact.url)
-        ext = url_components.path.split('.')[-1]
-        path = os.path.join(self.temp_dir, image_build_artifact.uuid)
-        path = f'{path}.{ext}'
-        self.log.info("Downloading artifact %s from %s into %s",
-                      image_build_artifact, image_build_artifact.url, path)
+    def downloadArtifact(self, url, path):
         futures = []
-        with requests.head(image_build_artifact.url) as resp:
+        with requests.head(url) as resp:
             if resp.status_code == 403:
                 self.log.debug(
-                    "Received 403 for %s, retrying with range header",
-                    image_build_artifact.url)
+                    "Received 403 for %s, retrying with range header", url)
                 # This may be a pre-signed url that can't handle a
                 # HEAD request, retry with GET:
-                with requests.get(image_build_artifact.url,
+                with requests.get(url,
                                   headers={"Range": "bytes=0-0"}) as resp:
                     resp.raise_for_status()
                     size = int(resp.headers['content-range'].split('/')[-1])
@@ -2021,7 +2479,7 @@ class Launcher:
                 for start in range(0, size, DOWNLOAD_CHUNK_SIZE):
                     end = start + DOWNLOAD_CHUNK_SIZE - 1
                     futures.append(executor.submit(self._downloadArtifactChunk,
-                                                   image_build_artifact.url,
+                                                   url,
                                                    start, end, path))
                 for future in concurrent.futures.as_completed(futures):
                     future.result()
@@ -2033,21 +2491,6 @@ class Launcher:
                 self.log.info("Deleted %s", path)
             raise
         self.log.debug("Downloaded %s bytes to %s", size, path)
-        if path.endswith('.zst'):
-            orig_path = path
-            try:
-                subprocess.run(["zstd", "-dq", path],
-                               cwd=self.temp_dir, check=True,
-                               capture_output=True)
-                path = path[:-len('.zst')]
-                self.log.debug("Decompressed image to %s", path)
-            finally:
-                # Regardless of whether the decompression succeeded,
-                # delete the original.  If it did succeed, the
-                # original may already be gone.
-                if os.path.exists(orig_path):
-                    os.unlink(orig_path)
-                    self.log.info("Deleted %s", orig_path)
         return path
 
     def getImageExternalId(self, node, provider):
@@ -2057,32 +2500,38 @@ class Launcher:
             return None
         image_cname = image.canonical_name
         uploads = self.image_upload_registry.getUploadsForImage(image_cname)
-        # TODO: we could also check config hash here to start using an
-        # image that wasn't originally attached to this provider.
-        valid_uploads = [
-            upload for upload in uploads
-            if (provider.canonical_name in upload.providers and
-                upload.validated and
-                upload.external_id)
-        ]
+        if node.image_upload_uuid:
+            valid_uploads = [
+                u for u in uploads if u.uuid == node.image_upload_uuid
+            ]
+        else:
+            valid_uploads = [
+                upload for upload in uploads
+                if (upload.isPermittedForProvider(image, provider) and
+                    upload.validated and
+                    upload.external_id)
+            ]
         if not valid_uploads:
             raise Exception("No image found")
         # Uploads are already sorted by timestamp
         image_upload = valid_uploads[-1]
         return image_upload.external_id
 
-    def getQuotaUsed(self, provider):
+    def getQuotaUsed(self, provider, include_requested):
         used = model.QuotaInformation()
+        states = model.ProviderNode.ALLOCATED_STATES
+        if include_requested:
+            states = states + (model.ProviderNode.State.REQUESTED,)
         for node in self.api.getProviderNodes():
             if (provider.canonical_name == node.provider and
-                node.state in node.ALLOCATED_STATES):
+                node.state in states):
                 used.add(node.quota)
         return used
 
     def getUnmanagedQuotaUsed(self, provider):
         used = model.QuotaInformation()
 
-        node_ids = self.api.nodes_cache.getKeys()
+        node_ids = [n.uuid for n in self.api.nodes_cache.getItems()]
         endpoint = provider.getEndpoint()
         system_id = self.system.system_id
         for instance in endpoint.listInstances():
@@ -2104,6 +2553,17 @@ class Launcher:
         self.log.debug("Provider quota for %s: %s",
                        provider.name, quota)
 
+        self._provider_quota_cache[provider.canonical_name] = quota
+        return quota
+
+    def getProviderQuotaAvailable(self, provider):
+        val = self._provider_available_cache.get(provider.canonical_name)
+        if val:
+            return val
+
+        # This is initialized with the full tenant quota and later becomes
+        # the quota available for nodepool.
+        quota = self.getProviderQuota(provider).copy()
         unmanaged = self.getUnmanagedQuotaUsed(provider)
         self.log.debug("Provider unmanaged quota used for %s: %s",
                        provider.name, unmanaged)
@@ -2111,19 +2571,29 @@ class Launcher:
         # Subtract the unmanaged quota usage from nodepool_max
         # to get the quota available for us.
         quota.subtract(unmanaged)
-        self._provider_quota_cache[provider.canonical_name] = quota
+        self._provider_available_cache[provider.canonical_name] = quota
         return quota
 
     def getQuotaPercentage(self, provider):
         # This is cached and updated every 5 minutes
-        total = self.getProviderQuota(provider).copy()
+        try:
+            total = self.getProviderQuotaAvailable(provider).copy()
+        except Exception:
+            self.log.exception("Unable to get provider quota")
+            # If there is an error getting quota information, assume
+            # the provider is having problems and report it as full.
+            return 1.0
         # This is continuously updated in the background
         used = self.api.nodes_cache.getQuota(provider)
         pct = 0.0
         for resource in total.quota.keys():
             used_r = used.quota.get(resource, used.default)
             total_r = total.quota[resource]
-            pct = max(used_r / total_r, pct)
+            if not total_r:
+                pct = 1.0
+                break
+            else:
+                pct = max(used_r / total_r, pct)
         if pct < 1.0:
             # If we are below 100% usage, lose precision so that we only
             # consider 10% gradiations.  This may help us avoid
@@ -2135,13 +2605,39 @@ class Launcher:
             pct = round(pct, 1)
         return pct
 
+    def doesProviderHaveQuotaForLabel(self, provider, label, log,
+                                      include_usage=True):
+        if include_usage:
+            total = self.getProviderQuotaAvailable(provider).copy()
+            log.debug("Provider %s quota available before Zuul: %s",
+                      provider, total)
+            # We include requested nodes here because this is called
+            # to decide whether to add a new request to the provider,
+            # so we should include other nodes we've already allocated
+            # to this provider in the decision.
+            total.subtract(self.getQuotaUsed(provider, include_requested=True))
+            log.debug("Provider %s quota available including Zuul: %s",
+                      provider, total)
+        else:
+            total = self.getProviderQuota(provider).copy()
+            log.debug("Provider %s quota before Zuul: %s", provider, total)
+
+        label_quota = provider.getQuotaForLabel(label)
+        total.subtract(label_quota)
+        log.debug("Label %s required quota: %s", label, label_quota)
+        return total.nonNegative()
+
     def doesProviderHaveQuotaForNode(self, provider, node, log):
-        total = self.getProviderQuota(provider).copy()
-        log.debug("Provider quota before Zuul: %s", total)
-        total.subtract(self.getQuotaUsed(provider))
-        log.debug("Provider quota including Zuul: %s", total)
+        total = self.getProviderQuotaAvailable(provider).copy()
+        log.debug("Provider %s quota before Zuul: %s", provider, total)
+        # We do not include requested nodes here because this is
+        # called to decide whether to issue the create API call for a
+        # node already allocated to the provider.  We only want to
+        # "pause" the provider if it really is at quota.
+        total.subtract(self.getQuotaUsed(provider, include_requested=False))
+        log.debug("Provider %s quota including Zuul: %s", provider, total)
         total.subtract(node.quota)
-        log.debug("Node required quota: %s", node.quota)
+        log.debug("Node %s required quota: %s", node, node.quota)
         return total.nonNegative()
 
     def runStatsElection(self):
@@ -2181,8 +2677,25 @@ class Launcher:
 
         for node in self.api.nodes_cache.getItems():
             nodes[node.state] += 1
-            provider_nodes[node.provider][node.state] += 1
-            provider_label_nodes[node.provider][node.label][node.state] += 1
+            if node.provider:
+                provider_nodes[node.provider][node.state] += 1
+                provider_label_nodes[node.provider][node.label][
+                    node.state] += 1
+            else:
+                for provider in self._getUniqueProviders():
+                    if node.isPermittedForProvider(provider):
+                        provider_nodes[provider.canonical_name][
+                            node.state] += 1
+                        provider_label_nodes[
+                            provider.canonical_name][node.label][
+                                node.state] += 1
+
+        requests = {}
+        for state in model.NodesetRequest.State:
+            requests[state] = 0
+        for request in self.api.requests_cache.getItems():
+            if request.state != request.State.TEST_HOLD:
+                requests[request.state] += 1
 
         providers = {}
         for tenant_name, tenant_providers in self.tenant_providers.items():
@@ -2190,12 +2703,18 @@ class Launcher:
                 providers[tenant_provider.canonical_name] = tenant_provider
         for provider in providers.values():
             safe_pname = normalize_statsd_name(provider.canonical_name)
-            limits = provider.getQuotaLimits().getResources()
-            # zuul.provider.<provider>.limit.<limit> gauge
-            for limit, value in limits.items():
-                safe_limit = normalize_statsd_name(limit)
+            limits = self.getProviderQuota(provider).getResources()
+            # zuul.provider.<provider>.limit.<resource> gauge
+            for res, value in limits.items():
+                safe_res = normalize_statsd_name(res)
                 self.statsd.gauge(
-                    f'zuul.provider.{safe_pname}.limit.{safe_limit}',
+                    f'zuul.provider.{safe_pname}.limit.{safe_res}',
+                    value)
+            usage = self.api.nodes_cache.getQuota(provider).getResources()
+            for res, value in usage.items():
+                safe_res = normalize_statsd_name(res)
+                self.statsd.gauge(
+                    f'zuul.provider.{safe_pname}.usage.{safe_res}',
                     value)
             # zuul.provider.<provider>.nodes.state.<state> gauge
             for state, value in provider_nodes[
@@ -2216,4 +2735,9 @@ class Launcher:
         for state, value in nodes.items():
             self.statsd.gauge(
                 f'zuul.nodes.state.{state.value}',
+                value)
+        # zuul.nodeset_requests.state.<state> gauge
+        for state, value in requests.items():
+            self.statsd.gauge(
+                f'zuul.nodeset_requests.state.{state.value}',
                 value)

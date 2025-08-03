@@ -1,12 +1,27 @@
+- queue:
+    name: zuul
+    # We don't really want to use circular dependencies in the Zuul
+    # project (for our interactions with other projects, we prefer to
+    # be able to do stepwise upgrades to support continuous
+    # deployment).  However, this is enable to allow Zuul developers
+    # to observe circular dependencies in a live environment via test
+    # changes that are not intended to be merged (or otherwise have no
+    # impact on our upgrade and continuous deployment processes).
+    allow-circular-dependencies: true
+
 - nodeset:
     name: zuul-functional-temp-master
     nodes:
+      # python_path in playbooks/zuul-stream/functional.yaml and
+      # callback_plugins in playbooks/zuul-stream/templates/ansible.cfg.j2
+      # need their python versions updated when these labels change to
+      # a platform that uses a different python version.
       - name: controller
-        label: ubuntu-xenial
+        label: debian-bookworm
       - name: node1
-        label: ubuntu-xenial
+        label: debian-bookworm
       - name: node2
-        label: ubuntu-xenial
+        label: debian-bookworm
     groups:
       - name: node
         nodes:
@@ -21,126 +36,438 @@
     run: playbooks/zuul-stream/functional.yaml
     post-run:
       - playbooks/zuul-stream/post.yaml
-      - playbooks/zuul-stream/post-ara.yaml
-    required-projects:
-      - openstack/ara
     files:
       - zuul/ansible/.*
+      - zuul/lib/ansible*
       - playbooks/zuul-stream/.*
-      - requirements.txt
+      - setup.cfg
 
 - job:
-    name: zuul-tox-remote
-    parent: tox
+    name: zuul-stream-functional-9
+    parent: zuul-stream-functional
     vars:
-      tox_envlist: remote
-      tox_environment:
+      zuul_ansible_version: 9
+
+- job:
+    name: zuul-stream-functional-11
+    parent: zuul-stream-functional
+    vars:
+      zuul_ansible_version: 11
+
+- job:
+    name: zuul-nox
+    description: |
+      Zuul unit tests with ZooKeeper running
+    parent: nox
+    nodeset: ubuntu-jammy
+    pre-run: playbooks/zuul-nox/pre.yaml
+    post-run: playbooks/zuul-nox/post-system-logs.yaml
+    vars:
+      nox_environment:
+        ZUUL_ZK_CA: /opt/zookeeper/ca/certs/cacert.pem
+        ZUUL_ZK_CERT: /opt/zookeeper/ca/certs/client.pem
+        ZUUL_ZK_KEY: /opt/zookeeper/ca/keys/clientkey.pem
+        ZUUL_TEST_ROOT: /tmp/zuul-test
+        YARN_REGISTRY: "https://{{ zuul_site_mirror_fqdn }}:4443/registry.npmjs"
+        CI: "1"
+      test_setup_environment:
+        ZUUL_TEST_ROOT: /tmp/zuul-test
+        YARN_REGISTRY: "https://{{ zuul_site_mirror_fqdn }}:4443/registry.npmjs"
+      nox_force_python: "3.11"
+      python_version: "3.11"
+
+- job:
+    name: zuul-nox-remote
+    parent: nox
+    nodeset: ubuntu-jammy
+    timeout: 2700  # 45 minutes
+    pre-run: playbooks/zuul-nox/pre.yaml
+    post-run: playbooks/zuul-nox/post-system-logs.yaml
+    vars:
+      nox_session: remote
+      nox_environment:
+        ZUUL_ZK_CA: /opt/zookeeper/ca/certs/cacert.pem
+        ZUUL_ZK_CERT: /opt/zookeeper/ca/certs/client.pem
+        ZUUL_ZK_KEY: /opt/zookeeper/ca/keys/clientkey.pem
         ZUUL_SSH_KEY: /home/zuul/.ssh/id_rsa
-        ZUUL_REMOTE_IPV4: "{{ nodepool.interface_ip }}"
+        ZUUL_REMOTE_IPV4: "{{ nodepool.private_ipv4 or nodepool.public_ipv4 }}"
         ZUUL_REMOTE_KEEP: "true"
+        CI: "1"
+      nox_force_python: "3.11"
+      python_version: "3.11"
+
+- job:
+    name: zuul-nox-upgrade
+    parent: zuul-nox
+    run: playbooks/zuul-upgrade/run.yaml
+    failure-output:
+      # This matches stestr output when a test fails
+      # {1} tests.unit.test_blah [5.743446s] ... FAILED
+      - '\{\d+\} (.*?) \[[\d\.]+s\] \.\.\. FAILED'
+    vars:
+      nox_session: upgrade
+
+- job:
+    # Zuul cient uses this job so we can't just delete it yet.
+    name: zuul-tox-zuul-client
+    parent: zuul-nox
+    description: |
+      Test that Zuul and zuul-client work together.
+    required-projects:
+      - zuul/zuul
+      - zuul/zuul-client
+    vars:
+      zuul_work_dir: "{{ zuul.projects['opendev.org/zuul/zuul'].src_dir }}"
+      tox_envlist: zuul_client
+
+- job:
+    name: zuul-nox-zuul-client
+    parent: zuul-nox
+    description: |
+      Test that Zuul and zuul-client work together.
+    required-projects:
+      - zuul/zuul
+      - zuul/zuul-client
+    vars:
+      zuul_work_dir: "{{ zuul.projects['opendev.org/zuul/zuul'].src_dir }}"
+      nox_session: zuul_client
+
+- job:
+    name: zuul-nox-py311
+    parent: zuul-nox
+    timeout: 7200  # 120 minutes
+    failure-output:
+      # This matches stestr output when a test fails
+      # {1} tests.unit.test_blah [5.743446s] ... FAILED
+      - '\{\d+\} (.*?) \[[\d\.]+s\] \.\.\. FAILED'
+    vars:
+      nox_keyword: tests
+
+- job:
+    name: zuul-nox-py311-multi-scheduler
+    parent: zuul-nox-py311
+    voting: false
+    vars:
+      nox_environment:
+        ZUUL_SCHEDULER_COUNT: 2
+
+- job:
+    name: zuul-nox-py312
+    # This could probably use some refactoring to have a base unittest job
+    # that isn't python version specific.
+    parent: zuul-nox-py311
+    nodeset: ubuntu-noble
+    vars:
+      nox_force_python: "3.12"
+      python_version: "3.12"
 
 - job:
     name: zuul-build-dashboard
-    parent: build-javascript-content
-    success-url: 'npm/html/status.html'
-    files:
-      - package.json
-      - tsconfig.json
-      - tslint.json
+    parent: build-javascript-deployment
+    description: |
+      Builds the zuul dashboard without an overridden API URL.
+    files: &zuul_build_dashboard_files
       - web/.*
-      - webpack.config.js
-      - yarn.lock
+      - playbooks/dashboard/.*
     vars:
-      javascript_content_dir: zuul/web/static
-      zuul_api_url: https://zuul.openstack.org
+      javascript_content_dir: "build"
+      zuul_work_dir: "{{ zuul.project.src_dir }}/web"
+      create_tarball_directory: build
+      # set node version here again because the js-build parent job overwrites
+      # the project var below
+      node_version: 22
     run: playbooks/dashboard/run.yaml
+    nodeset: ubuntu-jammy
 
 - job:
-    name: zuul-build-dashboard-multi-tenant
+    name: zuul-build-dashboard-openstack-whitelabel
     parent: zuul-build-dashboard
-    success-url: 'npm/html/tenants.html'
-    post-run: playbooks/dashboard/multi.yaml
+    description: |
+      Builds the zuul dashboard with API URL pointing to
+      https://zuul.openstack.org, which tests whitelabeled
+      deployments.
+    vars:
+      zuul_api_url: https://zuul.openstack.org
+
+- job:
+    name: zuul-build-dashboard-software-factory
+    parent: zuul-build-dashboard
+    description: |
+      Builds the zuul dashboard with API URL pointing to
+      https://softwarefactory-project.io/zuul, which tests
+      multi-tenant deployments on a suburl, as well as letting
+      us check that dashboard changes won't break the
+      softwarefactory service.
     vars:
       zuul_api_url: https://softwarefactory-project.io/zuul
-      javascript_copy_links: false
+
+- job:
+    name: zuul-build-dashboard-opendev
+    parent: zuul-build-dashboard
+    description: |
+      Builds the zuul dashboard with API URL pointing to
+      https://zuul.opendev.org, which tests multi-tenant
+      deployments not on a suburl, as well as letting us
+      check that dashboard changes won't break the
+      OpenDev service.
+    vars:
+      zuul_api_url: https://zuul.opendev.org
+
+# This job is run on changes to both Zuul and Nodepool; any changes to
+# the other project will be picked up via image builds which appear in
+# the buildset registry.  It includes zuul as a required project
+# because that is where the docker-compose file is located.
+- job:
+    name: zuul-quick-start
+    parent: opendev-buildset-registry-consumer
+    description: Run the commands in the Zuul tutorial quick-start documentation.
+    pre-run: playbooks/tutorial/pre.yaml
+    run: playbooks/tutorial/run.yaml
+    post-run: playbooks/tutorial/post.yaml
+    required-projects:
+      - zuul/zuul
+    nodeset: ubuntu-noble
+
+# Image building jobs
+- secret:
+    name: zuul-registry-credentials
+    data:
+      quay.io:
+        username: zuul-ci+opendevzuul
+        password: !encrypted/pkcs1-oaep
+          - B5RM116kdo4uTDHChDVWLbRUvXZHXkndzi9sZVmZ/8EjQRKhtsNfVWWPinr7cbXiN6NjA
+            ja85RrAMwYic8Y2f8cTRSowitPDmvAs8Av/zZ6PnFap6pGb1vQFuPYYOqEkkeqrQoY9vO
+            h2PV3Z2A+O48mzDt0CVhI6E8AQdqrMO7R0pO1plb5q9PFTHUlwgUdIbUMkVpndVMER8Ez
+            IdWs2bcVUC5hChUKFcSX2Jr8peOwQvLnzX5nGRAYATrp5tV/xsC8R/WkOVvKP0ORLJlf8
+            T/yZRXm7yw9LdizCsf+3jkzw726YZT+GqavPnygJvKeu+WVMtBs69TPhTdpq4B5WCnQko
+            Xq+g2WZkqdfeQRBp2BqMsk1wZ+fMnTqKb8iJRO0tjYmFJBq0xRRQHHjwLDd4clM1KBMqT
+            17ss4QvTY61ZbbSM33M3FgibBPe96G7vCuTLiUnrmcR8i5M1H+XHPYMSSbCn3DgY5IBl2
+            Lr9ism4velFlzXQ9r71VM5v+JCSbcjrMAn5GKFZ5f9MeqWnATqYUO+xwEa/wb+sgPzd/v
+            VNlB74K3tg7wP1abGM7LtQkVKkWuy44sXayt2PcikE4pDO6EiODOxSv5a5Uxc6ef/cmfl
+            ADZ08hlob4CFNjL1m5lZSZNYDcsgwYuYXoP2a5kgykerEV+v3q0epjExCCUrEI=
+        api_token: !encrypted/pkcs1-oaep
+          - HTgQ6onrqJCCwjwT+TGjgiXT6qgwJMbWYUXlt5mz570RKNN4Ptsa6oqu4zpk+paAIwain
+            Olw3n4InshNAWIvTSro6zwYurmiiKCbxcocaxLzIKM+zbgIR7haKm+Crqei4tanWNpXHq
+            ULdu4muJojxu6OdYNhftPY3NLdFFuDA5IF2zv2f4gZSthvmQ9NzvEqPKFDV2yzNa6G4V+
+            jicYR3X7f0TjW9QF9p9CuSMvZrOCxp98zRelT8EJBKsb+38JVapvJgbAqAgJhAaGgJYkP
+            1W7iqL+eNLMcRCnkoBEnOwZe66WO5gZagqWH25oRhjFnFM/qqMeYEG/AhAUae7vTHd9VK
+            yHSndEdrdCNpdzBsJQFGS7lxJMUl8ELL61qoojZSW91bGRIziedYEbDuPEzZUkoosaf6r
+            50jvdRYOsmYnmr3Q5/T0QxW00qLL6FkPCRHg8wI2EXDPA/X5+vTlEYMhJxEJZ1+unHk9t
+            PPebXHCZ2B0VA+x3Khnt5BOJt/ewxfbfVu0CVgjSgrAUaSHWY3DLdvbuA9lwjafybkfxC
+            vIEhQz8AxAgWsdWpFOr9uPCB+5C+ma4jF15k/RUWoODHhvYZEoSNDOz4BRGrK+kHczr3F
+            P9x7xzzPhVCdbspsf+sV90xpUI0U4vCeVpi+3Ha1zZZR0JAC1SIWXUnJxB2EkM=
+
+- job:
+    name: zuul-build-image
+    parent: opendev-build-container-image
+    description: Build container images.
+    allowed-projects: zuul/zuul
+    timeout: 2700  # 45 minutes
+    requires:
+      - python-builder-3.11-bookworm-container-image
+      - python-base-3.11-bookworm-container-image
+    ansible-split-streams: true
+    post-run:
+      - playbooks/image/test-image.yaml
+    provides: zuul-container-image
+    vars: &zuul_image_vars
+      promote_container_image_method: intermediate-registry
+      promote_container_image_job: zuul-upload-image
+      container_command: docker
+      container_build_extra_env:
+        DOCKER_BUILDKIT: 1
+      container_images:
+        - context: .
+          registry: quay.io
+          repository: quay.io/zuul-ci/zuul
+          namespace: zuul-ci
+          repo_shortname: zuul
+          repo_description: Base Zuul image.
+          target: zuul
+          tags:
+            # If zuul.tag is defined: [ '3', '3.19', '3.19.0' ].  Only works for 3-component tags.
+            # Otherwise: ['latest']
+            &imagetag "{{ zuul.tag is defined | ternary([zuul.get('tag', '').split('.')[0], '.'.join(zuul.get('tag', '').split('.')[:2]), zuul.get('tag', '')], ['latest']) }}"
+        - context: .
+          registry: quay.io
+          repository: quay.io/zuul-ci/zuul-executor
+          namespace: zuul-ci
+          repo_shortname: zuul-executor
+          repo_description: Zuul executor image
+          target: zuul-executor
+          tags: *imagetag
+        - context: .
+          registry: quay.io
+          repository: quay.io/zuul-ci/zuul-fingergw
+          namespace: zuul-ci
+          repo_shortname: zuul-fingergw
+          repo_description: Zuul fingergw image
+          target: zuul-fingergw
+          tags: *imagetag
+        - context: .
+          registry: quay.io
+          repository: quay.io/zuul-ci/zuul-launcher
+          namespace: zuul-ci
+          repo_shortname: zuul-launcher
+          repo_description: Zuul launcher image
+          target: zuul-launcher
+          tags: *imagetag
+        - context: .
+          registry: quay.io
+          repository: quay.io/zuul-ci/zuul-merger
+          namespace: zuul-ci
+          repo_shortname: zuul-merger
+          repo_description: Zuul merger image
+          target: zuul-merger
+          tags: *imagetag
+        - context: .
+          registry: quay.io
+          repository: quay.io/zuul-ci/zuul-scheduler
+          namespace: zuul-ci
+          repo_shortname: zuul-scheduler
+          repo_description: Zuul scheduler image
+          target: zuul-scheduler
+          tags: *imagetag
+        - context: .
+          registry: quay.io
+          repository: quay.io/zuul-ci/zuul-web
+          namespace: zuul-ci
+          repo_shortname: zuul-web
+          repo_description: Zuul web image
+          target: zuul-web
+          tags: *imagetag
+
+- job:
+    name: zuul-upload-image
+    parent: opendev-upload-container-image
+    description: Build container images and upload.
+    allowed-projects: zuul/zuul
+    requires:
+      - python-builder-3.11-bookworm-container-image
+      - python-base-3.11-bookworm-container-image
+    provides: zuul-container-image
+    secrets:
+      name: container_registry_credentials
+      secret: zuul-registry-credentials
+      pass-to-parent: true
+    vars: *zuul_image_vars
+
+- job:
+    name: zuul-promote-image
+    parent: opendev-promote-container-image
+    description: Promote previously uploaded container images.
+    allowed-projects: zuul/zuul
+    secrets:
+      name: container_registry_credentials
+      secret: zuul-registry-credentials
+      pass-to-parent: true
+    nodeset:
+      nodes: []
+    vars: *zuul_image_vars
+
+- job:
+    name: zuul-build-python-release
+    parent: build-python-release
+    pre-run: playbooks/release/pre.yaml
+    nodeset: ubuntu-jammy
+
+- job:
+    name: zuul-release-python
+    parent: opendev-release-python
+    pre-run: playbooks/release/pre.yaml
+    nodeset: ubuntu-jammy
 
 - project:
+    queue: zuul
+    vars:
+      node_version: 22
+      release_python: python3
+      ensure_tox_version: "<4"
     check:
       jobs:
-        - build-sphinx-docs:
-            irrelevant-files:
-              - zuul/cmd/migrate.py
-              - playbooks/zuul-migrate/.*
+        - zuul-build-image
+        - zuul-nox-docs
+        - nox-linters:
             vars:
-              sphinx_python: python3
-        - tox-pep8
-        - tox-py35:
-            irrelevant-files:
-              - zuul/cmd/migrate.py
-              - playbooks/zuul-migrate/.*
-        - tox-py36:
-            nodeset: ubuntu-bionic
-            irrelevant-files:
-              - zuul/cmd/migrate.py
-              - playbooks/zuul-migrate/.*
-        - zuul-build-dashboard
-        - zuul-build-dashboard-multi-tenant
-        - nodejs-npm-run-lint:
+              nox_install_bindep: false
+            nodeset: ubuntu-jammy
+        - zuul-nox-py311
+        - zuul-nox-py312
+        - zuul-nox-upgrade
+        - zuul-build-dashboard-openstack-whitelabel
+        - zuul-build-dashboard-software-factory
+        - zuul-build-dashboard-opendev
+        - nodejs-run-lint:
             vars:
-                node_version: 8
-            success-url: 'npm/reports/bundle.html'
+              zuul_work_dir: "{{ zuul.project.src_dir }}/web"
+            nodeset: ubuntu-jammy
+        - nodejs-run-test:
+            vars:
+              zuul_work_dir: "{{ zuul.project.src_dir }}/web"
             files:
-              - package.json
-              - tsconfig.json
-              - tslint.json
               - web/.*
-              - webpack.config.js
-              - yarn.lock
-        - zuul-stream-functional
-        - zuul-tox-remote
-        - nodepool-zuul-functional:
-            voting: false
+            nodeset: ubuntu-jammy
+        - zuul-stream-functional-9
+        - zuul-stream-functional-11
+        - zuul-nox-remote
+        - zuul-quick-start:
+            requires: nodepool-container-image
+            dependencies: zuul-build-image
+        - zuul-nox-zuul-client
+        - zuul-build-python-release
+    experimental:
+      jobs:
+        - zuul-nox-py311-multi-scheduler
     gate:
       jobs:
-        - build-sphinx-docs:
-            irrelevant-files:
-              - zuul/cmd/migrate.py
-              - playbooks/zuul-migrate/.*
+        - zuul-upload-image
+        - zuul-nox-docs
+        - nox-linters:
             vars:
-              sphinx_python: python3
-        - tox-pep8
-        - tox-py35:
-            irrelevant-files:
-              - zuul/cmd/migrate.py
-              - playbooks/zuul-migrate/.*
-        - tox-py36:
-            nodeset: ubuntu-bionic
-            irrelevant-files:
-              - zuul/cmd/migrate.py
-              - playbooks/zuul-migrate/.*
+              nox_install_bindep: false
+            nodeset: ubuntu-jammy
+        - zuul-nox-py311
+        - zuul-nox-py312
+        - zuul-nox-upgrade
         - zuul-build-dashboard
-        - nodejs-npm-run-lint:
+        - nodejs-run-lint:
             vars:
-                node_version: 8
-            success-url: 'npm/reports/bundle.html'
+              zuul_work_dir: "{{ zuul.project.src_dir }}/web"
+            nodeset: ubuntu-jammy
+        - nodejs-run-test:
+            vars:
+              zuul_work_dir: "{{ zuul.project.src_dir }}/web"
             files:
-              - package.json
-              - tsconfig.json
-              - tslint.json
               - web/.*
-              - webpack.config.js
-              - yarn.lock
-        - zuul-stream-functional
-        - zuul-tox-remote
-    post:
+            nodeset: ubuntu-jammy
+        - zuul-stream-functional-9
+        - zuul-stream-functional-11
+        - zuul-nox-remote
+        - zuul-quick-start:
+            requires: nodepool-container-image
+            dependencies: zuul-upload-image
+        - zuul-nox-zuul-client
+        - zuul-build-python-release
+    promote:
       jobs:
-        - publish-zuul-docs
-        - publish-openstack-sphinx-docs-infra-python3
-        - publish-openstack-python-branch-tarball
-        - publish-openstack-javascript-content:
+        - zuul-promote-image
+        - zuul-promote-nox-docs
+        - opendev-promote-python:
             vars:
-                node_version: 8
+              download_artifact_job: zuul-build-python-release
+        - opendev-promote-javascript-deployment-tarball:
+            files: *zuul_build_dashboard_files
+            vars:
+              download_artifact_job: zuul-build-dashboard
     release:
       jobs:
-        - publish-zuul-docs
-        - publish-openstack-sphinx-docs-infra-python3
+        - zuul-release-python
+        - zuul-publish-nox-docs
+        - upload-container-image:
+            secrets:
+              name: container_registry_credentials
+              secret: zuul-registry-credentials
+              pass-to-parent: true
+            vars:
+              <<: *zuul_image_vars
+              upload_container_image_promote: false

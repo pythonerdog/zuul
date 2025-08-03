@@ -613,7 +613,7 @@ These metrics are emitted by the Zuul :ref:`scheduler`:
       :type: gauge
 
       The number of outstanding nodepool requests from Zuul drilled down by
-      <tenant>. If a tenant for a node request cannot be determed, it is
+      <tenant>. If a tenant for a node request cannot be determined, it is
       reported as ``unknown``. This relates to
       ``zuul.nodepool.current_requests``.
 

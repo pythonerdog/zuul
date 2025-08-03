@@ -94,8 +94,12 @@ class AwsProviderImage(BaseProviderImage):
         inheritable_aws_image_schema,
         inheritable_aws_zuul_schema,
     )
-    inheritable_schema = assemble(
-        BaseProviderImage.inheritable_schema,
+    inheritable_cloud_schema = assemble(
+        BaseProviderImage.inheritable_cloud_schema,
+        inheritable_aws_image_schema,
+    )
+    inheritable_zuul_schema = assemble(
+        BaseProviderImage.inheritable_zuul_schema,
         inheritable_aws_image_schema,
         inheritable_aws_zuul_schema,
     )
@@ -226,7 +230,8 @@ class AwsProviderSchema(BaseProviderSchema):
         return assemble(
             schema,
             aws_provider_schema,
-            AwsProviderImage.inheritable_schema,
+            AwsProviderImage.inheritable_cloud_schema,
+            AwsProviderImage.inheritable_zuul_schema,
             AwsProviderFlavor.inheritable_schema,
             AwsProviderLabel.inheritable_schema,
         )
@@ -375,12 +380,21 @@ class AwsProvider(BaseProvider, subclass_id='aws'):
         flavor = self.flavors[label.flavor]
         return self.endpoint.getQuotaForLabel(label, flavor)
 
-    def uploadImage(self, provider_image, image_name,
-                    filename, image_format, metadata, md5, sha256):
+    def downloadUrl(self, url, path):
+        return self.endpoint.downloadUrl(url, path)
+
+    def getImageImportJob(self, provider_image, image_name, url,
+                          image_format, metadata, md5, sha256):
+        return self.endpoint.getImageImportJob(
+            provider_image, image_name, url,
+            image_format, metadata, md5, sha256)
+
+    def getImageUploadJob(self, provider_image, image_name,
+                          filename, image_format, metadata, md5, sha256):
         # TODO this needs to move to the section or connection config
         # since it's used by endpoints.
         bucket_name = self.object_storage.get('bucket-name')
-        return self.endpoint.uploadImage(
+        return self.endpoint.getImageUploadJob(
             provider_image, image_name,
             filename, image_format, metadata, md5, sha256,
             bucket_name)

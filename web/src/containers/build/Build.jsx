@@ -191,7 +191,24 @@ function Build({ build, tenant, timezone, user }) {
                     <strong>Took </strong>
                     {moment
                       .duration(build.duration, 'seconds')
-                      .format('h [hr] m [min] s [sec]')}
+                     .format('h [hr] m [min] s [sec]')}
+                    &nbsp;
+                  <Link
+                    to={
+                      tenant.linkPrefix +
+                      '/runtime?job_name=' +
+                      build.job_name +
+                      '&project=' +
+                      buildRef.project +
+                      '&branch=' +
+                      buildRef.branch +
+                      '&pipeline=' +
+                      build.pipeline
+                    }
+                    title="See previous run-times of this job inside current project."
+                  >
+                    View run-time graph
+                  </Link>
                   </>
                 }
               />

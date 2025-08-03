@@ -9,12 +9,6 @@
 
   post_tasks:
 
-    - name: Setup 2.7 container environment
-      include_tasks: 2.7-container.yaml
-
-    - name: Setup inventory
-      include_tasks: create-inventory.yaml
-
     - name: Install pip
       shell: |+
         python3 -m pip install --break-system-packages --upgrade pip setuptools wheel
@@ -41,6 +35,11 @@
         # install multiple ansible versions to the root (via multiple fake
         # venvs) and the installation fails due to conflicts.
         SETUPTOOLS_USE_DISTUTILS: stdlib
+
+    - name: Copy inventory
+      copy:
+        src: "{{ zuul.executor.log_root }}/zuul-info/inventory.yaml"
+        dest: "{{ ansible_user_dir }}/inventory.yaml"
 
     - name: Copy ansible.cfg
       template:

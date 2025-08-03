@@ -604,6 +604,10 @@ class BaseThreadPoolEventConnector:
     def start(self):
         self._event_dispatcher.start()
 
+    def _shouldStop(self):
+        return (self._stopped or
+                not self.event_queue.election.is_still_valid())
+
     def _onNewEvent(self):
         self._dispatcher_wake_event.set()
         # Stop the data watch in case the connector was stopped
@@ -639,7 +643,7 @@ class BaseThreadPoolEventConnector:
                 # running; if we are stopping, then we need to continue
                 # this loop until previously processed events are
                 # completed but not start processing any new events.
-                if not self._stopped:
+                if not self._shouldStop():
                     delay = self._dispatchEvents()
 
             # Now process the futures from this or any previous
@@ -651,7 +655,7 @@ class BaseThreadPoolEventConnector:
             # new events (or stop altogether); otherwise we need to
             # continue processing futures.
             if not len(self._event_forward_queue):
-                if self._stopped:
+                if self._shouldStop():
                     return
                 self._dispatcher_wake_event.wait(delay or 10)
             else:
@@ -675,7 +679,7 @@ class BaseThreadPoolEventConnector:
             event_id_offset = None
 
         for event in self.event_queue.iter(event_id_offset):
-            if self._stopped:
+            if self._shouldStop():
                 break
 
             processor = self._getEventProcessor(event)

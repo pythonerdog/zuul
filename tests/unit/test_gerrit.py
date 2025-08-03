@@ -18,6 +18,7 @@ import threading
 import time
 import textwrap
 from unittest import mock
+import yaml
 
 import zuul.model
 import tests.base
@@ -306,6 +307,39 @@ class TestGerritWeb(ZuulTestCase):
         self.assertIn('... (truncated)',
                       A.messages[0])
 
+    def test_message_too_long_failed_job(self):
+        # Test that if we have a failed job in a long message, we
+        # at least include the failed jobs.
+        config = []
+        joblist = []
+        # Use enough jobs with long names to trip the 16k limit
+        for x in range(60):
+            name = 'job-%s-%s' % ('x' * 200, x)
+            job = dict(
+                name=name,
+                parent='test-job',
+            )
+            config.append(dict(job=job))
+            joblist.append(name)
+        config.append(dict(
+            project=dict(
+                check=dict(
+                    jobs=joblist,
+                )
+            )
+        ))
+        in_repo_conf = yaml.dump(config)
+        file_dict = {'.zuul.yaml': in_repo_conf}
+        A = self.fake_gerrit.addFakeChange('org/project', 'master', 'A',
+                                           files=file_dict)
+        self.executor_server.failJob('project-test1', A)
+        self.fake_gerrit.addEvent(A.getPatchsetCreatedEvent(1))
+        self.waitUntilSettled()
+
+        self.assertIn('length restrictions', A.messages[0])
+        self.assertIn('FAILURE', A.messages[0])
+        self.assertNotIn('SUCCESS', A.messages[0])
+
     def test_dependent_dynamic_line_comment(self):
         in_repo_conf = textwrap.dedent(
             """
@@ -447,6 +481,77 @@ class TestGerritWeb(ZuulTestCase):
         # If the event is not processed, then we will never settle and
         # the test will time-out.
         self.waitUntilSettled()
+
+    def test_get_project_branch_sha(self):
+        # Exercise this method since it's only called from timer
+        # triggers
+        source = self.fake_gerrit.source
+        project = source.getProject('org/project')
+        self.assertIsNotNone(source.getProjectBranchSha(project, 'master'))
+
+    @simple_layout('layouts/gerrit-pipeline-trigger-debug.yaml')
+    def test_gerrit_pipeline_trigger_debug(self):
+        # Test that we get debug info for a pipeline debug trigger
+        A = self.fake_gerrit.addFakeChange('org/project', 'master', 'A')
+        self.fake_gerrit.addEvent(A.getPatchsetCreatedEvent(1))
+        self.waitUntilSettled()
+
+        self.assertEqual(A.data['status'], 'NEW')
+        self.assertEqual(A.reported, 1)
+        self.assertIn('Debug information:',
+                      A.messages[0])
+
+        # Test that we get debug info for a pipeline debug trigger
+        # when a change depends on an abandoned change
+        B = self.fake_gerrit.addFakeChange('org/project', 'master', 'B')
+        # We check approvals before state, so set those
+        B.addApproval('Code-Review', 2)
+        B.addApproval('Approved', 1)
+        B.setAbandoned()
+        A.setDependsOn(B, 1)
+        A.addApproval('Code-Review', 2)
+        self.fake_gerrit.addEvent(A.addApproval('Approved', 1))
+        self.waitUntilSettled()
+
+        self.assertEqual(A.data['status'], 'NEW')
+        self.assertEqual(A.reported, 2)
+        self.assertIn('does not match pipeline requirement',
+                      A.messages[1])
+
+        # Test that we get debug info for a pipeline debug trigger
+        # when a change is missing a pipeline requirement
+        self.fake_gerrit.addEvent(B.addApproval('Approved', 1))
+        self.waitUntilSettled()
+
+        self.assertEqual(B.data['status'], 'ABANDONED')
+        self.assertEqual(B.reported, 1)
+        self.assertIn('does not match pipeline requirement',
+                      B.messages[0])
+
+        # Test that we get debug info for a pipeline debug trigger
+        # when a change is missing a merge requirement
+        C = self.fake_gerrit.addFakeChange('org/project', 'master', 'C')
+        self.fake_gerrit.addEvent(C.addApproval('Approved', 1))
+        self.waitUntilSettled()
+
+        self.assertEqual(C.data['status'], 'NEW')
+        self.assertEqual(C.reported, 1)
+        self.assertIn('can not be merged due to: missing labels:',
+                      C.messages[0])
+
+        # Test that we get debug info for a pipeline debug trigger
+        # when a change depends on a change missing a merge requirement
+        D = self.fake_gerrit.addFakeChange('org/project', 'master', 'D')
+        D.setDependsOn(C, 1)
+        D.addApproval('Code-Review', 2)
+        self.fake_gerrit.addEvent(D.addApproval('Approved', 1))
+        self.waitUntilSettled()
+
+        self.assertEqual(D.data['status'], 'NEW')
+        self.assertEqual(D.reported, 1)
+        self.assertIn(
+            'is needed but can not be merged due to: missing labels:',
+            D.messages[0])
 
 
 class TestFileComments(AnsibleZuulTestCase):

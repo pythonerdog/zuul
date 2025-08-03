@@ -20,6 +20,8 @@ import PropTypes from 'prop-types'
 import * as moment_tz from 'moment-timezone'
 
 import {
+  Banner,
+  Button,
   Gallery,
   GalleryItem,
   Level,
@@ -31,10 +33,19 @@ import {
   ToolbarContent,
   ToolbarItem,
   Tooltip,
+
+  Flex,
+  FlexItem,
+
+
 } from '@patternfly/react-core'
-import { StreamIcon } from '@patternfly/react-icons'
+import {
+  StreamIcon,
+  ExclamationTriangleIcon,
+} from '@patternfly/react-icons'
 
 import PipelineSummary from '../containers/status/PipelineSummary'
+import PauseModal from '../containers/status/PauseModal'
 
 import { fetchStatusIfNeeded } from '../actions/status'
 import { clearQueue } from '../actions/statusExpansion'
@@ -114,6 +125,47 @@ PipelineGallery.propTypes = {
   sortKey: PropTypes.string,
 }
 
+
+function renderBanner(status)
+{
+  if (!status || !status.state) {
+    return <></>
+  }
+  // This method is able to describe states that the client libraries
+  // do not support creating (for example, buth discarding and pausing
+  // the trigger event queue).
+  const msgs = []
+  const queues = []
+  if (status.state.trigger_queue_discarding)
+  {
+    msgs.push('Discarding trigger events')
+  }
+  if (status.state.trigger_queue_paused) {
+    queues.push('Trigger')
+  }
+  if (status.state.result_queue_paused) {
+    queues.push('Result')
+  }
+  if (queues.length) {
+    msgs.push(`${queues.join(', ')} event queue${queues.length>1?'s':''} paused`)
+  }
+  if (!msgs.length) {
+    return <></>
+  }
+  const msg = `${msgs.join(', ')}: ${status.state.reason || 'no reason supplied'}`
+
+  return (
+    <Banner screenReaderText="Warning banner" variant="warning">
+      <Flex spaceItems={{ default: 'spaceItemsSm' }}>
+        <FlexItem>
+          <ExclamationTriangleIcon />
+        </FlexItem>
+        <FlexItem>{msg}</FlexItem>
+      </Flex>
+    </Banner>
+  )
+}
+
 function getPipelines(status, location, filterCategories) {
   let pipelines = []
   let stats = {}
@@ -142,6 +194,7 @@ function getPipelines(status, location, filterCategories) {
 
 function PipelineOverviewPage() {
   const status = useSelector((state) => state.status.status)
+  const user = useSelector((state) => state.user)
 
   const filterCategories = [
     {
@@ -183,6 +236,7 @@ function PipelineOverviewPage() {
   const filters = getFiltersFromUrl(location, filterCategories)
   const filterActive = isFilterActive(filters)
 
+  const [showPauseModal, setShowPauseModal] = useState(false)
   const [showAllPipelines, setShowAllPipelines] = useState(
     filterActive || localStorage.getItem('zuul_show_all_pipelines') === 'true')
   const [expandAll, setExpandAll] = useState(
@@ -284,6 +338,9 @@ function PipelineOverviewPage() {
 
   return (
     <>
+
+      {renderBanner(status)}
+
       <PageSection
         variant={darkMode ? PageSectionVariants.dark : PageSectionVariants.light}
         className="zuul-toolbar-section"
@@ -319,6 +376,15 @@ function PipelineOverviewPage() {
           <LevelItem>
             <Toolbar>
               <ToolbarContent style={{paddingRight: '0'}}>
+
+                {(user.isAdmin && user.scope.indexOf(tenant.name) !== -1) && (
+                  <ToolbarItem>
+                    <Button onClick={() => {setShowPauseModal(true)}}>
+                      Manage Events
+                    </Button>
+                  </ToolbarItem>
+                )}
+
                 <ToolbarStatsGroup>
                   <ToolbarStatsItem
                     name="events"
@@ -367,6 +433,10 @@ function PipelineOverviewPage() {
           sortKey={currentSortKey.key}
         />
       </PageSection>
+      <PauseModal
+        isOpen={showPauseModal}
+        setOpen={setShowPauseModal}
+      />
     </>
   )
 }

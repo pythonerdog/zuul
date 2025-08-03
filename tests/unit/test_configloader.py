@@ -66,6 +66,42 @@ class TestConfigLoader(ZuulTestCase):
 
                 self.assertEqual(tenant.name, tenant_name)
 
+    @okay_tracebacks(' _processCatJob')
+    def test_merge_job_cleanup(self):
+        # When issuing a full reconfiguration or a tenant validation, we
+        # cannot hold the merge jobs in queue as the configloader is
+        # explicitly waiting for the cat jobs to complete. Thus, instead
+        # of holding the merge jobs we directly fail those cat jobs to
+        # trigger the merge request cleanup.
+        self.merger_api.failJobs(MergeRequest.CAT)
+        self.executor_server.merger_api.failJobs(MergeRequest.CAT)
+        self.assertRaises(
+            Exception,
+            lambda: self.scheds.execute(lambda app: app.sched.validateTenants(
+                app.config, {'tenant-one'})),
+        )
+
+        self.waitUntilSettled()
+
+        # Even if the merge jobs are canceled, there could be a race
+        # condition where an executor picks up a merge request and
+        # re-creates the result znode in ZK after the request got
+        # deleted. To prevent assertCleanZooKeeper to fail this test
+        # even if the cancelation was successful, we have to manually
+        # clean up lost merge requests.
+        self.merger_api.cleanup()
+
+        # As we are explicitly failing cat jobs we are expecting
+        # validateTenants() to fail with an exception.
+        # As this catches other exceptions that might be raised when
+        # canceling the merge jobs, there is no proper way to validate
+        # this apart from checking the test/exception logs for specific
+        # messages.
+        for record in self._exception_logs:
+            if "Unable to cancel job" in record.msg:
+                self.fail(
+                    f"Exception while canceling merge jobs: {record.msg}")
+
 
 class TenantParserTestCase(ZuulTestCase):
     create_project_keys = True

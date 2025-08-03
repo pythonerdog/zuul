@@ -1,0 +1,54 @@
+- pipeline:
+    name: check
+    description: Standard check
+    manager: independent
+    trigger:
+      github:
+        - event: pull_request
+          action: opened
+          debug: true
+    start:
+      github:
+        status: pending
+        comment: false
+    success:
+      github:
+        status: success
+
+- pipeline:
+    name: gate
+    manager: dependent
+    trigger:
+      github:
+        - event: pull_request
+          action: comment
+          comment: merge me
+          debug: true
+    success:
+      github:
+        status: success
+        merge: true
+    failure:
+      github: {}
+
+- job:
+    name: base
+    parent: null
+    run: playbooks/base.yaml
+    nodeset:
+      nodes:
+        - label: ubuntu-xenial
+          name: controller
+
+- job:
+    name: check-job
+    run: playbooks/check.yaml
+
+- project:
+    name: org/project
+    check:
+      jobs:
+        - check-job
+    gate:
+      jobs:
+        - check-job

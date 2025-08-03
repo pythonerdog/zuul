@@ -595,19 +595,152 @@ class FunctionalZuulStreamMixIn:
             self.assertLogLine(
                 r'fake \| skipping: Conditional result was False', text)
 
+    @skip("Windows unavailable in gate")
+    def test_win_command_fqcn(self):
+        self.fake_nodepool.shell_type = 'cmd'
+        job = self._run_job('win-command-fqcn')
+        with self.jobLog(job):
+            build = self.history[-1]
+            self.assertEqual(build.result, 'SUCCESS')
 
-class TestZuulStream8(AnsibleZuulTestCase, FunctionalZuulStreamMixIn):
-    ansible_version = '8'
-    ansible_core_version = '2.15'
+            console_output = self.console_output.getvalue()
+            # This should be generic enough to match any callback
+            # plugin failures, which look something like
+            #
+            #  [WARNING]: Failure using method (v2_runner_on_ok) in \
+            #                                                  callback plugin
+            #  (<ansible.plugins.callback.zuul_stream.CallbackModule object at'
+            #  0x7f89f72a20b0>): 'dict' object has no attribute 'startswith'"
+            #  Callback Exception:
+            #  ...
+            #
+            self.assertNotIn('[WARNING]: Failure using method', console_output)
+
+            text = self._get_job_output(build)
+            data = self._get_job_json(build)
+
+            # The win_ modules do not have a strip_trailing_whitespace
+            # option like the unix ones (and the unix ones default to
+            # true), so we get a CRLF at the end of our stdout stream.
+            token_stdout = "Standard output test {}\r\n".format(
+                self.history[0].jobdir.src_root)
+            # The win_shell module trims the stderr string as part of
+            # its CLIXML handling, so there is no CRLF here.
+            token_stderr = "Standard error test {}".format(
+                self.history[0].jobdir.src_root)
+            result = data[0]['plays'][1]['tasks'][2]['hosts']['compute1']
+            self.assertEqual(token_stdout, result['stdout'])
+            self.assertEqual(token_stderr, result['stderr'])
+
+            # Find the "creates" tasks
+            create1_task = data[0]['plays'][4]['tasks'][3]
+            create1_host = create1_task['hosts']['compute1']
+            self.assertIsNotNone(create1_host['delta'])
+            self.assertNotIn("skipped, since", create1_host.get('msg', ''))
+            self.assertEqual("Creates file that does not exist",
+                             create1_task['task']['name'])
+            create2_task = data[0]['plays'][4]['tasks'][4]
+            create2_host = create2_task['hosts']['compute1']
+            self.assertIsNone(create2_host.get('delta'))
+            self.assertIn("skipped, since", create2_host['msg'])
+            self.assertEqual("Creates file that already exists",
+                             create2_task['task']['name'])
+            # There is no "delta" returned in this case, so we don't
+            # get a result linee
+            # self.assertLogLine(r'compute1 \| ok: Runtime: None', text)
+
+            self.assertLogLine(
+                r'RUN START: \[untrusted : review.example.com/org/project/'
+                r'playbooks/win-command-fqcn.yaml@master\]', text)
+            self.assertLogLine(r'PLAY \[all\]', text)
+            self.assertLogLine(
+                r'Ansible version={}'.format(self.ansible_core_version), text)
+            self.assertLogLine(r'TASK \[Show contents of first file\]', text)
+            self.assertLogLine(r'controller \| command test one', text)
+            self.assertLogLine(
+                r'controller \| ok: Runtime: \d:\d\d:\d\d\.\d\d\d\d\d\d', text)
+            self.assertLogLine(r'TASK \[Show contents of second file\]', text)
+            self.assertLogLine(r'compute1 \| command test two', text)
+            self.assertLogLine(r'controller \| command test two', text)
+            self.assertLogLine(r'compute1 \| This is a rescue task', text)
+            self.assertLogLine(r'controller \| This is a rescue task', text)
+            self.assertLogLine(r'compute1 \| This is an always task', text)
+            self.assertLogLine(r'controller \| This is an always task', text)
+            self.assertLogLine(r'compute1 \| This is a handler', text)
+            self.assertLogLine(r'controller \| This is a handler', text)
+            self.assertLogLine(r'controller \| First free task', text)
+            self.assertLogLine(r'controller \| Second free task', text)
+            self.assertLogLine(r'controller \| This is a shell task after an '
+                               'included role', text)
+            self.assertLogLine(r'compute1 \| This is a shell task after an '
+                               'included role', text)
+            self.assertLogLine(r'controller \| This is a command task after '
+                               'an included role', text)
+            self.assertLogLine(r'compute1 \| This is a command task after an '
+                               'included role', text)
+            self.assertLogLine(r'controller \| This is a shell task with '
+                               'delegate compute1', text)
+            self.assertLogLine(r'controller \| This is a shell task with '
+                               'delegate controller', text)
+            self.assertLogLine(r'compute1 \| item_in_loop1', text)
+            self.assertLogLine(r'compute1 \| ok: Item: item_in_loop1 '
+                               r'Runtime: \d:\d\d:\d\d\.\d\d\d\d\d\d', text)
+            self.assertLogLine(r'compute1 \| item_in_loop2', text)
+            self.assertLogLine(r'compute1 \| ok: Item: item_in_loop2 '
+                               r'Runtime: \d:\d\d:\d\d\.\d\d\d\d\d\d', text)
+            self.assertLogLine(r'compute1 \| failed_in_loop1', text)
+            self.assertLogLine(r'compute1 \| ok: Item: failed_in_loop1 '
+                               r'Result: 1', text)
+            self.assertLogLine(r'compute1 \| failed_in_loop2', text)
+            self.assertLogLine(r'compute1 \| ok: Item: failed_in_loop2 '
+                               r'Result: 1', text)
+            self.assertLogLine(r'compute1 \| transitive-one', text)
+            self.assertLogLine(r'compute1 \| transitive-two', text)
+            self.assertLogLine(r'compute1 \| transitive-three', text)
+            self.assertLogLine(r'compute1 \| transitive-four', text)
+            self.assertLogLine(
+                r'controller \| ok: Runtime: \d:\d\d:\d\d\.\d\d\d\d\d\d', text)
+            self.assertLogLine('PLAY RECAP', text)
+            self.assertLogLine(
+                r'controller \| ok: \d+ changed: \d+ unreachable: 0 failed: 0 '
+                'skipped: 2 rescued: 1 ignored: 0', text)
+            self.assertLogLine(
+                r'RUN END RESULT_NORMAL: \[untrusted : review.example.com/'
+                r'org/project/playbooks/win-command-fqcn.yaml@master]', text)
+            time1, time2 = self._getLogTime(r'TASK \[Command Not Found\]',
+                                            text)
+            self.assertLess((time2 - time1) / timedelta(milliseconds=1),
+                            9000)
+
+            # This is from the debug: msg='{{ ansible_version }}'
+            # testing raw variable output.  To make it version
+            # agnostic, match just the start of
+            #  compute1 | ok: {'string': '2.9.27'...
+
+            # NOTE(ianw) 2022-08-24 : I don't know why the callback
+            # for debug: msg= doesn't put the hostname first like
+            # other output. Undetermined if bug or feature.
+            self.assertLogLineStartsWith(
+                r"""\{'string': '\d.""", text)
+            # ... handling loops is a different path, and that does
+            self.assertLogLineStartsWith(
+                r"""compute1 \| ok: \{'string': '\d.""", text)
+            self.assertLogLine(
+                r'fake \| skipping: Conditional result was False', text)
+
+
+class TestZuulStream9(AnsibleZuulTestCase, FunctionalZuulStreamMixIn):
+    ansible_version = '9'
+    ansible_core_version = '2.16'
 
     def setUp(self):
         super().setUp()
         self._setUp()
 
 
-class TestZuulStream9(AnsibleZuulTestCase, FunctionalZuulStreamMixIn):
-    ansible_version = '9'
-    ansible_core_version = '2.16'
+class TestZuulStream11(AnsibleZuulTestCase, FunctionalZuulStreamMixIn):
+    ansible_version = '11'
+    ansible_core_version = '2.18'
 
     def setUp(self):
         super().setUp()

@@ -1,0 +1,10 @@
+---
+features:
+  - |
+    Most pipeline triggers now accept a ``debug`` attribute which may
+    be used to add a trigger to allow users to request extra debug
+    information about why a change may or may not have been enqueued
+    into a pipeline and why certain jobs ran or did not run.
+
+    For example, a site may add a trigger that matches the comment
+    "check debug" to request an expanded report on a change.

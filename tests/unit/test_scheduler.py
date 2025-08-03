@@ -2349,7 +2349,7 @@ class TestScheduler(ZuulTestCase):
         self.assertEqual(request2.current_count, request3.current_count)
 
         # Deleting hold request should set held nodes to used
-        self.sched_zk_nodepool.deleteHoldRequest(request3)
+        self.sched_zk_nodepool.deleteHoldRequest(request3, None)
         node_states = [n['state'] for n in self.fake_nodepool.getNodes()]
         self.assertEqual(3, len(node_states))
         self.assertEqual([zuul.model.STATE_USED] * 3, node_states)
@@ -3206,6 +3206,47 @@ class TestScheduler(ZuulTestCase):
 
         self.executor_server.release()
         self.waitUntilSettled()
+
+    def test_timer_branch_updated(self):
+        # Test that if a branch in updated while a periodic job is
+        # running, we get a second queue item.
+        # This test can not use simple_layout because it must start
+        # with a configuration which does not include a
+        # timer-triggered job so that we have an opportunity to set
+        # the hold flag before the first job.
+        self.executor_server.hold_jobs_in_build = True
+        # Start timer trigger - also org/project
+        self.commitConfigUpdate('common-config',
+                                'layouts/idle-dereference.yaml')
+        self.scheds.execute(lambda app: app.sched.reconfigure(app.config))
+        # The pipeline triggers every second, so we should have seen
+        # several by now.
+        time.sleep(5)
+        self.waitUntilSettled()
+
+        M = self.fake_gerrit.addFakeChange('org/project', 'master', 'M')
+        M.setMerged()
+
+        time.sleep(5)
+        self.waitUntilSettled()
+
+        # Stop queuing timer triggered jobs so that the assertions
+        # below don't race against more jobs being queued.
+        # Must be in same repo, so overwrite config with another one
+        self.commitConfigUpdate('common-config', 'layouts/no-timer.yaml')
+        self.scheds.execute(lambda app: app.sched.reconfigure(app.config))
+        self.waitUntilSettled()
+        # If APScheduler is in mid-event when we remove the job, we
+        # can end up with one more event firing, so give it an extra
+        # second to settle.
+        time.sleep(1)
+        self.waitUntilSettled()
+        # There should be two periodic jobs, one before and one after
+        # the update.
+        self.assertEqual(2, len(self.builds))
+        self.executor_server.release()
+        self.waitUntilSettled()
+        self.assertEqual(2, len(self.history))
 
     def test_new_patchset_dequeues_old_on_head(self):
         "Test that a new patchset causes the old to be dequeued (at head)"
@@ -6110,6 +6151,32 @@ For CI problems and help debugging, contact ci@example.org"""
                          ['100-0000000001'])
         zk_nodepool.deleteNodeRequest(req2.id)
 
+    @simple_layout('layouts/nodepool.yaml')
+    def test_nodeset_request_cleanup(self):
+        "Test that we cleanup leaked nodeset requests"
+
+        with self.launcher._run_lock:
+            with self.scheds.first.sched.node_request_cleanup_lock:
+                ctx = self.createZKContext(None)
+                zuul.model.NodesetRequest.new(
+                    ctx,
+                    tenant_name="tenant-one",
+                    pipeline_name="test",
+                    buildset_uuid=uuid4().hex,
+                    job_uuid=uuid4().hex,
+                    job_name="foobar",
+                    labels=["debian-normal"],
+                    priority=100,
+                    request_time=time.time(),
+                    zuul_event_id=uuid4().hex,
+                    span_info=None,
+                )
+                ids = self.scheds.first.sched.launcher.getRequestIds()
+                self.assertEqual(1, len(ids))
+            self.scheds.first.sched._runNodeRequestCleanup()
+            ids = self.scheds.first.sched.launcher.getRequestIds()
+            self.assertEqual(0, len(ids))
+
     def test_nodepool_failure(self):
         "Test that jobs are reported after a nodepool failure"
 
@@ -7310,6 +7377,42 @@ class TestJobUpdateFileMatcher(ZuulTestCase):
         self.waitUntilSettled()
         self.assertHistory([])
 
+    def test_include_vars_update(self):
+        "Test matchers are overridden with an include-vars update"
+        in_repo_conf = textwrap.dedent(
+            """
+            foo: baz
+            """)
+        file_dict = {'vars.yaml': in_repo_conf}
+        A = self.fake_gerrit.addFakeChange('org/project', 'master', 'A',
+                                           files=file_dict)
+        self.fake_gerrit.addEvent(A.getPatchsetCreatedEvent(1))
+        self.waitUntilSettled()
+
+        self.assertHistory([
+            dict(name='existing-files', result='SUCCESS', changes='1,1'),
+            dict(name='existing-irr', result='SUCCESS', changes='1,1'),
+        ], ordered=False)
+
+    def test_playbook_update(self):
+        "Test matchers are overridden with a playbook update"
+        in_repo_conf = textwrap.dedent(
+            """
+            # Noop change
+            - hosts: all
+              tasks: []
+            """)
+        file_dict = {'playbook.yaml': in_repo_conf}
+        A = self.fake_gerrit.addFakeChange('org/project', 'master', 'A',
+                                           files=file_dict)
+        self.fake_gerrit.addEvent(A.getPatchsetCreatedEvent(1))
+        self.waitUntilSettled()
+
+        self.assertHistory([
+            dict(name='existing-files', result='SUCCESS', changes='1,1'),
+            dict(name='existing-irr', result='SUCCESS', changes='1,1'),
+        ], ordered=False)
+
 
 class TestJobUpdateFileMatcherTransitive(ZuulTestCase):
     tenant_config_file = 'config/job-update-transitive/main.yaml'
@@ -7470,11 +7573,15 @@ class TestExecutor(ZuulTestCase):
         # so skip these checks.
         pass
 
+    def cleanupTestServers(self):
+        pass
+
     def assertCleanShutdown(self):
         self.log.debug("Assert clean shutdown")
 
         # After shutdown, make sure no jobs are running
         self.assertEqual({}, self.executor_server.job_workers)
+        super().cleanupTestServers()
 
         # Make sure that git.Repo objects have been garbage collected.
         gc.disable()

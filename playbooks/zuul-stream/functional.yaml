@@ -51,13 +51,10 @@
     # NOTE(ianw) 2022-07 : we deliberatly have this second step to run
     # against the console setup by the infrastructure executor in the
     # job pre playbooks as a backwards compatability sanity check.
-    # The py27 container job (node3) is not running an existing
-    # console streamer, so that will not output anything -- limit this
-    # out.
     - name: Run ansible that should succeed against extant console
       command: >
         /usr/lib/zuul/ansible/{{ zuul_ansible_version }}/bin/ansible-playbook
-        -e "new_console=false" --limit="node1,node2"
+        -e "new_console=false"
         src/opendev.org/zuul/zuul/playbooks/zuul-stream/fixtures/test-stream.yaml
       environment:
         ZUUL_JOB_LOG_CONFIG: "{{ ansible_user_dir}}/logging.json"
@@ -84,8 +81,6 @@
         - { node: 'node2', filename: 'job-output-success-19887.txt' }
         - { node: 'node1', filename: 'job-output-success-19885.txt' }
         - { node: 'node2', filename: 'job-output-success-19885.txt' }
-        # node3 only listen on 19887
-        - { node: 'node3', filename: 'job-output-success-19887.txt' }
 
     # This shows that zuul_console_disabled has activated and set the
     # UUID to "skip"
@@ -93,6 +88,12 @@
       shell: |
         egrep 'zuul_log_id": "skip"' job-output-success-19885.json
         egrep 'zuul_log_id": "skip"' job-output-success-19887.json
+
+    - name: Validate streaming connections new console
+      command: python3 src/opendev.org/zuul/zuul/playbooks/zuul-stream/validate.py console-job-output-success-19887.txt job-output-success-19887.txt job-output-success-19887.json
+
+    - name: Validate streaming connections old console
+      command: python3 src/opendev.org/zuul/zuul/playbooks/zuul-stream/validate.py console-job-output-success-19885.txt job-output-success-19885.txt job-output-success-19885.json
 
     # failure case
 
@@ -119,10 +120,8 @@
       shell: |
         egrep "^.+\| node1 \| Exception: Test module failure exception fail-task" job-output-failure.txt
         egrep "^.+\| node2 \| Exception: Test module failure exception fail-task" job-output-failure.txt
-        egrep "^.+\| node3 \| Exception: Test module failure exception fail-task" job-output-failure.txt
 
     - name: Validate output - failure item loop with exception
       shell: |
         egrep "^.+\| node1 \| Exception: Test module failure exception fail-loop" job-output-failure.txt
         egrep "^.+\| node2 \| Exception: Test module failure exception fail-loop" job-output-failure.txt
-        egrep "^.+\| node3 \| Exception: Test module failure exception fail-loop" job-output-failure.txt

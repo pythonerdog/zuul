@@ -70,6 +70,7 @@ class BaseMergeServer(metaclass=ABCMeta):
     log = logging.getLogger("zuul.BaseMergeServer")
 
     _repo_locks_class = BaseRepoLocks
+    _merger_api_class = MergerApi
 
     def __init__(
         self,
@@ -110,7 +111,7 @@ class BaseMergeServer(metaclass=ABCMeta):
 
         self.merger_loop_wake_event = threading.Event()
 
-        self.merger_api = MergerApi(
+        self.merger_api = self._merger_api_class(
             self.zk_client,
             merge_request_callback=self.merger_loop_wake_event.set,
         )

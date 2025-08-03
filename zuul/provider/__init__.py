@@ -38,7 +38,10 @@ class CNameMixin:
 
 
 class BaseProviderImage(CNameMixin, metaclass=abc.ABCMeta):
-    inheritable_schema = assemble(
+    inheritable_cloud_schema = assemble(
+        provider_schema.common_image,
+    )
+    inheritable_zuul_schema = assemble(
         provider_schema.common_image,
     )
     schema = assemble(
@@ -48,7 +51,11 @@ class BaseProviderImage(CNameMixin, metaclass=abc.ABCMeta):
 
     def __init__(self, image_config, provider_config):
         new_config = image_config.copy()
-        for k in self.inheritable_schema.schema.keys():
+        if image_config['type'] == 'zuul':
+            schema = self.inheritable_zuul_schema
+        else:
+            schema = self.inheritable_cloud_schema
+        for k in schema.schema.keys():
             if k not in new_config and k in provider_config:
                 new_config[k] = provider_config[k]
 
@@ -203,8 +210,26 @@ class BaseProviderSchema(metaclass=abc.ABCMeta):
         return schema
 
 
+class BaseImageUploadJob:
+    """Abstract class to encapsulate an image import or upload
+
+    This class should contain all the information needed to perform
+    either an image import or image upload.  The run method will be
+    executed asynchronously in an executor.
+    """
+
+    @abc.abstractmethod
+    def run(self):
+        """Run the import or upload.
+
+        :return: The external id of the image in the cloud
+        """
+        pass
+
+
 class BaseProvider(zkobject.PolymorphicZKObjectMixin,
                    zkobject.ShardedZKObject):
+
     """Base class for provider."""
     schema = BaseProviderSchema().getProviderSchema()
 
@@ -381,11 +406,21 @@ class BaseProvider(zkobject.PolymorphicZKObjectMixin,
         """
         tags = dict()
 
-        # TODO: add other potentially useful attrs from nodepool
-        attributes = model.Attributes(
-            request_id=request.uuid if request else None,
-            tenant_name=provider.tenant_name if provider else None,
+        attrs = dict(
+            request_id=getattr(request, "uuid", None),
         )
+        request_attrs = (
+            "pipeline_name",
+            "buildset_uuid",
+            "job_uuid",
+            "job_name",
+            "labels",
+            "zuul_event_id",
+            "tenant_name",
+        )
+        attrs.update({a: getattr(request, a, None) for a in request_attrs})
+
+        attributes = model.Attributes(**attrs)
         for k, v in label.tags.items():
             try:
                 tags[k] = v.format(**attributes)
@@ -528,10 +563,54 @@ class BaseProvider(zkobject.PolymorphicZKObjectMixin,
     # The following methods must be implemented only if image
     # management is supported:
 
-    def uploadImage(self, provider_image, image_name, filename,
-                    image_format=None, metadata=None, md5=None,
-                    sha256=None):
-        """Upload the image to the cloud
+    def getImageImportJob(self, provider_image, image_name, url,
+                          image_format, metadata, md5, sha256):
+        """Get an image import job if able
+
+        If the provider can support a direct image import from the
+        supplied URL, then return a BaseImageUploadJob that will do so.
+
+        :param provider_image ProviderImageConfig:
+            The provider's config for this image
+        :param image_name str: The name of the image
+        :param url str: The URL of the image
+        :param image_format str: The format of the image (e.g., "qcow")
+        :param metadata dict: A dictionary of metadata that must be
+            stored on the image in the cloud.
+        :param md5 str: The md5 hash of the image file
+        :param sha256 str: The sha256 hash of the image file
+
+        :return: A BaseImageUploadJob that will import the image
+
+        """
+        # Most drivers probably won't implement this.
+        return None
+
+    def downloadUrl(self, url, path):
+        """Attempt to download the given URL to the destination path
+
+        If this provider is able to download URLs of the given form,
+        it should attempt to do so and save the result.  If it can not
+        handle the given URL, return None.
+
+        This is an optional method that may be implemented in order to
+        allow for image storage in cloud-specific storage systems.
+
+        :param url str: The URL of the file to download
+        :param path str: The local destination path
+
+        :return: None if the provider can not handle the URL, or the
+        path if it sucessfully downloaded it.
+
+        """
+        return None
+
+    def getImageUploadJob(self, provider_image, image_name, filename,
+                          image_format, metadata, md5, sha256):
+        """Get an image upload job
+
+        Return a BaseImageUploadJob that will upload the local filename
+        to the provider as an image.
 
         :param provider_image ProviderImageConfig:
             The provider's config for this image
@@ -543,8 +622,10 @@ class BaseProvider(zkobject.PolymorphicZKObjectMixin,
         :param md5 str: The md5 hash of the image file
         :param sha256 str: The sha256 hash of the image file
 
-        :return: The external id of the image in the cloud
+        :return: A BaseImageUploadJob that will upload the image
+
         """
+        # Required if the driver handles images at all.
         raise NotImplementedError()
 
     def deleteImage(self, external_id):

@@ -1,0 +1,7 @@
+---
+features:
+  - |
+    The :attr:`nodeset.alternatives` feature will now be used if
+    Ansible reports an unreachable host while running a job.  This can
+    be used to fall back to a more reliable nodeset if connectivity to
+    the nodeset is interrupted while running.

@@ -51,6 +51,16 @@ class ExecutorClient(object):
         self.log.debug("Stopping")
         self.executor_api.stop()
 
+    def getImageFormats(self, job, item):
+        if not job.image_build_name:
+            return None
+        formats = set()
+        for provider in item.manager.tenant.layout.providers.values():
+            for image in provider.images.values():
+                if image.name == job.image_build_name:
+                    formats.add(image.format)
+        return formats
+
     def execute(self, job, nodes, item, pipeline, executor_zone,
                 dependent_changes=[], merger_items=[]):
         log = get_annotated_logger(self.log, item.event)
@@ -66,8 +76,18 @@ class ExecutorClient(object):
             uuid, self.sched.connections,
             job, item, pipeline, dependent_changes, merger_items,
             redact_secrets_and_keys=False)
+
+        # Pass webroot to the executor for generating oidc token
+        web_root = manager.tenant.web_root
+        if web_root:
+            params["zuul_root_url"] = web_root.split("/t/")[0].rstrip("/")
         # TODO: deprecate and remove this variable?
         params["zuul"]["_inheritance_path"] = list(job.inheritance_path)
+
+        if job.image_build_name:
+            params["zuul"]["image_build_name"] = job.image_build_name
+        if image_formats := self.getImageFormats(job, item):
+            params["zuul"]["image_formats"] = list(image_formats)
 
         semaphore_handler = manager.tenant.semaphore_handler
         params['semaphore_handle'] = semaphore_handler.getSemaphoreHandle(

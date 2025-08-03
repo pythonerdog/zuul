@@ -1,4 +1,5 @@
 # Copyright 2020 BMW Group
+# Copyright 2021-2025 Acme Gating, LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may
 # not use this file except in compliance with the License. You may obtain
@@ -31,7 +32,7 @@ from zuul import model
 from zuul.lib.collections import DefaultKeyDict
 from zuul.lib.logutil import get_annotated_logger
 from zuul.zk import ZooKeeperSimpleBase, sharding
-from zuul.zk.election import SessionAwareElection
+from zuul.zk.election import SessionAwareElection, RendezvousElection
 
 RESULT_EVENT_TYPE_MAP = {
     "BuildCompletedEvent": model.BuildCompletedEvent,
@@ -60,6 +61,7 @@ MANAGEMENT_EVENT_TYPE_MAP = {
 
 # /zuul/events/tenant   TENANT_ROOT
 #   /{tenant}           TENANT_NAME_ROOT
+#     /state            TENANT_EVENT_STATE
 #     /management       TENANT_MANAGEMENT_ROOT
 #       /queue          TENANT_MANAGEMENT_QUEUE
 #       /data           [side channel data]
@@ -92,6 +94,7 @@ PIPELINE_TRIGGER_ROOT = PIPELINE_NAME_ROOT + "/trigger"
 PIPELINE_TRIGGER_QUEUE = PIPELINE_TRIGGER_ROOT + "/queue"
 PIPELINE_RESULT_ROOT = PIPELINE_NAME_ROOT + "/result"
 PIPELINE_RESULT_QUEUE = PIPELINE_RESULT_ROOT + "/queue"
+TENANT_EVENT_STATE = TENANT_NAME_ROOT + "/state"
 
 CONNECTION_ROOT = "/zuul/events/connection"
 
@@ -121,6 +124,9 @@ class EventWatcher(ZooKeeperSimpleBase):
         self.callback = callback
         self.watched_tenants = set()
         self.watched_pipelines = set()
+        self.tenant_state = DefaultKeyDict(
+            lambda tenant_name: model.TenantEventState(
+                TENANT_EVENT_STATE.format(tenant=tenant_name)))
         self.kazoo_client.ensure_path(TENANT_ROOT)
         self.kazoo_client.ChildrenWatch(TENANT_ROOT, self._tenantWatch)
 
@@ -134,18 +140,25 @@ class EventWatcher(ZooKeeperSimpleBase):
             if tenant_name in self.watched_tenants:
                 continue
 
-            for path in (TENANT_MANAGEMENT_QUEUE,
-                         TENANT_TRIGGER_QUEUE):
-                path = path.format(tenant=tenant_name)
-                self.kazoo_client.ensure_path(path)
+            if self.callback:
+                # only set these watches if we're in the scheduler context
+                for path in (TENANT_MANAGEMENT_QUEUE,
+                             TENANT_TRIGGER_QUEUE):
+                    path = path.format(tenant=tenant_name)
+                    self.kazoo_client.ensure_path(path)
+                    self.kazoo_client.ChildrenWatch(
+                        path, self._eventWatch, send_event=True)
+
+                pipelines_path = PIPELINE_ROOT.format(tenant=tenant_name)
+                self.kazoo_client.ensure_path(pipelines_path)
                 self.kazoo_client.ChildrenWatch(
-                    path, self._eventWatch, send_event=True)
+                    pipelines_path, self._makePipelineWatcher(tenant_name))
 
-            pipelines_path = PIPELINE_ROOT.format(tenant=tenant_name)
-            self.kazoo_client.ensure_path(pipelines_path)
-            self.kazoo_client.ChildrenWatch(
-                pipelines_path, self._makePipelineWatcher(tenant_name))
-
+            # both scheduler and zuul-web are interested in these
+            state_path = TENANT_EVENT_STATE.format(tenant=tenant_name)
+            self.kazoo_client.DataWatch(
+                state_path,
+                self._makeStateWatcher(tenant_name))
             self.watched_tenants.add(tenant_name)
 
     def _pipelineWatch(self, tenant_name, pipelines):
@@ -184,6 +197,21 @@ class EventWatcher(ZooKeeperSimpleBase):
                 self.callback()
         elif event.type == EventType.CHILD:
             self.callback()
+
+    def _makeStateWatcher(self, tenant_name):
+        def watch(data=None, event=None):
+            return self._stateWatch(tenant_name, data, event)
+        return watch
+
+    def _stateWatch(self, tenant_name,
+                    data=None, stat=None):
+        if data is None:
+            self.tenant_state[tenant_name].reset()
+        else:
+            self.tenant_state[tenant_name]._updateFromRaw(
+                data, stat, None, None)
+            if self.callback:
+                self.callback()
 
 
 class ZooKeeperEventQueue(ZooKeeperSimpleBase, Iterable):
@@ -910,15 +938,17 @@ class ConnectionEventQueue(ZooKeeperEventQueue):
 
     log = logging.getLogger("zuul.ConnectionEventQueue")
 
-    def __init__(self, client, connection_name):
+    def __init__(self, client, connection_name, component_info):
         queue_root = "/".join((CONNECTION_ROOT, connection_name, "events"))
         super().__init__(client, queue_root)
         self.election_root = "/".join(
             (CONNECTION_ROOT, connection_name, "election")
         )
         self.kazoo_client.ensure_path(self.election_root)
-        self.election = SessionAwareElection(
-            self.kazoo_client, self.election_root)
+        if component_info:
+            self.election = RendezvousElection(
+                self.kazoo_client, self.election_root,
+                "scheduler", component_info)
 
     def _eventWatch(self, callback, event_list):
         if event_list:

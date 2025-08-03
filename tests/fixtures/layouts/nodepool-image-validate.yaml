@@ -37,7 +37,7 @@
     nodeset:
       nodes:
         - name: node
-          label: debian-local
+          label: debian-local-normal
 
 - project:
     name: org/common-config
@@ -67,6 +67,7 @@
     host-key-checking: false
     boot-timeout: 120
     launch-timeout: 600
+    key-name: zuul
     object-storage:
       bucket-name: zuul
     flavors:
@@ -83,5 +84,16 @@
 - provider:
     name: aws-us-east-1-main
     section: aws-us-east-1
+    labels:
+      - debian-local-normal
+
+- section:
+    name: aws-eu-central-1
+    parent: aws-base
+    region: eu-central-1
+
+- provider:
+    name: aws-eu-central-1-main
+    section: aws-eu-central-1
     labels:
       - debian-local-normal

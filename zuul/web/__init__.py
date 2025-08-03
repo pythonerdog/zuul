@@ -1,5 +1,5 @@
 # Copyright (c) 2017 Red Hat
-# Copyright 2021-2024 Acme Gating, LLC
+# Copyright 2021-2025 Acme Gating, LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,6 +17,8 @@ import cherrypy
 import socket
 from collections import defaultdict
 
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.interval import IntervalTrigger
 from opentelemetry import trace
 from ws4py.server.cherrypyserver import WebSocketPlugin, WebSocketTool
 from ws4py.websocket import WebSocket
@@ -24,6 +26,7 @@ import codecs
 import copy
 from datetime import datetime
 import json
+import jwt
 import logging
 import os
 import time
@@ -41,6 +44,7 @@ from zuul import exceptions
 from zuul.configloader import ConfigLoader
 from zuul.connection import BaseConnection, ReadOnlyBranchCacheError
 import zuul.lib.repl
+from zuul.launcher.client import LauncherClient
 from zuul.lib import commandsocket, encryption, streamer_utils, tracing
 from zuul.lib.ansible import AnsibleManager
 from zuul.lib.jsonutil import ZuulJSONEncoder
@@ -50,12 +54,13 @@ from zuul.lib.re2util import filter_allowed_disallowed
 from zuul import model
 from zuul.model import (
     Abide,
-    BuildSet,
     Branch,
+    BuildSet,
     ChangeQueue,
     DequeueEvent,
     EnqueueEvent,
     HoldRequest,
+    NodesetRequest,
     PromoteEvent,
     ProviderNode,
     QueueItem,
@@ -68,18 +73,20 @@ from zuul.zk import ZooKeeperClient
 from zuul.zk.components import COMPONENT_REGISTRY, WebComponent
 from zuul.zk.config_cache import SystemConfigCache, UnparsedConfigCache
 from zuul.zk.event_queues import (
+    EventWatcher,
     TenantManagementEventQueue,
     TenantTriggerEventQueue,
     PipelineManagementEventQueue,
     PipelineResultEventQueue,
     PipelineTriggerEventQueue,
+    TENANT_EVENT_STATE,
 )
 from zuul.zk.executor import ExecutorApi
 from zuul.zk.image_registry import (
     ImageBuildRegistry,
     ImageUploadRegistry,
 )
-from zuul.zk.launcher import LockableZKObjectCache
+from zuul.zk.launcher import RequestCache, NodeCache
 from zuul.zk.layout import (
     LayoutProvidersStore,
     LayoutStateStore,
@@ -455,6 +462,8 @@ class ImageUploadConverter:
     def toDict(upload):
         timestamp = _datetimeToString(
             datetime.utcfromtimestamp(upload.timestamp))
+        state_time = _datetimeToString(
+            datetime.utcfromtimestamp(upload.state_time))
         ret = {
             'uuid': upload.uuid,
             'canonical_name': upload.canonical_name,
@@ -463,6 +472,10 @@ class ImageUploadConverter:
             'external_id': upload.external_id,
             'timestamp': timestamp,
             'validated': upload.validated,
+            'state': upload.state,
+            'state_time': state_time,
+            'is_locked': upload.is_locked,
+            'lock_holder': upload.lock_holder,
         }
         return ret
 
@@ -476,6 +489,10 @@ class ImageUploadConverter:
             'external_id': str,
             'timestamp': str,
             'validated': str,
+            'state': str,
+            'state_time': str,
+            'is_locked': bool,
+            'lock_holder': str,
         })
 
 
@@ -486,6 +503,8 @@ class ImageBuildArtifactConverter:
     def toDict(tenant, build, uploads):
         timestamp = _datetimeToString(
             datetime.utcfromtimestamp(build.timestamp))
+        state_time = _datetimeToString(
+            datetime.utcfromtimestamp(build.state_time))
         ret = {
             'uuid': build.uuid,
             'canonical_name': build.canonical_name,
@@ -497,6 +516,10 @@ class ImageBuildArtifactConverter:
             'url': build.url,
             'timestamp': timestamp,
             'validated': build.validated,
+            'state': build.state,
+            'state_time': state_time,
+            'is_locked': build.is_locked,
+            'lock_holder': build.lock_holder,
         }
         if uploads:
             ret['uploads'] = [ImageUploadConverter.toDict(u)
@@ -516,6 +539,10 @@ class ImageBuildArtifactConverter:
             'url': str,
             'timestamp': str,
             'validated': str,
+            'state': str,
+            'state_time': str,
+            'is_locked': bool,
+            'lock_holder': str,
             'uploads': [ImageUploadConverter.schema()],
         })
 
@@ -601,6 +628,8 @@ class ProviderNodeConverter:
     # API output.
     @staticmethod
     def toDict(node):
+        state_time = _datetimeToString(
+            datetime.utcfromtimestamp(node.state_time))
         ret = {
             'id': node.uuid,
             'uuid': node.uuid,
@@ -609,10 +638,25 @@ class ProviderNodeConverter:
             'label': node.label,
             'connection_type': node.connection_type,
             'external_id': None,
-            'provider': node.provider,
             'state': node.state,
-            'state_time': node.state_time,
-            'comment': None,
+            'state_time': state_time,
+            'comment': getattr(node, 'comment', None),
+            'max_ready_age': node.max_ready_age,
+            'interface_ip': node.interface_ip,
+            'public_ipv4': node.public_ipv4,
+            'private_ipv4': node.private_ipv4,
+            'public_ipv6': node.public_ipv6,
+            'private_ipv6': node.private_ipv6,
+            'slot': node.slot,
+            'az': node.az,
+            'cloud': node.cloud,
+            'provider': node.provider,
+            'region': node.region,
+            'username': node.username,
+            'hold_expiration': node.hold_expiration,
+            'quota': node.quota.getResources(),
+            'is_locked': node.is_locked,
+            'lock_holder': node.lock_holder,
         }
         return ret
 
@@ -626,10 +670,96 @@ class ProviderNodeConverter:
             'label': str,
             'connection_type': str,
             'external_id': str,
-            'provider': str,
             'state': str,
             'state_time': str,
             'comment': str,
+            'max_ready_age': int,
+            'interface_ip': str,
+            'public_ipv4': str,
+            'private_ipv4': str,
+            'public_ipv6': str,
+            'private_ipv6': str,
+            'slot': int,
+            'az': str,
+            'cloud': str,
+            'provider': str,
+            'region': str,
+            'username': str,
+            'hold_expiration': int,
+            'quota': dict,
+            'is_locked': bool,
+            'lock_holder': str,
+        })
+
+
+class NodesetRequestConverter:
+    # A class to encapsulate the conversion of NodesetRequest objects
+    # to API output.
+    @staticmethod
+    def toDict(request):
+        request_time = _datetimeToString(
+            datetime.utcfromtimestamp(request.request_time))
+
+        provider_node_data = [
+            {
+                'uuid': data['uuid'],
+                'executor_zone': data['executor_zone'],
+                'failed_providers': data['failed_providers'],
+            }
+            for data in request.provider_node_data
+        ]
+
+        ret = {
+            'uuid': request.uuid,
+            'state': request.state,
+            'pipeline_name': request.pipeline_name,
+            'buildset_uuid': request.buildset_uuid,
+            # Omitting job_uuid because it is not externally
+            # meaningful (it is not a build uuid, and it may be
+            # confused as one if we don't otherwise expose the frozen
+            # job uuid).
+            'job_name': request.job_name,
+            'labels': request.labels,
+            'priority': request.priority,
+            'request_time': request_time,
+            'zuul_event_id': request.zuul_event_id,
+            'image_names': request.image_names,
+            'image_upload_uuid': request.image_upload_uuid,
+            'relative_priority': request.relative_priority,
+            'provider_node_data': provider_node_data,
+            'is_locked': request.is_locked,
+            'lock_holder': request.lock_holder,
+        }
+        return ret
+
+    @staticmethod
+    def schema():
+        return Prop('The nodeset request', {
+            'uuid': str,
+            'state': str,
+            'pipeline_name': str,
+            'buildset_uuid': str,
+            # Omitting job_uuid because it is not externally
+            # meaningful (it is not a build uuid, and it may be
+            # confused as one if we don't otherwise expose the frozen
+            # job uuid).
+            'job_name': str,
+            'labels': [str],
+            'priority': int,
+            'request_time': str,
+            'zuul_event_id': str,
+            'image_names': [str],
+            'image_upload_uuid': str,
+            'relative_priority': int,
+            'provider_node_data': [
+                {
+                    'uuid': str,
+                    'executor_zone': str,
+                    'failed_providers': [str],
+                }
+            ],
+            'is_locked': bool,
+            'lock_holder': str,
         })
 
 
@@ -1117,6 +1247,98 @@ class LogStreamer(object):
             return self.websocket.logClose(1000, "Remote error")
 
 
+class ZuulWebOIDC(object):
+    def __init__(self, zuulweb):
+        self.zuulweb = zuulweb
+        self.keystore = zuulweb.keystore
+        # We listen to the keystore cache for changes to the OIDC signing keys
+        # instead of listening to the zk event to make sure the zuul-web
+        # cache is updated only after the keystore cache is updated.
+        if self.keystore.oidc_signing_keys_cache:
+            self.keystore.oidc_signing_keys_cache.addCacheUpdatedListener(self)
+
+        self.jwks_cache = None
+
+    # This method is called when the keystore cache is updated
+    def onCacheUpdated(self):
+        self.jwks_cache = self._getJwks()
+
+    @cherrypy.expose
+    @cherrypy.tools.handle_options()
+    @cherrypy.tools.json_out(content_type='application/json; charset=utf-8')
+    def global_openid_configuration(self):
+        return self.tenant_openid_configuration()
+
+    @cherrypy.expose
+    @cherrypy.tools.save_params()
+    @cherrypy.tools.handle_options()
+    @cherrypy.tools.json_out(content_type='application/json; charset=utf-8')
+    def tenant_openid_configuration(self, tenant_name=None):
+        # If tenant_name is None or does not exist,
+        # fallback to the global web_root
+        web_root = self.zuulweb.abide.tenants.get(
+            tenant_name, self.zuulweb.globals
+        ).web_root
+        # If web_root is not configured in zuul and tenant config,
+        # just keep it empty, but it is not really useful for OIDC
+        web_root = web_root.split("/t/")[0].rstrip("/") if web_root else ""
+
+        return {
+            "issuer": web_root,
+            "jwks_uri": f"{web_root}/oidc/.well-known/jwks",
+            "claims_supported": [
+                "aud", "iat", "iss", "name", "sub", "custom"
+            ],
+            "response_types_supported": ["id_token"],
+            "id_token_signing_alg_values_supported": (
+                self.zuulweb.globals.oidc_supported_signing_algorithms),
+            "subject_types_supported": ["public"]
+        }
+
+    @cherrypy.expose
+    @cherrypy.tools.handle_options()
+    @cherrypy.tools.json_out(content_type='application/json; charset=utf-8')
+    def global_jwks(self):
+        return self.tenant_jwks()
+
+    @cherrypy.expose
+    @cherrypy.tools.save_params()
+    @cherrypy.tools.handle_options()
+    @cherrypy.tools.json_out(content_type='application/json; charset=utf-8')
+    def tenant_jwks(self, tenant_name=None):
+        if not self.jwks_cache:
+            self.jwks_cache = self._getJwks()
+
+        return self.jwks_cache
+
+    def _getJwks(self):
+        jwks_keys = []
+        for alg in self.zuulweb.globals.oidc_supported_signing_algorithms:
+            signing_key_data = self.keystore.getOidcSigningKeyData(
+                algorithm=alg)
+            for key in signing_key_data.keys:
+                pem_private_key = key["private_key"].encode("utf-8")
+                _, public_key = encryption.deserialize_rsa_keypair(
+                    pem_private_key, self.keystore.password_bytes)
+                jwks_keys.append(
+                    self._generateJwkDict(alg, key['version'], public_key))
+
+        return {
+            "keys": jwks_keys
+        }
+
+    def _generateJwkDict(self, alg, version, public_key):
+        Algorithm = jwt.algorithms.get_default_algorithms()[alg]
+        jwk_dict = Algorithm.to_jwk(public_key, as_dict=True)
+        jwk_dict.update({
+            "alg": alg,
+            "use": "sig",
+            "kid": f"{alg}-{version}"
+        })
+
+        return jwk_dict
+
+
 class ZuulWebAPI(object):
     def __init__(self, zuulweb):
         self.zuulweb = zuulweb
@@ -1259,6 +1481,39 @@ class ZuulWebAPI(object):
             pipeline_name].put(event)
 
         return True
+
+    @cherrypy.expose
+    @cherrypy.tools.json_in()
+    @cherrypy.tools.json_out(content_type='application/json; charset=utf-8')
+    @cherrypy.tools.handle_options(allowed_methods=['POST', ])
+    @cherrypy.tools.check_tenant_auth(require_admin=True)
+    def state_post(self, tenant_name, tenant, auth):
+        body = cherrypy.request.json
+        current_state = self.zuulweb.event_watcher.tenant_state[tenant.name]
+        with self.zuulweb.createZKContext(None, self.log) as ctx:
+            path = TENANT_EVENT_STATE.format(tenant=tenant_name)
+            tqs = model.TenantEventState(path)
+            self.log.info('User %s setting tenant %s state to %s',
+                          auth.uid, tenant_name, body)
+
+            reason = body.get('reason')
+            if reason:
+                # We limit the reason to 4096 chars to limit the
+                # zk node size.
+                reason = str(reason[:4096])
+            tqs._set(
+                trigger_queue_discarding=bool(
+                    body.get('trigger_queue_discarding',
+                             current_state.trigger_queue_discarding)),
+                trigger_queue_paused=bool(
+                    body.get('trigger_queue_paused',
+                             current_state.trigger_queue_paused)),
+                result_queue_paused=bool(
+                    body.get('result_queue_paused',
+                             current_state.result_queue_paused)),
+                reason=reason,
+            )
+            tqs.internalCreate(ctx)
 
     @cherrypy.expose
     @cherrypy.tools.json_out(content_type='application/json; charset=utf-8')
@@ -1413,7 +1668,7 @@ class ZuulWebAPI(object):
         # User is authorized, so remove the autohold request
         self.log.debug("Removing autohold %s", request)
         try:
-            self.zk_nodepool.deleteHoldRequest(request)
+            self.zk_nodepool.deleteHoldRequest(request, self.zuulweb.launcher)
         except Exception:
             self.log.exception(
                 "Error removing autohold request %s:", request)
@@ -1463,6 +1718,7 @@ class ZuulWebAPI(object):
             'semaphores': '/api/tenant/{tenant}/semaphores',
             'labels': '/api/tenant/{tenant}/labels',
             'nodes': '/api/tenant/{tenant}/nodes',
+            'nodeset_requests': '/api/tenant/{tenant}/nodeset-requests',
             'key': '/api/tenant/{tenant}/key/{project:.*}.pub',
             'project_ssh_key': '/api/tenant/{tenant}/project-ssh-key/'
                                '{project:.*}.pub',
@@ -1703,6 +1959,10 @@ class ZuulWebAPI(object):
         data['trigger_event_queue'] = {}
         data['trigger_event_queue']['length'] = len(
             self.zuulweb.trigger_events[tenant.name])
+
+        data['state'] =\
+            self.zuulweb.event_watcher.tenant_state[tenant.name].toDict()
+
         data['management_event_queue'] = {}
         data['management_event_queue']['length'] = len(
             self.zuulweb.management_events[tenant.name]
@@ -1975,7 +2235,7 @@ class ZuulWebAPI(object):
                 if image.type == 'zuul':
                     uploads.extend([
                         u for u in iur.getUploadsForImage(image.canonical_name)
-                        if provider.canonical_name in u.providers
+                        if u.isPermittedForProvider(image, provider)
                     ])
                     artifact_uuids = set([u.artifact_uuid for u in uploads])
                     build_artifacts.extend([
@@ -2026,18 +2286,24 @@ class ZuulWebAPI(object):
         ret = []
         ibr = self.zuulweb.image_build_registry
         iur = self.zuulweb.image_upload_registry
-        provider_cnames = set([
-            p.canonical_name
-            for p in self.zuulweb.tenant_providers[tenant_name]
-        ])
+        providers = self.zuulweb.tenant_providers[tenant_name]
+
+        permitted_upload_uuids = set()
+        for provider in providers:
+            for image in provider.images.values():
+                if image.type == 'zuul':
+                    for upload in iur.getUploadsForImage(image.canonical_name):
+                        if upload.isPermittedForProvider(image, provider):
+                            permitted_upload_uuids.add(upload.uuid)
+
         for image in tenant.layout.images.values():
             if image.type == 'zuul':
                 # Include uploads used by providers in the tenant
                 uploads = [
                     u for u in iur.getUploadsForImage(image.canonical_name)
-                    if provider_cnames.intersection(set(u.providers))
+                    if u.uuid in permitted_upload_uuids
                 ]
-                artifact_uuids = set([u.artifact_uuid for u in uploads])
+                artifact_uuids = set(u.artifact_uuid for u in uploads)
                 # Include build artifacts used by relevant uploads
                 build_artifacts = [
                     b for b in ibr.getArtifactsForImage(image.canonical_name)
@@ -2194,8 +2460,74 @@ class ZuulWebAPI(object):
             provider_cnames = [p.canonical_name for p in providers]
             for node in self.zuulweb.nodes_cache.getItems():
                 if node.provider in provider_cnames:
-                    ret.append(ProviderNodeConverter.toDict(node))
+                    if node.tenant_name == tenant.name:
+                        ret.append(ProviderNodeConverter.toDict(node))
+                elif node.provider is None:
+                    for provider in providers:
+                        if node.isPermittedForProvider(provider):
+                            ret.append(ProviderNodeConverter.toDict(node))
         return ret
+
+    @cherrypy.expose
+    @cherrypy.tools.save_params()
+    @cherrypy.tools.json_in()
+    @cherrypy.tools.json_out(content_type='application/json; charset=utf-8')
+    @cherrypy.tools.handle_options(allowed_methods=['PUT', ])
+    @cherrypy.tools.check_tenant_auth()
+    def nodes_put(self, tenant_name, tenant, auth, node_id):
+        node = self.zuulweb.nodes_cache.getItem(node_id)
+        if not node or node.tenant_name != tenant.name:
+            raise cherrypy.HTTPError(404, "Node not found")
+
+        body = cherrypy.request.json
+        state = body.get('state')
+        if state not in {node.State.HOLD, node.State.USED}:
+            raise cherrypy.HTTPError(400, 'Invalid request body')
+
+        # We just let the LockException propagate up if we can't lock
+        # it.
+        with self.zuulweb.createZKContext(None, self.log) as ctx:
+            with node.locked(ctx, blocking=False):
+                self.log.info(f'User {auth.uid} setting node '
+                              f'{node_id} to {state}')
+                with node.activeContext(ctx):
+                    node.setState(state)
+        cherrypy.response.status = 201
+
+    @cherrypy.expose
+    @cherrypy.tools.save_params()
+    @cherrypy.tools.json_out(content_type='application/json; charset=utf-8')
+    @cherrypy.tools.handle_options()
+    @cherrypy.tools.check_tenant_auth()
+    def nodeset_requests(self, tenant_name, tenant, auth):
+        ret = []
+        # TODO: remove this providers check once nodepool is gone
+        providers = self.zuulweb.tenant_providers.get(tenant.name)
+        if providers:
+            for request in self.zuulweb.requests_cache.getItems():
+                if request.tenant_name == tenant.name:
+                    ret.append(NodesetRequestConverter.toDict(request))
+        return ret
+
+    @cherrypy.expose
+    @cherrypy.tools.save_params()
+    @cherrypy.tools.json_out(content_type='application/json; charset=utf-8')
+    @cherrypy.tools.handle_options(allowed_methods=['DELETE', ])
+    @cherrypy.tools.check_tenant_auth()
+    def nodeset_requests_delete(self, tenant_name, tenant, auth, request_id):
+        request = self.zuulweb.requests_cache.getItem(request_id)
+        if not request or request.tenant_name != tenant.name:
+            raise cherrypy.HTTPError(404, "Request not found")
+
+        # We just let the LockException propagate up if we can't lock
+        # it.
+        with self.zuulweb.createZKContext(None, self.log) as ctx:
+            with request.locked(ctx, blocking=False):
+                self.log.info(f'User {auth.uid} deleting nodeset request '
+                              f'{request_id}')
+                with request.activeContext(ctx):
+                    request.delete(ctx)
+        cherrypy.response.status = 204
 
     @cherrypy.expose
     @cherrypy.tools.save_params()
@@ -2779,9 +3111,10 @@ class FakeCacheKey:
 class ZuulWeb(object):
     log = logging.getLogger("zuul.web")
     tracer = trace.get_tracer("zuul")
+    _stats_interval = IntervalTrigger(seconds=60)
 
     @staticmethod
-    def generateRouteMap(api, include_auth):
+    def generateRouteMap(api, oidc, include_auth):
         route_map = cherrypy.dispatch.RoutesDispatcher()
         route_map.connect('api', '/api',
                           controller=api, action='index')
@@ -2832,6 +3165,11 @@ class ZuulWeb(object):
                 controller=api,
                 conditions=dict(method=['POST']),
                 action='autohold_project_post')
+            route_map.connect(
+                'api',
+                '/api/tenant/{tenant_name}/state',
+                controller=api,
+                action='state_post')
             route_map.connect(
                 'api',
                 '/api/tenant/{tenant_name}/project/{project_name:.*}/enqueue',
@@ -2900,6 +3238,20 @@ class ZuulWeb(object):
                           controller=api, action='labels')
         route_map.connect('api', '/api/tenant/{tenant_name}/nodes',
                           controller=api, action='nodes')
+        route_map.connect('api',
+                          '/api/tenant/{tenant_name}/'
+                          'nodes/{node_id}',
+                          controller=api,
+                          conditions=dict(method=['PUT', 'OPTIONS']),
+                          action='nodes_put')
+        route_map.connect('api', '/api/tenant/{tenant_name}/nodeset-requests',
+                          controller=api, action='nodeset_requests')
+        route_map.connect('api',
+                          '/api/tenant/{tenant_name}/'
+                          'nodeset-requests/{request_id}',
+                          controller=api,
+                          conditions=dict(method=['DELETE', 'OPTIONS']),
+                          action='nodeset_requests_delete')
         route_map.connect('api', '/api/tenant/{tenant_name}/key/'
                           '{project_name:.*}.pub',
                           controller=api, action='key')
@@ -2928,6 +3280,19 @@ class ZuulWeb(object):
                           controller=api, action='config_errors')
         route_map.connect('api', '/api/tenant/{tenant_name}/tenant-status',
                           controller=api, action='tenant_status')
+        # whitelabel webroot access
+        route_map.connect('oidc', '/{tenant_name}/.well-known/jwks',
+                          controller=oidc, action='tenant_jwks')
+        route_map.connect(
+            'oidc', '/{tenant_name}/.well-known/openid-configuration',
+            controller=oidc, action='tenant_openid_configuration')
+        # global webroot access
+        route_map.connect('oidc', '/.well-known/jwks',
+                          controller=oidc, action='global_jwks')
+        route_map.connect(
+            'oidc', '/.well-known/openid-configuration',
+            controller=oidc, action='global_openid_configuration')
+
         return route_map
 
     def __init__(self,
@@ -2966,6 +3331,8 @@ class ZuulWeb(object):
             self.zk_client, self.hostname, version=get_version_string())
         self.component_info.register()
 
+        self.event_watcher = EventWatcher(self.zk_client, None)
+
         self.monitoring_server = MonitoringServer(self.config, 'web',
                                                   self.component_info)
         self.monitoring_server.start()
@@ -3001,13 +3368,21 @@ class ZuulWeb(object):
             self.zk_client, self.connections, self.system.system_id)
         self.image_build_registry = ImageBuildRegistry(self.zk_client)
         self.image_upload_registry = ImageUploadRegistry(self.zk_client)
-        self.nodes_cache = LockableZKObjectCache(
+        self.requests_cache = RequestCache(
+            self.zk_client,
+            None,
+            root=NodesetRequest.ROOT,
+            items_path=NodesetRequest.REQUESTS_PATH,
+            locks_path=NodesetRequest.LOCKS_PATH,
+            zkobject_class=NodesetRequest)
+        self.nodes_cache = NodeCache(
             self.zk_client,
             None,
             root=ProviderNode.ROOT,
             items_path=ProviderNode.NODES_PATH,
             locks_path=ProviderNode.LOCKS_PATH,
             zkobject_class=ProviderNode)
+        self.launcher = LauncherClient(self.zk_client, None)
 
         self.management_events = TenantManagementEventQueue.createRegistry(
             self.zk_client)
@@ -3059,9 +3434,10 @@ class ZuulWeb(object):
         )
 
         api = ZuulWebAPI(self)
+        oidc = ZuulWebOIDC(self)
         self.api = api
         route_map = self.generateRouteMap(
-            api, bool(self.authenticators.authenticators))
+            api, oidc, bool(self.authenticators.authenticators))
         # Add fallthrough routes at the end for the static html/js files
         route_map.connect(
             'root_static', '/{path:.*}',
@@ -3075,6 +3451,7 @@ class ZuulWeb(object):
                     controller,
                     '/api/connection/%s' % connection.connection_name)
 
+        self.apsched = BackgroundScheduler()
         cherrypy.tools.stats = StatsTool(self.statsd, self.metrics)
 
         conf = {
@@ -3091,8 +3468,11 @@ class ZuulWeb(object):
             },
         })
 
-        app = cherrypy.tree.mount(api, '/', config=conf)
-        app.log = ZuulCherrypyLogManager(appid=app.log.appid)
+        api_app = cherrypy.tree.mount(api, '/', config=conf)
+        api_app.log = ZuulCherrypyLogManager(appid=api_app.log.appid)
+
+        oidc_app = cherrypy.tree.mount(oidc, '/oidc', config=conf)
+        oidc_app.log = ZuulCherrypyLogManager(appid=oidc_app.log.appid)
 
     @property
     def port(self):
@@ -3138,6 +3518,11 @@ class ZuulWeb(object):
             else:
                 break
 
+        self.apsched.start()
+        self.apsched.add_job(cherrypy.tools.stats.emitStats,
+                             name="Regular cherrypy stats reporting",
+                             trigger=self._stats_interval)
+
         self.log.info("Starting HTTP listeners")
         self.stream_manager.start()
         self.wsplugin = WebSocketPlugin(cherrypy.engine)
@@ -3155,8 +3540,12 @@ class ZuulWeb(object):
 
     def stop(self):
         self.log.info("ZuulWeb stopping")
+        self.keystore.stop()
         self._running = False
         self.component_info.state = self.component_info.STOPPED
+
+        self.apsched.shutdown()
+
         cherrypy.engine.exit()
         # Not strictly necessary, but without this, if the server is
         # started again (e.g., in the unit tests) it will reuse the
@@ -3174,6 +3563,7 @@ class ZuulWeb(object):
         self.command_socket.stop()
         self.monitoring_server.stop()
         self.tracing.stop()
+        self.requests_cache.stop()
         self.nodes_cache.stop()
         self.zk_client.disconnect()
 

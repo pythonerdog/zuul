@@ -207,6 +207,25 @@ the following options.
       always sends full ref name, eg. ``refs/heads/bar`` and this
       string is matched against the regular expression.
 
+   .. attr:: debug
+      :default: false
+
+      When set to `true`, this will cause debug messages to be
+      included when the queue item is reported.  These debug messages
+      may be used to help diagnose why certain jobs did or did not
+      run, and in many cases, why the item was not ultimately enqueued
+      into the pipeline.
+
+      Setting this value also effectively sets
+      :attr:`project.<pipeline>.debug` for affected queue items.
+
+      This only applies to items that arrive at a pipeline via this
+      particular trigger.  Since the output is very verbose and
+      typically not needed or desired, this allows for a configuration
+      where typical pipeline triggers omit the debug output, but
+      triggers that match certain specific criteria may be used to
+      request debug information.
+
 
 Reporter Configuration
 ----------------------
@@ -228,7 +247,7 @@ is taken from the pipeline.
 
    .. attr:: approval
 
-      Bolean value that determines whether to report *approve* or *unapprove*
+      Boolean value that determines whether to report *approve* or *unapprove*
       into the merge request approval system. To set an approval the Zuul user
       must be a *Developer* or *Maintainer* project's member. If not set approval
       won't be reported.

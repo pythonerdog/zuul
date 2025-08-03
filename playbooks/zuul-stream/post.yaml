@@ -19,6 +19,7 @@
         - logging.json
         - ansible.cfg
         - console-job-output-success-19887.txt
+        - console-job-output-success-19885.txt
         - job-output-success-19887.txt
         - job-output-success-19887.json
         - job-output-success-19885.txt

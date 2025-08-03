@@ -36,6 +36,21 @@ import { fetchProviders } from '../../actions/providers'
 import { addNotification, addApiError } from '../../actions/notifications'
 import { deleteImageUpload } from '../../api'
 
+const STATE_STYLES = {
+  ready: {
+    color: 'var(--pf-global--success-color--100)',
+  },
+  deleting: {
+    color: 'var(--pf-global--info-color--100)',
+  },
+  pending: {
+    color: 'var(--pf-global--warning-color--100)',
+  },
+  uploading: {
+    color: 'var(--pf-global--danger-color--100)',
+  },
+}
+
 function ImageUploadTable(props) {
   const { build, uploads, fetching } = props
   const [showDeleteUploadModal, setShowDeleteUploadModal] = useState(false)
@@ -50,12 +65,20 @@ function ImageUploadTable(props) {
       dataLabel: 'UUID',
     },
     {
-      title: 'Timestamp',
-      dataLabel: 'Timestamp',
-    },
-    {
       title: 'Validated',
       dataLabel: 'Validated',
+    },
+    {
+      title: 'State',
+      dataLabel: 'State',
+    },
+    {
+      title: 'State Time',
+      dataLabel: 'State Time',
+    },
+    {
+      title: 'Locked',
+      dataLabel: 'Locked',
     },
     {
       title: 'Endpoint',
@@ -68,6 +91,7 @@ function ImageUploadTable(props) {
   ]
 
   function createImageUploadRow(upload) {
+    const state_style = STATE_STYLES[upload.state] || {}
     return {
       _uuid: upload.uuid,
       canDelete: build.build_tenant,
@@ -76,10 +100,16 @@ function ImageUploadTable(props) {
           title: upload.uuid
         },
         {
-          title: upload.timestamp
+          title: upload.validated ? 'validated' : 'unvalidated'
         },
         {
-          title: upload.validated.toString()
+          title: <span style={state_style}>{upload.state}</span>
+        },
+        {
+          title: upload.state_time
+        },
+        {
+          title: upload.lock_holder
         },
         {
           title: upload.endpoint_name

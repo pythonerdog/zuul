@@ -50,6 +50,7 @@ from zuul.driver.util import (
 )
 from zuul.model import QuotaInformation
 from zuul.provider import (
+    BaseImageUploadJob,
     BaseProviderEndpoint,
     statemachine
 )
@@ -261,6 +262,87 @@ class AwsCreateStateMachine(statemachine.StateMachine):
                 self.label, self.flavor, self.instance['InstanceType'])
             return AwsInstance(self.endpoint.region, self.instance,
                                self.host, self.node.quota)
+
+
+class AwsImageImportJob(BaseImageUploadJob):
+    def __init__(self, endpoint,
+                 provider_image, image_name,
+                 image_format, metadata,
+                 bucket_name, object_filename, timeout):
+        self.endpoint = endpoint
+        self.provider_image = provider_image
+        self.image_name = image_name
+        self.image_format = image_format
+        self.metadata = metadata
+        self.bucket_name = bucket_name
+        self.object_filename = object_filename
+        self.timeout = timeout
+
+    def run(self):
+        self.endpoint.log.debug(f"Importing image {self.image_name} "
+                                f"via {self.provider_image.import_method}")
+
+        delete_object = False
+        if self.provider_image.import_method == 'image':
+            image_id = self.endpoint._uploadImageImage(
+                self.provider_image, self.image_name,
+                self.image_format, self.metadata,
+                self.bucket_name, self.object_filename, self.timeout,
+                delete_object)
+        elif self.provider_image.import_method == 'snapshot':
+            image_id = self.endpoint._uploadImageSnapshot(
+                self.provider_image, self.image_name,
+                self.image_format, self.metadata,
+                self.bucket_name, self.object_filename, self.timeout,
+                delete_object)
+        else:
+            raise Exception("Unknown image import method")
+        return image_id
+
+
+class AwsImageUploadJob(BaseImageUploadJob):
+    def __init__(self, endpoint,
+                 provider_image, image_name, filename,
+                 image_format, metadata,
+                 bucket_name, timeout):
+        self.endpoint = endpoint
+        self.provider_image = provider_image
+        self.image_name = image_name
+        self.filename = filename
+        self.image_format = image_format
+        self.metadata = metadata
+        self.bucket_name = bucket_name
+        self.timeout = timeout
+
+    def run(self):
+        self.endpoint.log.debug(f"Uploading image {self.image_name} "
+                                f"via {self.provider_image.import_method}")
+
+        delete_object = True
+        if self.provider_image.import_method != 'ebs-direct':
+            # Upload image to S3
+            object_filename = self.endpoint._uploadImageToS3(
+                self.image_name, self.filename, self.image_format,
+                self.metadata, self.bucket_name)
+        if self.provider_image.import_method == 'image':
+            image_id = self.endpoint._uploadImageImage(
+                self.provider_image, self.image_name,
+                self.image_format, self.metadata,
+                self.bucket_name, object_filename, self.timeout,
+                delete_object)
+        elif self.provider_image.import_method == 'snapshot':
+            image_id = self.endpoint._uploadImageSnapshot(
+                self.provider_image, self.image_name,
+                self.image_format, self.metadata,
+                self.bucket_name, object_filename, self.timeout,
+                delete_object)
+        elif self.provider_image.import_method == 'ebs-direct':
+            image_id = self.endpoint._uploadImageSnapshotEBS(
+                self.provider_image, self.image_name, self.filename,
+                self.image_format, self.metadata, self.timeout)
+        else:
+            raise Exception("Unknown image import method")
+        return image_id
 
 
 class EbsSnapshotUploader(ImageUploader):
@@ -648,45 +730,84 @@ class AwsProviderEndpoint(BaseProviderEndpoint):
                 iops=label.iops))
         return quota
 
-    def uploadImage(self, provider_image, image_name, filename,
-                    image_format, metadata, md5, sha256, bucket_name):
+    def _getBucketRegion(self, bucket_name):
+        data = self.s3_client.get_bucket_location(Bucket=bucket_name)
+        # None means us-east-1 for s3 buckets
+        return data['LocationConstraint'] or 'us-east-1'
+
+    def downloadUrl(self, url, path):
+        if not url.startswith('s3://'):
+            return None
+
+        url_parts = urllib.parse.urlparse(url)
+        bucket_name = url_parts.netloc
+        object_filename = url_parts.path.lstrip('/')
+
+        self.log.debug("Downloading %s to %s", url, path)
+        self.s3_client.download_file(bucket_name, object_filename, path)
+        return path
+
+    def getImageImportJob(self, provider_image, image_name, url,
+                          image_format, metadata, md5, sha256):
+        if not url.startswith('s3://'):
+            return None
+
+        if provider_image.import_method == 'image':
+            # There is no IMDS support option for the import_image call
+            if provider_image.imds_support == 'v2.0':
+                raise Exception("IMDSv2 requires 'snapshot' import method")
+        elif provider_image.import_method == 'snapshot':
+            pass
+        elif provider_image.import_method == 'ebs-direct':
+            return None
+        else:
+            raise Exception("Unknown image import method")
+
         timeout = provider_image.import_timeout
-        self.log.debug(f"Uploading image {image_name} "
-                       f"via {provider_image.import_method}")
+        url_parts = urllib.parse.urlparse(url)
+        bucket_name = url_parts.netloc
+        object_filename = url_parts.path.lstrip('/')
+
+        if self._getBucketRegion(bucket_name) != self.region:
+            return None
+
+        return AwsImageImportJob(
+            self,
+            provider_image, image_name,
+            image_format, metadata,
+            bucket_name, object_filename, timeout)
+
+    def getImageUploadJob(self, provider_image, image_name, filename,
+                          image_format, metadata, md5, sha256, bucket_name):
 
         # There is no IMDS support option for the import_image call
         if (provider_image.import_method == 'image' and
             provider_image.imds_support == 'v2.0'):
             raise Exception("IMDSv2 requires 'snapshot' import method")
 
-        if provider_image.import_method != 'ebs-direct':
-            # Upload image to S3
-            bucket = self.s3.Bucket(bucket_name)
-            object_filename = f'{image_name}.{image_format}'
-            extra_args = {'Tagging': urllib.parse.urlencode(metadata)}
-
-            with open(filename, "rb") as fobj:
-                with self.rate_limiter:
-                    bucket.upload_fileobj(fobj, object_filename,
-                                          ExtraArgs=extra_args)
-
-        if provider_image.import_method == 'image':
-            image_id = self._uploadImageImage(
-                provider_image, image_name, filename,
-                image_format, metadata, md5, sha256,
-                bucket_name, object_filename, timeout)
-        elif provider_image.import_method == 'snapshot':
-            image_id = self._uploadImageSnapshot(
-                provider_image, image_name, filename,
-                image_format, metadata, md5, sha256,
-                bucket_name, object_filename, timeout)
-        elif provider_image.import_method == 'ebs-direct':
-            image_id = self._uploadImageSnapshotEBS(
-                provider_image, image_name, filename,
-                image_format, metadata, timeout)
-        else:
+        if provider_image.import_method not in (
+                'image', 'snapshot', 'ebs-direct'):
             raise Exception("Unknown image import method")
-        return image_id
+
+        timeout = provider_image.import_timeout
+
+        return AwsImageUploadJob(
+            self,
+            provider_image, image_name, filename,
+            image_format, metadata,
+            bucket_name, timeout)
+
+    def _uploadImageToS3(self, image_name, filename, image_format, metadata,
+                         bucket_name):
+        bucket = self.s3.Bucket(bucket_name)
+        object_filename = f'{image_name}.{image_format}'
+        extra_args = {'Tagging': urllib.parse.urlencode(metadata)}
+
+        with open(filename, "rb") as fobj:
+            with self.rate_limiter:
+                bucket.upload_fileobj(fobj, object_filename,
+                                      ExtraArgs=extra_args)
+        return object_filename
 
     def _registerImage(self, provider_image, image_name, metadata,
                        volume_size, snapshot_id):
@@ -740,9 +861,10 @@ class AwsProviderEndpoint(BaseProviderEndpoint):
                        f"{register_response['ImageId']}")
         return register_response['ImageId']
 
-    def _uploadImageSnapshot(self, provider_image, image_name, filename,
-                             image_format, metadata, md5, sha256,
-                             bucket_name, object_filename, timeout):
+    def _uploadImageSnapshot(self, provider_image, image_name,
+                             image_format, metadata,
+                             bucket_name, object_filename, timeout,
+                             delete_object):
         # Import snapshot
         self.log.debug(f"Importing {image_name} as snapshot")
         timeout_ts = time.time()
@@ -791,9 +913,10 @@ class AwsProviderEndpoint(BaseProviderEndpoint):
                             done = True
                             break
 
-        self.log.debug(f"Deleting {image_name} from S3")
-        with self.rate_limiter:
-            self.s3.Object(bucket_name, object_filename).delete()
+        if delete_object:
+            self.log.debug(f"Deleting {image_name} from S3")
+            with self.rate_limiter:
+                self.s3.Object(bucket_name, object_filename).delete()
 
         if task['SnapshotTaskDetail']['Status'].lower() != 'completed':
             raise Exception(f"Error uploading image: {task}")
@@ -821,9 +944,10 @@ class AwsProviderEndpoint(BaseProviderEndpoint):
                        f"{register_response['ImageId']}")
         return register_response['ImageId']
 
-    def _uploadImageImage(self, provider_image, image_name, filename,
-                          image_format, metadata, md5, sha256,
-                          bucket_name, object_filename, timeout):
+    def _uploadImageImage(self, provider_image, image_name,
+                          image_format, metadata,
+                          bucket_name, object_filename, timeout,
+                          delete_object):
         # Import image as AMI
         self.log.debug(f"Importing {image_name} as AMI")
         timeout_ts = time.time()
@@ -872,9 +996,10 @@ class AwsProviderEndpoint(BaseProviderEndpoint):
                             done = True
                             break
 
-        self.log.debug(f"Deleting {image_name} from S3")
-        with self.rate_limiter:
-            self.s3.Object(bucket_name, object_filename).delete()
+        if delete_object:
+            self.log.debug(f"Deleting {image_name} from S3")
+            with self.rate_limiter:
+                self.s3.Object(bucket_name, object_filename).delete()
 
         if task['Status'].lower() != 'completed':
             raise Exception(f"Error uploading image: {task}")
@@ -1790,7 +1915,7 @@ class AwsProviderEndpoint(BaseProviderEndpoint):
     def _getBatch(the_queue):
         records = []
         try:
-            record = the_queue.get(block=True, timeout=10)
+            record = the_queue.get(block=True, timeout=0.1)
             if record is None:
                 return records
             records.append(record)

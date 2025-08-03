@@ -48,6 +48,7 @@ class PagureTrigger(BaseTrigger):
                 comments=comments,
                 statuses=to_list(trigger.get('status')),
                 tags=to_list(trigger.get('tag')),
+                debug=trigger.get('debug'),
             )
             efilters.append(f)
 
@@ -71,7 +72,8 @@ def getSchema():
         'ref': scalar_or_list(v.Any(ZUUL_REGEX, str)),
         'comment': scalar_or_list(v.Any(ZUUL_REGEX, str)),
         'status': scalar_or_list(str),
-        'tag': scalar_or_list(str)
+        'tag': scalar_or_list(str),
+        'debug': bool,
     }
 
     return pagure_trigger

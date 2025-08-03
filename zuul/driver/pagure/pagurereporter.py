@@ -86,7 +86,7 @@ class PagureReporter(BaseReporter):
                 msg = self._formatItemReportMergeConflict(item, change)
                 self.addPullComment(item, change, msg)
 
-    def _formatItemReportJobs(self, item):
+    def _formatItemReportJobs(self, item, short):
         # Return the list of jobs portion of the report
         ret = ''
         jobs_fields, skipped = self._getItemReportJobsFields(item)

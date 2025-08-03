@@ -16,6 +16,7 @@ export const ADMIN_DEQUEUE_FAIL = 'ADMIN_DEQUEUE_FAIL'
 export const ADMIN_ENQUEUE_FAIL = 'ADMIN_ENQUEUE_FAIL'
 export const ADMIN_AUTOHOLD_FAIL = 'ADMIN_AUTOHOLD_FAIL'
 export const ADMIN_PROMOTE_FAIL = 'ADMIN_PROMOTE_FAIL'
+export const ADMIN_API_FAIL = 'ADMIN_API_FAIL'
 
 function parseAPIerror(error) {
   if (error.response) {
@@ -45,5 +46,10 @@ export const addAutoholdError = error => ({
 
 export const addPromoteError = error => ({
   type: ADMIN_PROMOTE_FAIL,
+  notification: parseAPIerror(error)
+})
+
+export const addApiError = error => ({
+  type: ADMIN_API_FAIL,
   notification: parseAPIerror(error)
 })

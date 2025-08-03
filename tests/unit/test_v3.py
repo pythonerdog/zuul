@@ -13,18 +13,24 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+import base64
+import copy
 import io
 import json
+import jwt
 import logging
 import os
 import sys
 import textwrap
 import threading
+import time
 import gc
 import re
 from time import sleep
 from unittest import mock, skip, skipIf
-from zuul.lib import yamlutil
+from zuul.exceptions import AlgorithmNotSupportedException
+from zuul.lib import encryption, yamlutil
+from zuul.lib.keystorage import OIDCSigningKeys
 from zuul.scheduler import PendingReconfiguration
 
 import fixtures
@@ -3204,6 +3210,50 @@ class TestInRepoConfig(ZuulTestCase):
         self.assertEqual(A.reported, 1)
         self.assertIn('ceiling may not be less than', A.messages[0])
 
+    def test_pre_timeout_config_error(self):
+        in_repo_conf = textwrap.dedent(
+            """
+            - job:
+                name: test
+                pre-timeout: 60
+                timeout: 30
+            """)
+        file_dict = {'zuul.yaml': in_repo_conf}
+        A = self.fake_gerrit.addFakeChange('common-config', 'master', 'A',
+                                           files=file_dict)
+        self.fake_gerrit.addEvent(A.getPatchsetCreatedEvent(1))
+        self.waitUntilSettled()
+        self.assertEqual(A.reported, 1)
+        self.assertIn('exceeds its timeout of 30', A.messages[0])
+
+    def test_pre_timeout_config_error_inheritance(self):
+        in_repo_conf = textwrap.dedent(
+            """
+            - job:
+                name: parent
+                pre-timeout: 60
+            - job:
+                name: project-test1
+                parent: parent
+                timeout: 30
+                run: playbooks/project-test1.yaml
+            - project:
+                check:
+                  jobs: ['project-test1']
+            """)
+        file_dict = {'.zuul.yaml': in_repo_conf}
+        A = self.fake_gerrit.addFakeChange('org/project', 'master', 'A',
+                                           files=file_dict)
+        self.fake_gerrit.addEvent(A.getPatchsetCreatedEvent(1))
+        self.waitUntilSettled()
+        self.assertEqual(A.reported, 1)
+        self.assertHistory([
+            dict(name='project-test1', result='SUCCESS', changes='1,1'),
+        ], ordered=True)
+        build = self.getJobFromHistory('project-test1')
+        self.assertEqual(30, build.job.timeout)
+        self.assertEqual(30, build.job.pre_timeout)
+
 
 class TestInRepoConfigSOS(ZuulTestCase):
     config_file = 'zuul-connections-gerrit-and-github.conf'
@@ -3613,8 +3663,8 @@ class TestGlobalRepoState(AnsibleZuulTestCase):
         # of override-checkout
         repo = github.repo_from_project('org/requiredproject-github')
         repo._set_branch_protection('master', True)
-        repo._create_branch('feat-x')
         self.create_branch('org/requiredproject-github', 'feat-x')
+        repo._create_branch('feat-x')
         self.fake_github.emitEvent(self.fake_github.getPushEvent(
             'org/requiredproject-github', ref='refs/heads/feat-x'))
 
@@ -4368,14 +4418,14 @@ class FunctionalAnsibleMixIn(object):
                           output)
 
 
-class TestAnsible8(AnsibleZuulTestCase, FunctionalAnsibleMixIn):
-    tenant_config_file = 'config/ansible/main8.yaml'
-    ansible_major_minor = '2.15'
-
-
 class TestAnsible9(AnsibleZuulTestCase, FunctionalAnsibleMixIn):
     tenant_config_file = 'config/ansible/main9.yaml'
     ansible_major_minor = '2.16'
+
+
+class TestAnsible11(AnsibleZuulTestCase, FunctionalAnsibleMixIn):
+    tenant_config_file = 'config/ansible/main11.yaml'
+    ansible_major_minor = '2.18'
 
 
 class TestPrePlaybooks(AnsibleZuulTestCase):
@@ -5470,6 +5520,180 @@ class TestProjectKeys(ZuulTestCase):
 
         # Make sure it's the right length
         self.assertEqual(2048, ssh_key.get_bits())
+
+
+class TestOIDCSigningKeys(ZuulTestCase):
+    # Test that we can perform OIDC signing key operations
+
+    config_file = 'zuul-connections-gerrit-and-github.conf'
+    tenant_config_file = 'config/in-repo/main.yaml'
+
+    def test_oidc_rs256_get_latest_signing_keys(self):
+        # Test the getLatestOidcSigningKeys method should return
+        # private and public keys correctly
+        keystore = self.scheds.first.sched.keystore
+        private_secrets_key, public_secrets_key, version = (
+            keystore.getLatestOidcSigningKeys("RS256")
+        )
+
+        # Make sure it's the right length
+        self.assertEqual(4096, private_secrets_key.key_size)
+        self.assertEqual(version, 0)
+
+    def test_oidc_unsupported_algorithm(self):
+        # Test that unknown algorithms would
+        # raise UnsupportedAlgorithmError
+        keystore = self.scheds.first.sched.keystore
+
+        self.assertRaises(
+            AlgorithmNotSupportedException,
+            lambda: keystore.getOidcSigningKeyData("UNKNOWN_ALG")
+        )
+
+        self.assertRaises(
+            AlgorithmNotSupportedException,
+            lambda: keystore.getLatestOidcSigningKeys("UNKNOWN_ALG")
+        )
+
+    def test_oidc_rs256_key_deletion(self):
+        self._test_oidc_key_deletion("RS256")
+
+    def _test_oidc_key_deletion(self, algorithm):
+        # Test that we can delete all OIDC keys
+        keystore = self.scheds.first.sched.keystore
+
+        # Calling getOidcSigningKeyData() should create keys
+        keystore.getOidcSigningKeyData(algorithm)
+
+        # Keys should also be in zk
+
+        with keystore.createZKContext() as context:
+            test_keys1 = OIDCSigningKeys.loadKeys(
+                context, algorithm)
+            self.assertEqual(len(test_keys1.keys), 1)
+
+            # Delete the keys
+            keystore.deleteOidcSigningKeys(algorithm)
+
+            # Keys should be gone
+            test_keys2 = OIDCSigningKeys.loadKeys(
+                context, algorithm)
+            self.assertIsNone(test_keys2)
+
+    def test_oidc_rs256_key_generation(self):
+        self._test_oidc_key_generation("RS256")
+
+    def _test_oidc_key_generation(self, algorithm):
+        # Test that we can generate initial OIDC keys
+        keystore = self.scheds.first.sched.keystore
+
+        with keystore.createZKContext() as context:
+            # initially there should be no keys
+            test_keys1 = OIDCSigningKeys.loadKeys(
+                context, algorithm)
+            self.assertIsNone(test_keys1)
+
+            # Calling getOidcSigningKeyData() should return keys
+            test_keys2 = keystore.getOidcSigningKeyData(algorithm)
+
+            self.assertEqual(len(test_keys2.keys), 1)
+            # Keys should also be in zk
+            test_keys3 = OIDCSigningKeys.loadKeys(
+                context, algorithm)
+            self.assertEqual(len(test_keys3.keys), 1)
+            # And they should be equal
+            self.assertEqual(test_keys2, test_keys3)
+
+        # Calling getOidcSigningKeyData() again should return
+        # the same keys
+        test_keys4 = keystore.getOidcSigningKeyData(algorithm)
+        self.assertEqual(test_keys2, test_keys4)
+
+    def test_oidc_rs256_key_rotation(self):
+        self._test_oidc_key_rotation("RS256")
+
+    def _test_oidc_key_rotation(self, algorithm):
+        # Test that we can rotate OIDC keys
+        keystore = self.scheds.first.sched.keystore
+        rotation_interval = 5
+        max_ttl = 2
+
+        # Create the initial signing key
+        test_keys1 = keystore.getOidcSigningKeyData(algorithm)
+        private_key1, _, version1 = keystore.getLatestOidcSigningKeys(
+            algorithm)
+        self.assertEqual(len(test_keys1.keys), 1)
+        self.assertEqual(test_keys1.keys[0]["version"], 0)
+        self.assertEqual(version1, 0)
+
+        # Do rotation immediatly should not change anything
+        keystore.rotateOidcSigningKeys(algorithm, rotation_interval, max_ttl)
+        private_key2, _, version2 = keystore.getLatestOidcSigningKeys(
+            algorithm)
+        test_keys2 = keystore.getOidcSigningKeyData(algorithm)
+        self.assertEqual(test_keys2, test_keys1)
+        self.assertEqual(
+            encryption.serialize_rsa_private_key(private_key2),
+            encryption.serialize_rsa_private_key(private_key1))
+        self.assertEqual(version2, 0)
+
+        # Wait for a bit more than rotation_interval and do rotation,
+        # a new key should be appended
+        time.sleep(rotation_interval + 1)
+        keystore.rotateOidcSigningKeys(algorithm, rotation_interval, max_ttl)
+        for _ in iterate_timeout(10, 'cache to sync'):
+            test_keys3 = keystore.getOidcSigningKeyData(algorithm)
+            if len(test_keys3.keys) == 2:
+                # avoid test_keys3 being modified in place by cache update
+                test_keys3 = copy.deepcopy(test_keys3)
+                break
+        private_key3, _, version3 = keystore.getLatestOidcSigningKeys(
+            algorithm)
+        self.assertEqual(
+            test_keys3.keys[0]["private_key"].encode("utf-8"),
+            test_keys1.keys[0]["private_key"].encode("utf-8"))
+        self.assertNotEqual(
+            test_keys3.keys[1]["private_key"].encode("utf-8"),
+            test_keys1.keys[0]["private_key"].encode("utf-8"))
+        self.assertEqual(test_keys3.keys[1]["version"], 1)
+        self.assertEqual(version3, 1)
+        self.assertGreaterEqual(
+            test_keys3.keys[1]["created"],
+            test_keys1.keys[0]["created"] + rotation_interval)
+        self.assertNotEqual(
+            encryption.serialize_rsa_private_key(private_key3),
+            encryption.serialize_rsa_private_key(private_key1))
+
+        # Wait for a bit more than max_ttl and do rotation again,
+        # the old key should be removed
+        time.sleep(max_ttl + 1)
+        keystore.rotateOidcSigningKeys(algorithm, rotation_interval, max_ttl)
+        for _ in iterate_timeout(10, 'cache to sync'):
+            test_keys4 = keystore.getOidcSigningKeyData(algorithm)
+            if len(test_keys4.keys) == 1:
+                break
+        private_key4, _, version4 = keystore.getLatestOidcSigningKeys(
+            algorithm)
+        self.assertEqual(
+            test_keys4.keys[0]["private_key"],
+            test_keys3.keys[1]["private_key"])
+        self.assertEqual(
+            encryption.serialize_rsa_private_key(private_key4),
+            encryption.serialize_rsa_private_key(private_key3))
+        self.assertEqual(version4, 1)
+
+    def test_oidc_key_rotation_without_old_key(self):
+        # Test that when there is no old key, it will create a new one
+        keystore = self.scheds.first.sched.keystore
+        algorithm = "RS256"
+        rotation_interval = 5
+        max_ttl = 2
+
+        keystore.rotateOidcSigningKeys(algorithm, rotation_interval, max_ttl)
+        with keystore.createZKContext() as context:
+            test_keys1 = OIDCSigningKeys.loadKeys(
+                context, algorithm)
+            self.assertEqual(len(test_keys1.keys), 1)
 
 
 class TestValidateAllBroken(ZuulTestCase):
@@ -7090,6 +7314,147 @@ class TestMaxTimeout(ZuulTestCase):
                          "B should not fail because of timeout limit")
 
 
+class TestOIDCConfiguration(ZuulTestCase):
+    tenant_config_file = 'config/multi-tenant/main.yaml'
+
+    def test_default_attributes(self):
+        # Test that the secret oidc config with all default configurations
+        # in different format.
+        in_repo_conf = textwrap.dedent(
+            """
+            - secret:
+                name: my-oidc1
+                oidc: {}
+            - secret:
+                name: my-oidc2
+                oidc: null
+            - secret:
+                name: my-oidc3
+                oidc:
+            """)
+        file_dict = {'.zuul.yaml': in_repo_conf}
+
+        A = self.fake_gerrit.addFakeChange('org/project2', 'master', 'A',
+                                           files=file_dict)
+        self.fake_gerrit.addEvent(A.getPatchsetCreatedEvent(1))
+        self.waitUntilSettled()
+        self.assertIn("Build succeeded.", A.messages[0],
+                      "oidc config should allow null value")
+
+    def test_max_ttl_reached(self):
+        # Test that the secret oidc ttl is within the tenant max-oidc-ttl
+        in_repo_conf = textwrap.dedent(
+            """
+            - secret:
+                name: my-oidc
+                oidc:
+                  ttl: 400
+            """)
+        file_dict = {'.zuul.yaml': in_repo_conf}
+        # max-oidc-ttl for tenant-one is 300, it should cause error
+        A = self.fake_gerrit.addFakeChange('org/project1', 'master', 'A',
+                                           files=file_dict)
+        self.fake_gerrit.addEvent(A.getPatchsetCreatedEvent(1))
+        self.waitUntilSettled()
+        self.assertIn('The oidc secret "my-oidc" exceeds tenant max-oidc-ttl',
+                      A.messages[0], "A should fail because of ttl limit")
+        # max-oidc-ttl for tenant-two is the default 10800,
+        # which should not cause error
+        B = self.fake_gerrit.addFakeChange('org/project2', 'master', 'A',
+                                           files=file_dict)
+        self.fake_gerrit.addEvent(B.getPatchsetCreatedEvent(1))
+        self.waitUntilSettled()
+        self.assertNotIn("exceeds tenant max-oidc-ttl", B.messages[0],
+                         "B should not fail because of ttl limit")
+
+    def test_custom_issuer(self):
+        # Test that custom issuer is handled correctly
+        in_repo_conf = textwrap.dedent(
+            """
+            - secret:
+                name: my-oidc
+                oidc:
+                  ttl: 200
+                  iss: https://zuul.custom-issuer.com
+            """)
+        file_dict = {'.zuul.yaml': in_repo_conf}
+        # The issuer is not white listed in tenant one, it should cause error
+        A = self.fake_gerrit.addFakeChange('org/project1', 'master', 'A',
+                                           files=file_dict)
+        self.fake_gerrit.addEvent(A.getPatchsetCreatedEvent(1))
+        self.waitUntilSettled()
+        self.assertIn(
+            'The iss "https://zuul.custom-issuer.com" in'
+            ' oidc secret "my-oidc" is\n  not allowed',
+            A.messages[0], "A should fail because the issuer is not allowed"
+        )
+        # The issuer is white listed for tenant-two, no error
+        B = self.fake_gerrit.addFakeChange('org/project2', 'master', 'A',
+                                           files=file_dict)
+        self.fake_gerrit.addEvent(B.getPatchsetCreatedEvent(1))
+        self.waitUntilSettled()
+        self.assertNotIn(
+            'The iss "https://zuul.custom-issuer.com" in'
+            ' oidc secret "my-oidc" is\n  not allowed',
+            B.messages[0], "B should not fail because the issuer is allowed"
+        )
+
+    def test_mutual_exclusive(self):
+        # Test that `oidc` and `data` should be mutually exclusive
+        in_repo_conf = textwrap.dedent(
+            """
+            - secret:
+                name: my-oidc
+                oidc: {}
+                data: {}
+            """)
+        file_dict = {'.zuul.yaml': in_repo_conf}
+        A = self.fake_gerrit.addFakeChange('org/project1', 'master', 'A',
+                                           files=file_dict)
+        self.fake_gerrit.addEvent(A.getPatchsetCreatedEvent(1))
+        self.waitUntilSettled()
+        self.assertIn('two or more values in the same group'
+                      ' of exclusion \'secret_type\'',
+                      A.messages[0],
+                      "A should fail because of mutual exclusive")
+
+    def test_required(self):
+        # Test that one of `oidc` and `data` must be present
+        in_repo_conf = textwrap.dedent(
+            """
+            - secret:
+                name: my-oidc
+            """)
+        file_dict = {'.zuul.yaml': in_repo_conf}
+        A = self.fake_gerrit.addFakeChange('org/project1', 'master', 'A',
+                                           files=file_dict)
+        self.fake_gerrit.addEvent(A.getPatchsetCreatedEvent(1))
+        self.waitUntilSettled()
+        self.assertIn('Either \'data\' or \'oidc\' must be present',
+                      A.messages[0],
+                      "A should fail because both are missing")
+
+    def test_unsupported_algorithm(self):
+        # Test that if the secret oidc algorithm is not supported,
+        # there should be an error message
+        in_repo_conf = textwrap.dedent(
+            """
+            - secret:
+                name: my-oidc
+                oidc:
+                  algorithm: XX256
+            """)
+        file_dict = {'.zuul.yaml': in_repo_conf}
+
+        A = self.fake_gerrit.addFakeChange('org/project1', 'master', 'A',
+                                           files=file_dict)
+        self.fake_gerrit.addEvent(A.getPatchsetCreatedEvent(1))
+        self.waitUntilSettled()
+        self.assertIn("Algorithm 'XX256' is not supported",
+                      A.messages[0],
+                      "A should fail because of unsupported algorithm")
+
+
 class TestAllowedConnection(AnsibleZuulTestCase):
     config_file = 'zuul-connections-gerrit-and-github.conf'
     tenant_config_file = 'config/multi-tenant/main.yaml'
@@ -7668,6 +8033,200 @@ class TestSecrets(ZuulTestCase):
 
             self.scheds.first.sched._runBlobStoreCleanup()
             self.assertEqual(len(bs), 0)
+
+    def test_oidc_single(self):
+        # Test that oidc token is generated correctly when there is
+        # a single oidc secret defined.
+        with open(os.path.join(FIXTURE_DIR,
+                               'config/secrets/git/',
+                               'org_project2/zuul-oidc-single.yaml')) as f:
+            config = f.read()
+        file_dict = {'zuul.yaml': config}
+        A = self.fake_gerrit.addFakeChange('org/project2', 'master', 'A',
+                                           files=file_dict)
+        self.fake_gerrit.addEvent(A.getPatchsetCreatedEvent(1))
+        self.waitUntilSettled()
+        self.assertEqual(A.reported, 1, "A should report success")
+        self.assertHistory([
+            dict(name='project2-oidc-secret', result='SUCCESS', changes='1,1')
+        ])
+
+        secrets = self._getSecrets(
+            'project2-oidc-secret', 'playbooks'
+        )[0]
+        self.assertEqual(len(secrets), 1)
+        for secret_name, secret_content in secrets.items():
+            self._validate_oidc_token(
+                # The var name is with '_' while the secret.name is with '-'
+                # which should be used in the value of the 'sub' claim
+                secret_name.replace('_', '-'),
+                secret_content.value, self.history[0].uuid)
+
+    def test_oidc_multi(self):
+        # Test that oidc token is generated correctly when there are
+        # multiple oidc secrets defined.
+        with open(os.path.join(FIXTURE_DIR,
+                               'config/secrets/git/',
+                               'org_project2/zuul-oidc-multi.yaml')) as f:
+            config = f.read()
+        file_dict = {'zuul.yaml': config}
+        A = self.fake_gerrit.addFakeChange('org/project2', 'master', 'A',
+                                           files=file_dict)
+        # Mock zuul_return data defined in playbook
+        self.executor_server.returnData(
+            "project2-dependent-with-return", A, data={'foo': 'bar'},
+            secret_data={'login_secret1': "login_secret1_value"}
+        )
+        self.fake_gerrit.addEvent(A.getPatchsetCreatedEvent(1))
+        self.waitUntilSettled()
+        self.assertEqual(A.reported, 1, "A should report success")
+        self.assertHistory([
+            dict(
+                name='project2-dependent-with-return',
+                result='SUCCESS', changes='1,1'
+            ),
+            dict(
+                name='project2-oidc-secret',
+                result='SUCCESS', changes='1,1'
+            )
+        ])
+
+        secrets = self._getSecrets(
+            'project2-oidc-secret', 'playbooks'
+        )[0]
+        self.assertEqual(len(secrets), 3)
+
+        # OIDC secret should override job var with the same name
+        self.assertNotEqual(secrets['login_secret0'], 'login_secret0_value')
+
+        # OIDC secret should override zuul_return secret with the same name
+        self.assertNotEqual(secrets['login_secret1'], 'login_secret1_value')
+
+        # OIDC secret passed to parent
+        parent_pre_secrets = self._getSecrets(
+            'project2-oidc-secret', 'pre_playbooks'
+        )[0]
+        for secret_name, secret_content in parent_pre_secrets.items():
+
+            self._validate_oidc_token(
+                # var: "login_secretx" -> secret: "project2-oidc-secretx"
+                'project2-oidc-secret' + secret_name[-1],
+                secret_content.value,
+                self.history[1].uuid, "parent.yaml")
+        parent_post_secrets = self._getSecrets(
+            'project2-oidc-secret', 'post_playbooks'
+        )[0]
+        for secret_name, secret_content in parent_post_secrets.items():
+            self._validate_oidc_token(
+                'project2-oidc-secret' + secret_name[-1], secret_content.value,
+                self.history[1].uuid, "parent.yaml")
+
+        for secret_name, secret_content in secrets.items():
+            self._validate_oidc_token(
+                'project2-oidc-secret' + secret_name[-1], secret_content.value,
+                self.history[1].uuid)
+
+    def test_oidc_mix(self):
+        # Test that oidc token is generated correctly when there are
+        # both oidc and normal secrets defined.
+        with open(os.path.join(FIXTURE_DIR,
+                               'config/secrets/git/',
+                               'org_project2/zuul-oidc-mix.yaml')) as f:
+            config = f.read()
+        file_dict = {'zuul.yaml': config}
+        A = self.fake_gerrit.addFakeChange('org/project2', 'master', 'A',
+                                           files=file_dict)
+        self.fake_gerrit.addEvent(A.getPatchsetCreatedEvent(1))
+        self.waitUntilSettled()
+        self.assertEqual(A.reported, 1, "A should report success")
+        self.assertHistory([
+            dict(name='project2-oidc-secret', result='SUCCESS', changes='1,1')
+        ])
+
+        secrets = self._getSecrets(
+            'project2-oidc-secret', 'playbooks'
+        )[0]
+        self.assertEqual(len(secrets), 4)
+
+        # Validate normal secrets
+        self.assertEqual(
+            secrets['project2_secret'],
+            {'username': 'test-username', 'password': 'test-password'}
+        )
+        # Remove the normal secret from the dict and validate the oidc tokens
+        del secrets['project2_secret']
+        for secret_name, secret_content in secrets.items():
+            self._validate_oidc_token(
+                secret_name.replace('_', '-'),
+                secret_content.value, self.history[0].uuid)
+
+    def test_oidc_iss_override(self):
+        # Test that the custom 'iss' is allowed when configured
+        with open(os.path.join(
+            FIXTURE_DIR,
+            'config/secrets/git/',
+            'org_project2/zuul-oidc-iss-override.yaml')) as f:
+            config = f.read()
+        file_dict = {'zuul.yaml': config}
+        A = self.fake_gerrit.addFakeChange('org/project2', 'master', 'A',
+                                           files=file_dict)
+        self.fake_gerrit.addEvent(A.getPatchsetCreatedEvent(1))
+        self.waitUntilSettled()
+        self.assertEqual(A.reported, 1, "A should report success")
+        self.assertHistory([
+            dict(name='project2-oidc-secret', result='SUCCESS', changes='1,1')
+        ])
+
+        secrets = self._getSecrets(
+            'project2-oidc-secret', 'playbooks'
+        )[0]
+        self.assertEqual(len(secrets), 2)
+
+        expected_isses = {
+            "oidc_secret": "https://zuul.example.com",
+            "oidc_secret_iss_override_allowed": "https://zuul.allowed.com",
+        }
+        for secret_name, secret_content in secrets.items():
+            self._validate_oidc_token(
+                secret_name.replace('_', '-'),
+                secret_content.value, self.history[0].uuid,
+                expected_iss=expected_isses[secret_name])
+
+    def _validate_oidc_token(self, oidc_name, oidc_token, build_uuid,
+                             playbook="secret.yaml",
+                             expected_iss="https://zuul.example.com"):
+
+        # Check header
+        header_base64 = oidc_token.split('.')[0]
+        header = json.loads(base64.b64decode(header_base64 + '==').decode())
+        self.assertEqual(header['alg'], 'RS256')
+        self.assertEqual(header['kid'], 'RS256-0')
+        self.assertEqual(header['typ'], 'JWT')
+
+        # Decode and check payload
+        keystore = self.scheds.first.sched.keystore
+        _, public_key, _ = (keystore.getLatestOidcSigningKeys("RS256"))
+        pem_public_key = encryption.serialize_rsa_public_key(public_key)
+        payload = jwt.decode(
+            oidc_token, pem_public_key, algorithms=["RS256"],
+            audience="sts.amazonaws.com")
+        self.assertEqual(payload['iss'], expected_iss)
+        self.assertEqual(
+            payload['sub'],
+            'secret:tenant-one/review.example.com'
+            f'/org/project2/{oidc_name}'
+        )
+        self.assertEqual(payload['build-uuid'], build_uuid)
+        self.assertEqual(payload['job-name'], 'project2-oidc-secret')
+        self.assertEqual(
+            payload['playbook'],
+            f'review.example.com/org/project2/playbooks/{playbook}'
+        )
+        self.assertEqual(payload['pipeline'], 'check')
+        self.assertEqual(payload['tenant'], 'tenant-one')
+        self.assertEqual(payload['aud'], 'sts.amazonaws.com')
+        self.assertEqual(payload['my_claim'], 'my_claim_value')
+        self.assertEqual(payload['exp'] - payload['iat'], 300)
 
 
 class TestSecretInheritance(ZuulTestCase):
@@ -8731,6 +9290,95 @@ class TestUnreachable(AnsibleZuulTestCase):
         conn = self.scheds.first.sched.sql.connection
         for build in conn.getBuilds():
             self.assertEqual(build.error_detail, 'Host unreachable')
+
+    def test_unreachable_nodeset_alternates(self):
+        # Test nodeset alternative behavior with unreachable hosts.
+        # We increment the nodeset alternative if we encounter an
+        # unreachable host; but we don't increment it for other types
+        # of retries.
+        self.wait_timeout = 120
+
+        # Output extra ansible info so we might see errors.
+        self.executor_server.verbose = True
+        self.executor_server.keep_jobdir = True
+
+        in_repo_conf = textwrap.dedent(
+            """
+            - nodeset:
+                name: test-nodeset
+                alternatives:
+                  - nodes:
+                      - name: controller
+                        label: fast-label
+                  - nodes:
+                      - name: controller
+                        label: slow-label
+            - job:
+                name: pre-failure
+                attempts: 2
+                nodeset: test-nodeset
+                pre-run: playbooks/pre-fail.yaml
+            - project:
+                check:
+                  jobs:
+                    - pre-failure
+                    - pre-unreachable:
+                        attempts: 3
+                        nodeset: test-nodeset
+                    - run-unreachable
+            """)
+
+        file_dict = {'zuul.yaml': in_repo_conf}
+        A = self.fake_gerrit.addFakeChange('org/project', 'master', 'A',
+                                           files=file_dict)
+
+        self.fake_gerrit.addEvent(A.getPatchsetCreatedEvent(1))
+        self.waitUntilSettled()
+
+        # The result must be retry limit because jobs with unreachable nodes
+        # will be retried.
+        self.assertIn('RETRY_LIMIT', A.messages[0])
+        self.assertHistory([
+            dict(name='pre-unreachable', result=None, changes='1,1'),
+            dict(name='pre-unreachable', result=None, changes='1,1'),
+            dict(name='pre-unreachable', result=None, changes='1,1'),
+            dict(name='run-unreachable', result=None, changes='1,1'),
+            dict(name='run-unreachable', result=None, changes='1,1'),
+            dict(name='pre-failure', result=None, changes='1,1'),
+            dict(name='pre-failure', result=None, changes='1,1'),
+        ], ordered=False)
+
+        pre_unreachable_labels = []
+        pre_failure_labels = []
+        for build in self.history:
+            inv_path = os.path.join(build.jobdir.root,
+                                    'ansible', 'inventory.yaml')
+            with open(inv_path, 'r') as f:
+                inventory = yaml.safe_load(f)
+            if build.name == 'pre-unreachable':
+                # Get an ordered list of label requests we make for
+                # the pre jobs
+                label = inventory['all']['hosts'][
+                    'controller']['nodepool']['label']
+                pre_unreachable_labels.append(label)
+            elif build.name == 'pre-failure':
+                # Get an ordered list of label requests we make for
+                # the pre jobs
+                label = inventory['all']['hosts'][
+                    'controller']['nodepool']['label']
+                pre_failure_labels.append(label)
+            else:
+                # The other jobs don't request nodes
+                self.assertEqual({}, inventory['all']['hosts'])
+        # The pre-unreachable job should continue to iterate through
+        # the nodeset alternatives (and repeat the last one).
+        self.assertEqual(['fast-label', 'slow-label', 'slow-label'],
+                         pre_unreachable_labels)
+        # The pre-failure job, since it is a "normal" failure of the
+        # pre-run playbook, should continue to use the first nodeset
+        # alternative.
+        self.assertEqual(['fast-label', 'fast-label'],
+                         pre_failure_labels)
 
 
 class TestJobPause(AnsibleZuulTestCase):
@@ -10047,8 +10695,8 @@ class TestAnsibleVersion(AnsibleZuulTestCase):
 
         self.assertHistory([
             dict(name='ansible-default', result='SUCCESS', changes='1,1'),
-            dict(name='ansible-8', result='SUCCESS', changes='1,1'),
             dict(name='ansible-9', result='SUCCESS', changes='1,1'),
+            dict(name='ansible-11', result='SUCCESS', changes='1,1'),
         ], ordered=False)
 
 
@@ -10067,8 +10715,8 @@ class TestDefaultAnsibleVersion(AnsibleZuulTestCase):
         self.assertHistory([
             dict(name='ansible-default-zuul-conf', result='SUCCESS',
                  changes='1,1'),
-            dict(name='ansible-8', result='SUCCESS', changes='1,1'),
             dict(name='ansible-9', result='SUCCESS', changes='1,1'),
+            dict(name='ansible-11', result='SUCCESS', changes='1,1'),
         ], ordered=False)
 
 
@@ -10396,6 +11044,34 @@ class TestDynamicBranchesProject(IncludeBranchesTestCase):
         self.assertHistory([
             dict(name='central-post', result='SUCCESS',
                  ref='refs/heads/feature/bar'),
+        ], ordered=False)
+
+
+class TestDynamicBranchesMultiProject(ZuulTestCase):
+    tenant_config_file = 'config/dynamic-only-project/dynamic2.yaml'
+
+    def test_dynamic_branches_multi_project(self):
+        # Test that configuration errors on a branch which is static
+        # in one tenant do not cause issue in another tenant where the
+        # branch is dynamic.
+
+        # Create branches which are dynamic in tenant-one, and static
+        # in tenant-two.
+        self.create_branch('org/project', 'feature/foo')
+        self.create_branch('org/project2', 'feature/bar')
+
+        # The reconfiguration should cause config errors in project2
+        # to be stored with the objects since they are loaded in
+        # tenant-two.
+        self.scheds.execute(lambda app: app.sched.reconfigure(app.config))
+        self.waitUntilSettled()
+
+        A = self.fake_gerrit.addFakeChange('org/project', 'feature/foo', 'A')
+        self.fake_gerrit.addEvent(A.getPatchsetCreatedEvent(1))
+        self.waitUntilSettled()
+        self.assertHistory([
+            dict(name='project-test', result='SUCCESS', changes='1,1'),
+            dict(name='central-test', result='SUCCESS', changes='1,1'),
         ], ordered=False)
 
 
@@ -10857,6 +11533,45 @@ class TestIncludeVars(ZuulTestCase):
             dict(name='parent-job', result='SUCCESS', changes='1,1'),
             dict(name='same-project', result='SUCCESS', changes='1,1'),
             dict(name='other-project', result='SUCCESS', changes='1,1'),
+        ], ordered=False)
+
+    def test_include_vars_override_checkout(self):
+        # Regression test to verify that we are using the correct
+        # checkout when a job needs a project as a required-project
+        # and for include-vars.
+        self.create_branch('org/project1', 'stable')
+        self.fake_gerrit.addEvent(
+            self.fake_gerrit.getFakeBranchCreatedEvent(
+                'org/project1', 'stable'))
+
+        self.executor_server.hold_jobs_in_build = True
+        A = self.fake_gerrit.addFakeChange('org/project3', 'master', 'A')
+        self.fake_gerrit.addEvent(A.getPatchsetCreatedEvent(1))
+        self.waitUntilSettled()
+
+        self.assertEqual(len(self.builds), 1)
+        build = self.builds[0]
+        projects = build.parameters['projects']
+        # We expect org/project1 and org/project3
+        self.assertEqual(len(projects), 2)
+
+        workspace_repos = build.getWorkspaceRepos(
+            [p['canonical_name'] for p in projects])
+        for project in projects:
+            expected_branch = 'master'
+            if project['name'] == 'org/project1':
+                expected_branch = 'stable'
+                self.assertEqual(project['override_checkout'], expected_branch)
+            repo = workspace_repos[project['canonical_name']]
+            self.assertEqual(repo.active_branch.name, expected_branch)
+
+        self.executor_server.hold_jobs_in_build = False
+        self.executor_server.release()
+        self.waitUntilSettled()
+
+        self.assertHistory([
+            dict(name='required-project-override', result='SUCCESS',
+                 changes='1,1'),
         ], ordered=False)
 
     def test_include_vars_zuul_project(self):

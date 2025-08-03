@@ -12,13 +12,15 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+import contextlib
 import os
 import time
+from unittest import mock
 
 import fixtures
 
 from zuul.driver.openstack import OpenstackDriver
-import zuul.driver.openstack.openstackendpoint
+from zuul.driver.openstack.openstackmodel import OpenstackProviderNode
 
 from tests.fake_openstack import (
     FakeOpenstackCloud,
@@ -46,15 +48,14 @@ class BaseOpenstackDriverTest(ZuulTestCase):
         'zuul': {
             'artifacts': [
                 {
-                    'name': 'raw image',
-                    'url': 'http://example.com/image.raw',
+                    'name': 'qcow2 image',
+                    'url': 'http://example.com/image.qcow2',
                     'metadata': {
                         'type': 'zuul_image',
                         'image_name': 'debian-local',
                         'format': 'qcow2',
-                        'sha256': ('59984dd82f51edb3777b969739a92780'
-                                   'a520bb314b8d64b294d5de976bd8efb9'),
-                        'md5sum': '262278e1632567a907e4604e9edd2e83',
+                        'sha256': ImageMocksFixture.qcow2_sha256,
+                        'md5sum': ImageMocksFixture.qcow2_md5sum,
                     }
                 },
             ]
@@ -95,9 +96,14 @@ class BaseOpenstackDriverTest(ZuulTestCase):
                    FakeOpenstackProviderEndpoint)
         self.patch(FakeOpenstackProviderEndpoint,
                    '_fake_cloud', self.fake_cloud)
-        self.patch(zuul.driver.openstack.openstackendpoint,
-                   'CACHE_TTL', 1)
         super().setUp()
+
+    @contextlib.contextmanager
+    def _block_futures(self):
+        with (mock.patch(
+                'zuul.driver.openstack.openstackendpoint.'
+                'OpenstackProviderEndpoint._completeApi', return_value=None)):
+            yield
 
 
 class TestOpenstackDriver(BaseOpenstackDriverTest, BaseCloudDriverTest):
@@ -192,6 +198,15 @@ class TestOpenstackDriver(BaseOpenstackDriverTest, BaseCloudDriverTest):
                 break
             time.sleep(1)
 
+    @simple_layout('layouts/openstack/nodepool.yaml', enable_nodepool=True)
+    def test_state_machines(self):
+        label_name = "debian-normal"
+        provider_name = "openstack-main"
+        node_class = OpenstackProviderNode
+        future_names = ['delete_future', 'create_future']
+        self._test_state_machines(label_name, provider_name,
+                                  node_class, future_names)
+
 
 class TestOpenstackDriverFloatingIp(BaseOpenstackDriverTest,
                                     BaseCloudDriverTest):
@@ -204,6 +219,15 @@ class TestOpenstackDriverFloatingIp(BaseOpenstackDriverTest,
     def test_openstack_fip(self):
         self._test_node_lifecycle('debian-normal')
 
+    @simple_layout('layouts/openstack/nodepool.yaml', enable_nodepool=True)
+    def test_state_machines(self):
+        label_name = "debian-normal"
+        provider_name = "openstack-main"
+        node_class = OpenstackProviderNode
+        future_names = ['delete_future', 'create_future']
+        self._test_state_machines(label_name, provider_name,
+                                  node_class, future_names)
+
 
 class TestOpenstackDriverAutoAttachFloatingIp(BaseOpenstackDriverTest,
                                               BaseCloudDriverTest):
@@ -213,3 +237,12 @@ class TestOpenstackDriverAutoAttachFloatingIp(BaseOpenstackDriverTest,
     @simple_layout('layouts/openstack/nodepool.yaml', enable_nodepool=True)
     def test_openstack_auto_attach_fip(self):
         self._test_node_lifecycle('debian-normal')
+
+    @simple_layout('layouts/openstack/nodepool.yaml', enable_nodepool=True)
+    def test_state_machines(self):
+        label_name = "debian-normal"
+        provider_name = "openstack-main"
+        node_class = OpenstackProviderNode
+        future_names = ['delete_future', 'create_future']
+        self._test_state_machines(label_name, provider_name,
+                                  node_class, future_names)

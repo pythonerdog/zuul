@@ -261,7 +261,8 @@ class MergeClient(object):
     def cancel(self, job):
         try:
             # Try to remove the request first
-            request = self.merger_api.get(job.request_path)
+            request_uuid = job.request_path.split('/')[-1]
+            request = self.merger_api.getRequest(request_uuid)
             if request:
                 if self.merger_api.lock(request, blocking=False):
                     try:

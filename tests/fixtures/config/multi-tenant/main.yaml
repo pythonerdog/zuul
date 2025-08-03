@@ -1,6 +1,8 @@
 - tenant:
     name: tenant-one
+    web-root: https://tenant-one.example.com/
     max-job-timeout: 1800
+    max-oidc-ttl: 300
     allowed-reporters:
       - gerrit
     allowed-labels:
@@ -18,6 +20,8 @@
 - tenant:
     name: tenant-two
     max-nodes-per-job: 10
+    allowed-oidc-issuers:
+      - https://zuul.custom-issuer.com
     allowed-triggers: gerrit
     disallowed-labels:
       - tenant-one-.*

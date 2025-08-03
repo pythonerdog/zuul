@@ -25,6 +25,7 @@ from tests.base import (
     okay_tracebacks,
     simple_layout,
 )
+from zuul.zk.change_cache import ChangeKey
 from zuul.zk.locks import SessionAwareWriteLock, TENANT_LOCK_ROOT
 from zuul.scheduler import PendingReconfiguration
 
@@ -455,6 +456,161 @@ class TestScaleOutScheduler(ZuulTestCase):
             dict(name='project-test1', result='SUCCESS', changes='1,1 2,1'),
             dict(name='project-test2', result='SUCCESS', changes='1,1 2,1'),
         ], ordered=False)
+
+    @simple_layout('layouts/cherry-pick.yaml')
+    def test_change_cache_ismerged(self):
+        # Test that we don't bump a depending change from the pipeline
+        # due to a race with isMerged.
+        self.executor_server.hold_jobs_in_build = True
+        A = self.fake_gerrit.addFakeChange('org/project', 'master', 'A')
+        A.cherry_pick = True
+        B = self.fake_gerrit.addFakeChange('org/project', 'master', 'B')
+        B.cherry_pick = True
+        B.setDependsOn(A, 1)
+        A.addApproval('Code-Review', 2)
+        B.addApproval('Code-Review', 2)
+        self.fake_gerrit.addEvent(A.addApproval('Approved', 1))
+        self.waitUntilSettled("Change A enqueued")
+        self.fake_gerrit.addEvent(B.addApproval('Approved', 1))
+        self.waitUntilSettled("Change B enqueued")
+
+        app = self.createScheduler()
+        app.start()
+        self.assertEqual(len(self.scheds), 2)
+        first = self.scheds.first
+        second = app
+        # Wait until they're both ready
+        self.waitUntilSettled("Second scheduler ready")
+
+        # Here's the sequence we need to happen (scheduler id in []):
+        # [2] tell gerrit to merge 1,1
+        # [1] receive a comment-added event for 1,1
+        # [1] perform a gerrit query for 1,1 and receive state=NEW
+        # [1] stop processing right before updating the change cache
+        # [2] perform the isMerged query for 1,1 and receive state=MERGED
+        # [2] update 1,1 in the change cache with is_merged=True
+        # [1] resume processing the change cache update
+        # Then we make sure is_merged does not flip back to false
+
+        # These controls whether scheduler 1 can write updates to the
+        # change cache.
+        update_permitted_event = threading.Event()
+        update_permitted_event.set()
+        waiting_to_update_event = threading.Event()
+
+        # These allow us to stop scheduler 2 between the two queue
+        # items.
+        queue_item_finished = threading.Event()
+        queue_item_resume = threading.Event()
+        queue_item_resume.set()
+
+        # Insert our control into the scheduler 1 change cache
+        s1_cache = first.sched.connections.connections['gerrit']._change_cache
+        orig_s1_set = s1_cache.updateChangeWithRetry
+
+        def s1_set(*args, **kw):
+            if not update_permitted_event.isSet():
+                # We have performed the comment-added query and are
+                # about to write the results.
+                self.log.debug("Waiting to update change cache")
+                # Tell scheduler 2 that we're waiting; we pause so
+                # that it can proceed with its correct data.
+                waiting_to_update_event.set()
+                update_permitted_event.wait()
+                # Now we're going to write old data.
+                self.log.debug("Resuming update to change cache")
+            return orig_s1_set(*args, **kw)
+        s1_cache.updateChangeWithRetry = s1_set
+
+        # Gain control of the review method.
+        s2_conn = second.sched.connections.connections['gerrit']
+        orig_s2_review = s2_conn.review
+
+        def s2_review(*args, **kw):
+            self.log.debug("Review start")
+            # We don't normally automatically emit any post-merge
+            # events in tests in order to keep them simple.  But we
+            # need to in this case so that we can trigger a change
+            # query that races the isMerged query.  Emit the
+            # comment-added event which is the first thing that gerrit
+            # emits as we merge a change.  Normally a change-merged
+            # event would follow, but is not necessary for this test.
+            self.fake_gerrit.addEvent(A.getChangeCommentEvent(1))
+            # Wait until query is done
+            self.log.debug("Wait for change-merged query to finish")
+            waiting_to_update_event.wait()
+            # We know the change-merged query has completed with state=NEW
+            self.log.debug("Review resume")
+            # Allow the report to happen, which will cause the state
+            # to change to MERGED for subsequent queries.
+            ret = orig_s2_review(*args, **kw)
+            self.log.debug("Review done")
+            return ret
+        s2_conn.review = s2_review
+
+        # Gain control of the pipeline manager so that we can pause
+        # between processing queue items.
+        s2_gate = second.sched.abide.tenants[
+            'tenant-one'].layout.pipeline_managers['gate']
+        orig_s2_processOneItem = s2_gate._processOneItem
+
+        def s2_processOneItem(*args, **kw):
+            ret = orig_s2_processOneItem(*args, **kw)
+            self.log.debug("Finished queue item")
+            queue_item_finished.set()
+            self.log.debug("Wait for queue item")
+            queue_item_resume.wait()
+            return ret
+        s2_gate._processOneItem = s2_processOneItem
+
+        # Hold the lock on the first scheduler, so the queue
+        # processing happens on the second.
+        with first.sched.run_handler_lock:
+            key = ChangeKey('gerrit', None, 'GerritChange', '1', '1')
+            c1 = s1_cache.get(key)
+            c2 = s1_cache.get(key)
+
+            # Clear events for the start of the interesting part of
+            # the test.
+            queue_item_finished.clear()
+            queue_item_resume.clear()
+            update_permitted_event.clear()
+            self.log.debug("Release held build")
+            self.builds[0].release()
+            self.log.debug("Wait for first queue item to finish")
+            queue_item_finished.wait()
+            self.log.debug("First queue item is finished")
+
+            # Allow the delayed update to take effect (with the old,
+            # pre-merge data) before we process the next queue item.
+            old_uuid = c2.cache_stat.uuid
+
+            update_permitted_event.set()
+            # We wait for the caches to sync to make sure that we
+            # don't trip the conflict detection in the change cache.
+            # If we do, then the change cache will re-query the data.
+            self.log.debug("Wait for caches to sync")
+            for x in iterate_timeout(30, 'caches to sync'):
+                if (c2.cache_stat.uuid != old_uuid and
+                    c1.cache_stat.uuid == c2.cache_stat.uuid):
+                    break
+
+            # Allow the next item to process
+            self.log.debug("Resume processing second queue item")
+            queue_item_resume.set()
+            self.waitUntilSettled("Merge change A", matcher=[second])
+
+        # Release everything now
+        self.executor_server.hold_jobs_in_build = False
+        self.executor_server.release()
+
+        self.waitUntilSettled("End")
+        self.assertHistory([
+            dict(name='check-job', result='SUCCESS', changes='1,1'),
+            dict(name='check-job', result='SUCCESS', changes='1,1 2,1'),
+        ])
+        self.assertEqual(A.data['status'], 'MERGED')
+        self.assertEqual(B.data['status'], 'MERGED')
 
     @okay_tracebacks('Unterminated string starting at')
     def test_pipeline_summary(self):

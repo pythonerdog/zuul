@@ -1,0 +1,4 @@
+project1: true
+job_var_precedence: include-vars
+project_var_precedence: include-vars
+parent_var_precedence: include-vars

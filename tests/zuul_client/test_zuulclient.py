@@ -13,17 +13,46 @@
 # under the License.
 
 import time
-import jwt
 import os
 import subprocess
 import tempfile
 import textwrap
 
+from kazoo.exceptions import NoNodeError
+
+import zuul.model
 from zuul.lib import yamlutil
 
-from tests.base import iterate_timeout
-from tests.base import AnsibleZuulTestCase
+from tests.base import (
+    AnsibleZuulTestCase,
+    iterate_timeout,
+    simple_layout,
+)
 from tests.unit.test_web import BaseTestWeb
+from tests.unit.test_launcher import LauncherBaseTestCase
+
+
+def _split_pretty_table(output):
+    lines = output.decode().split('\n')
+    headers = [x.strip() for x in lines[1].split('|') if x != '']
+    # Trim headers and last line of the table
+    return [dict(zip(headers,
+                     [x.strip() for x in l.split('|') if x != '']))
+            for l in lines[3:-2]]
+
+
+def _split_line_output(output):
+    lines = output.decode().split('\n')
+    info = {}
+    for l in lines:
+        if l.startswith('==='):
+            continue
+        try:
+            key, value = l.split(':', 1)
+            info[key] = value.strip()
+        except ValueError:
+            continue
+    return info
 
 
 class TestSmokeZuulClient(BaseTestWeb):
@@ -186,15 +215,7 @@ class TestZuulClientAdmin(BaseTestWeb):
 
     def test_autohold(self):
         """Test that autohold can be set with the Web client"""
-        authz = {'iss': 'zuul_operator',
-                 'aud': 'zuul.example.com',
-                 'sub': 'testuser',
-                 'zuul': {
-                     'admin': ['tenant-one', ]
-                 },
-                 'exp': int(time.time()) + 3600}
-        token = jwt.encode(authz, key='NoDanaOnlyZuul',
-                           algorithm='HS256')
+        token = self._getToken()
         p = subprocess.Popen(
             ['zuul-client',
              '--zuul-url', self.base_url, '--auth-token', token, '-v',
@@ -227,15 +248,7 @@ class TestZuulClientAdmin(BaseTestWeb):
         A.addApproval('Code-Review', 2)
         A.addApproval('Approved', 1)
 
-        authz = {'iss': 'zuul_operator',
-                 'aud': 'zuul.example.com',
-                 'sub': 'testuser',
-                 'zuul': {
-                     'admin': ['tenant-one', ]
-                 },
-                 'exp': int(time.time()) + 3600}
-        token = jwt.encode(authz, key='NoDanaOnlyZuul',
-                           algorithm='HS256')
+        token = self._getToken()
         p = subprocess.Popen(
             ['zuul-client',
              '--zuul-url', self.base_url, '--auth-token', token, '-v',
@@ -263,15 +276,7 @@ class TestZuulClientAdmin(BaseTestWeb):
         A_commit = str(upstream[p].commit('master'))
         self.log.debug("A commit: %s" % A_commit)
 
-        authz = {'iss': 'zuul_operator',
-                 'aud': 'zuul.example.com',
-                 'sub': 'testuser',
-                 'zuul': {
-                     'admin': ['tenant-one', ]
-                 },
-                 'exp': int(time.time()) + 3600}
-        token = jwt.encode(authz, key='NoDanaOnlyZuul',
-                           algorithm='HS256')
+        token = self._getToken()
         p = subprocess.Popen(
             ['zuul-client',
              '--zuul-url', self.base_url, '--auth-token', token, '-v',
@@ -308,15 +313,7 @@ class TestZuulClientAdmin(BaseTestWeb):
                 break
         self.waitUntilSettled()
 
-        authz = {'iss': 'zuul_operator',
-                 'aud': 'zuul.example.com',
-                 'sub': 'testuser',
-                 'zuul': {
-                     'admin': ['tenant-one', ]
-                 },
-                 'exp': int(time.time()) + 3600}
-        token = jwt.encode(authz, key='NoDanaOnlyZuul',
-                           algorithm='HS256')
+        token = self._getToken()
         p = subprocess.Popen(
             ['zuul-client',
              '--zuul-url', self.base_url, '--auth-token', token, '-v',
@@ -358,15 +355,7 @@ class TestZuulClientAdmin(BaseTestWeb):
             enqueue_times[str(item.changes[0])] = item.enqueue_time
 
         # Promote B and C using the cli
-        authz = {'iss': 'zuul_operator',
-                 'aud': 'zuul.example.com',
-                 'sub': 'testuser',
-                 'zuul': {
-                     'admin': ['tenant-one', ]
-                 },
-                 'exp': int(time.time()) + 3600}
-        token = jwt.encode(authz, key='NoDanaOnlyZuul',
-                           algorithm='HS256')
+        token = self._getToken()
         p = subprocess.Popen(
             ['zuul-client',
              '--zuul-url', self.base_url, '--auth-token', token, '-v',
@@ -421,32 +410,102 @@ class TestZuulClientAdmin(BaseTestWeb):
         self.assertEqual(C.data['status'], 'MERGED')
         self.assertEqual(C.reported, 2)
 
+    def test_manage_events(self):
+        self.executor_server.hold_jobs_in_build = False
+        A = self.fake_gerrit.addFakeChange('org/project', 'master', 'A')
+        self.fake_gerrit.addEvent(A.getPatchsetCreatedEvent(1))
+        self.waitUntilSettled()
+        self.assertHistory([
+            dict(name='project-merge', result='SUCCESS', changes='1,1'),
+            dict(name='project-test1', result='SUCCESS', changes='1,1'),
+            dict(name='project-test2', result='SUCCESS', changes='1,1'),
+        ], ordered=False)
+
+        token = self._getToken()
+        p = subprocess.Popen(
+            ['zuul-client',
+             '--zuul-url', self.base_url, '--auth-token', token, '-v',
+             'manage-events', '--tenant', 'tenant-one',
+             'pause-trigger',
+             '--reason', 'test trigger paused'],
+            stdout=subprocess.PIPE)
+        output = p.communicate()
+        self.assertEqual(p.returncode, 0, output)
+        time.sleep(1)
+
+        B = self.fake_gerrit.addFakeChange('org/project', 'master', 'B')
+        self.fake_gerrit.addEvent(B.getPatchsetCreatedEvent(1))
+        time.sleep(5)
+
+        self.assertHistory([
+            dict(name='project-merge', result='SUCCESS', changes='1,1'),
+            dict(name='project-test1', result='SUCCESS', changes='1,1'),
+            dict(name='project-test2', result='SUCCESS', changes='1,1'),
+        ], ordered=False)
+        self.assertEqual(0, len(self.builds))
+
+        p = subprocess.Popen(
+            ['zuul-client',
+             '--zuul-url', self.base_url, '--auth-token', token, '-v',
+             'manage-events', '--tenant', 'tenant-one',
+             'pause-result',
+             '--reason', 'test result paused'],
+            stdout=subprocess.PIPE)
+        output = p.communicate()
+        self.assertEqual(p.returncode, 0, output)
+
+        time.sleep(5)
+        self.assertHistory([
+            dict(name='project-merge', result='SUCCESS', changes='1,1'),
+            dict(name='project-test1', result='SUCCESS', changes='1,1'),
+            dict(name='project-test2', result='SUCCESS', changes='1,1'),
+        ], ordered=False)
+        self.assertEqual(0, len(self.builds))
+
+        p = subprocess.Popen(
+            ['zuul-client',
+             '--zuul-url', self.base_url, '--auth-token', token, '-v',
+             'manage-events', '--all-tenants', 'normal'],
+            stdout=subprocess.PIPE)
+        output = p.communicate()
+        self.assertEqual(p.returncode, 0, output)
+
+        self.waitUntilSettled()
+        self.assertHistory([
+            dict(name='project-merge', result='SUCCESS', changes='1,1'),
+            dict(name='project-test1', result='SUCCESS', changes='1,1'),
+            dict(name='project-test2', result='SUCCESS', changes='1,1'),
+            dict(name='project-merge', result='SUCCESS', changes='2,1'),
+            dict(name='project-test1', result='SUCCESS', changes='2,1'),
+            dict(name='project-test2', result='SUCCESS', changes='2,1'),
+        ], ordered=False)
+
+        p = subprocess.Popen(
+            ['zuul-client',
+             '--zuul-url', self.base_url, '--auth-token', token, '-v',
+             'manage-events', '--all-tenants', 'discard-trigger'],
+            stdout=subprocess.PIPE)
+        output = p.communicate()
+        self.assertEqual(p.returncode, 0, output)
+
+        C = self.fake_gerrit.addFakeChange('org/project', 'master', 'C')
+        self.fake_gerrit.addEvent(C.getPatchsetCreatedEvent(1))
+
+        self.waitUntilSettled()
+        self.assertHistory([
+            dict(name='project-merge', result='SUCCESS', changes='1,1'),
+            dict(name='project-test1', result='SUCCESS', changes='1,1'),
+            dict(name='project-test2', result='SUCCESS', changes='1,1'),
+            dict(name='project-merge', result='SUCCESS', changes='2,1'),
+            dict(name='project-test1', result='SUCCESS', changes='2,1'),
+            dict(name='project-test2', result='SUCCESS', changes='2,1'),
+        ], ordered=False)
+
 
 class TestZuulClientQueryData(BaseTestWeb):
     """Test that zuul-client can fetch builds"""
     config_file = 'zuul-sql-driver-mysql.conf'
     tenant_config_file = 'config/sql-driver/main.yaml'
-
-    def _split_pretty_table(self, output):
-        lines = output.decode().split('\n')
-        headers = [x.strip() for x in lines[1].split('|') if x != '']
-        # Trim headers and last line of the table
-        return [dict(zip(headers,
-                         [x.strip() for x in l.split('|') if x != '']))
-                for l in lines[3:-2]]
-
-    def _split_line_output(self, output):
-        lines = output.decode().split('\n')
-        info = {}
-        for l in lines:
-            if l.startswith('==='):
-                continue
-            try:
-                key, value = l.split(':', 1)
-                info[key] = value.strip()
-            except ValueError:
-                continue
-        return info
 
     def setUp(self):
         super(TestZuulClientQueryData, self).setUp()
@@ -494,7 +553,7 @@ class TestZuulClientBuilds(TestZuulClientQueryData,
             stdout=subprocess.PIPE)
         output, err = p.communicate()
         self.assertEqual(p.returncode, 0, output)
-        results = self._split_pretty_table(output)
+        results = _split_pretty_table(output)
         self.assertEqual(17, len(results), results)
 
         # 5 jobs in check, 3 jobs in gate
@@ -505,7 +564,7 @@ class TestZuulClientBuilds(TestZuulClientQueryData,
             stdout=subprocess.PIPE)
         output, err = p.communicate()
         self.assertEqual(p.returncode, 0, output)
-        results = self._split_pretty_table(output)
+        results = _split_pretty_table(output)
         self.assertEqual(8, len(results), results)
         self.assertTrue(all(x['Project'] == 'org/project' for x in results),
                         results)
@@ -518,7 +577,7 @@ class TestZuulClientBuilds(TestZuulClientQueryData,
             stdout=subprocess.PIPE)
         output, err = p.communicate()
         self.assertEqual(p.returncode, 0, output)
-        results = self._split_pretty_table(output)
+        results = _split_pretty_table(output)
         self.assertEqual(5, len(results), results)
         self.assertTrue(all(x['Job'] == 'project-test1' for x in results),
                         results)
@@ -531,7 +590,7 @@ class TestZuulClientBuilds(TestZuulClientQueryData,
             stdout=subprocess.PIPE)
         output, err = p.communicate()
         self.assertEqual(p.returncode, 0, output)
-        results = self._split_pretty_table(output)
+        results = _split_pretty_table(output)
         self.assertEqual(9, len(results), results)
         self.assertTrue(all(x['Change or Ref'].startswith('2,')
                             for x in results),
@@ -546,7 +605,7 @@ class TestZuulClientBuilds(TestZuulClientQueryData,
             stdout=subprocess.PIPE)
         output, err = p.communicate()
         self.assertEqual(p.returncode, 0, output)
-        results = self._split_pretty_table(output)
+        results = _split_pretty_table(output)
         self.assertEqual(0, len(results), results)
 
         for result in ['SUCCESS', 'FAILURE']:
@@ -561,7 +620,7 @@ class TestZuulClientBuilds(TestZuulClientQueryData,
                 job_count += 1
             output, err = p.communicate()
             self.assertEqual(p.returncode, 0, output)
-            results = self._split_pretty_table(output)
+            results = _split_pretty_table(output)
             self.assertEqual(job_count, len(results), results)
             if len(results) > 0:
                 self.assertTrue(all(x['Result'] == result for x in results),
@@ -575,7 +634,7 @@ class TestZuulClientBuilds(TestZuulClientQueryData,
             stdout=subprocess.PIPE)
         output, err = p.communicate()
         self.assertEqual(p.returncode, 0, output)
-        results = self._split_pretty_table(output)
+        results = _split_pretty_table(output)
         self.assertEqual(6, len(results), results)
         self.assertTrue(all(x['Pipeline'] == 'gate' for x in results),
                         results)
@@ -597,7 +656,7 @@ class TestZuulClientBuildInfo(TestZuulClientQueryData,
             stdout=subprocess.PIPE)
         output, err = p.communicate()
         self.assertEqual(p.returncode, 0, (output, err))
-        info = self._split_line_output(output)
+        info = _split_line_output(output)
         self.assertEqual(test_build.uuid, info.get('UUID'), test_build)
         self.assertEqual(test_build.result, info.get('Result'), test_build)
         self.assertEqual(test_build.name, info.get('Job'), test_build)
@@ -612,7 +671,7 @@ class TestZuulClientBuildInfo(TestZuulClientQueryData,
             stdout=subprocess.PIPE)
         output, err = p.communicate()
         self.assertEqual(p.returncode, 0, output)
-        results = self._split_pretty_table(output)
+        results = _split_pretty_table(output)
         uuid = results[0]['ID']
         p = subprocess.Popen(
             ['zuul-client',
@@ -623,7 +682,7 @@ class TestZuulClientBuildInfo(TestZuulClientQueryData,
             stdout=subprocess.PIPE)
         output, err = p.communicate()
         self.assertEqual(p.returncode, 0, (output, err))
-        artifacts = self._split_pretty_table(output)
+        artifacts = _split_pretty_table(output)
         self.assertTrue(
             any(x['name'] == 'tarball' and
                 x['url'] == 'http://example.com/tarball'
@@ -637,13 +696,6 @@ class TestZuulClientBuildInfo(TestZuulClientQueryData,
 
 
 class TestZuulClientJobGraph(BaseTestWeb):
-    def _split_pretty_table(self, output):
-        lines = output.decode().split('\n')
-        headers = [x.strip() for x in lines[1].split('|') if x != '']
-        # Trim headers and last line of the table
-        return [dict(zip(headers,
-                         [x.strip() for x in l.split('|') if x != '']))
-                for l in lines[3:-2]]
 
     def test_job_graph(self):
         """Test the job-graph command"""
@@ -659,7 +711,7 @@ class TestZuulClientJobGraph(BaseTestWeb):
             stdout=subprocess.PIPE)
         output, err = p.communicate()
         self.assertEqual(p.returncode, 0, (output, err))
-        results = self._split_pretty_table(output)
+        results = _split_pretty_table(output)
         expected = [
             {'Job': 'project-merge', 'Dependencies': ''},
             {'Job': 'project-test1', 'Dependencies': 'project-merge'},
@@ -729,6 +781,7 @@ class TestZuulClientAdminWithAccessRules(TestZuulClientAdmin):
     """Test the admin commands of zuul-client with access rules"""
     config_file = 'zuul-admin-web.conf'
     tenant_config_file = 'config/single-tenant/main-access-rules.yaml'
+    default_token_groups = ['users']
 
 
 class TestZuulClientEncryptWithAccessRules(TestZuulClientEncrypt):
@@ -736,16 +789,143 @@ class TestZuulClientEncryptWithAccessRules(TestZuulClientEncrypt):
     tenant_config_file = 'config/secrets/main-access-rules.yaml'
 
     def _getClientCommand(self, *args):
-        authz = {'iss': 'zuul_operator',
-                 'aud': 'zuul.example.com',
-                 'sub': 'testuser',
-                 'zuul': {
-                     'admin': ['tenant-one', ]
-                 },
-                 'exp': int(time.time()) + 3600}
-        token = jwt.encode(authz, key='NoDanaOnlyZuul',
-                           algorithm='HS256')
+        token = self._getToken()
         return ['zuul-client',
                 '--zuul-url', self.base_url,
                 '--auth-token', token, '-v',
                 *args]
+
+
+class TestZuulClientNodesets(LauncherBaseTestCase, BaseTestWeb):
+    """Test that zuul-client can fetch nodeset info"""
+    config_file = 'zuul-connections-nodepool.conf'
+
+    @simple_layout('layouts/nodepool.yaml', enable_nodepool=True)
+    def test_node_list(self):
+        self.executor_server.hold_jobs_in_build = True
+        A = self.fake_gerrit.addFakeChange('org/project', 'master', 'A')
+        self.fake_gerrit.addEvent(A.getPatchsetCreatedEvent(1))
+        self.waitUntilSettled()
+
+        p = subprocess.Popen(
+            ['zuul-client',
+             '--zuul-url', self.base_url,
+             'node-list', '--tenant', 'tenant-one',
+             ],
+            stdout=subprocess.PIPE)
+        output, err = p.communicate()
+        self.assertEqual(p.returncode, 0, output)
+        results = _split_pretty_table(output)
+        self.assertEqual(1, len(results), results)
+        r = results[0]
+        self.assertIsNotNone(r['UUID'])
+        self.assertEqual("['debian-normal']", r['Labels'])
+        self.assertEqual('ssh', r['Connection'])
+        self.assertEqual(
+            'review.example.com%2Forg%2Fcommon-config/aws-us-east-1-main',
+            r['Provider'])
+        self.assertEqual('in-use', r['State'])
+        self.assertIsNotNone(r['State Time'])
+
+    @simple_layout('layouts/nodepool.yaml', enable_nodepool=True)
+    def test_nodeset_request_list(self):
+        self.hold_nodeset_requests_in_queue = True
+        A = self.fake_gerrit.addFakeChange('org/project', 'master', 'A')
+        self.fake_gerrit.addEvent(A.getPatchsetCreatedEvent(1))
+        self.waitUntilSettled()
+
+        p = subprocess.Popen(
+            ['zuul-client',
+             '--zuul-url', self.base_url,
+             'nodeset-request-list', '--tenant', 'tenant-one',
+             ],
+            stdout=subprocess.PIPE)
+        output, err = p.communicate()
+        self.assertEqual(p.returncode, 0, output)
+        results = _split_pretty_table(output)
+        self.assertEqual(1, len(results), results)
+        r = results[0]
+        self.assertIsNotNone(r['UUID'])
+        self.assertEqual("['debian-normal']", r['Labels'])
+        self.assertIsNotNone(r['Buildset'])
+        self.assertEqual('test-hold', r['State'])
+        self.assertIsNotNone(r['Request Time'])
+        self.assertEqual('check', r['Pipeline'])
+        self.assertEqual('check-job', r['Job'])
+
+        self.hold_nodeset_requests_in_queue = False
+        self.executor_server.hold_jobs_in_build = False
+        self.releaseNodesetRequests()
+        self.waitUntilSettled()
+
+    @simple_layout('layouts/nodepool.yaml', enable_nodepool=True)
+    def test_nodes_hold_delete(self):
+        # This tests 3 things (since they are lifecycle related):
+        # * Setting the node state to hold
+        # * Setting the node state to delete
+        # * Deleting the request
+        self.waitUntilSettled()
+
+        request = self.requestNodes(['debian-normal'])
+        self.assertEqual(request.state,
+                         zuul.model.NodesetRequest.State.FULFILLED)
+        self.assertEqual(len(request.nodes), 1)
+
+        nodes = self.get_url('api/tenant/tenant-one/nodes').json()
+        self.assertEqual(len(nodes), 1)
+
+        token = self._getToken()
+        p = subprocess.Popen(
+            ['zuul-client',
+             '--zuul-url', self.base_url, '--auth-token', token,
+             'node-set-state', '--tenant', 'tenant-one',
+             nodes[0]['uuid'], 'hold',
+             ],
+            stdout=subprocess.PIPE)
+        output, err = p.communicate()
+        self.assertEqual(p.returncode, 0, output)
+        self.waitUntilSettled()
+
+        node = self.launcher.api.nodes_cache.getItem(nodes[0]['uuid'])
+        self.assertEqual(node.State.HOLD, node.state)
+
+        token = self._getToken()
+        p = subprocess.Popen(
+            ['zuul-client',
+             '--zuul-url', self.base_url, '--auth-token', token,
+             'node-set-state', '--tenant', 'tenant-one',
+             nodes[0]['uuid'], 'used',
+             ],
+            stdout=subprocess.PIPE)
+        output, err = p.communicate()
+        self.assertEqual(p.returncode, 0, output)
+        self.waitUntilSettled()
+
+        requests = self.get_url(
+            'api/tenant/tenant-one/nodeset-requests').json()
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(request.uuid, requests[0]['uuid'])
+
+        token = self._getToken()
+        p = subprocess.Popen(
+            ['zuul-client',
+             '--zuul-url', self.base_url, '--auth-token', token,
+             'nodeset-request-delete', '--tenant', 'tenant-one',
+             requests[0]['uuid'],
+             ],
+            stdout=subprocess.PIPE)
+        output, err = p.communicate()
+        self.assertEqual(p.returncode, 0, output)
+        self.waitUntilSettled()
+
+        ctx = self.createZKContext(None)
+        for _ in iterate_timeout(10, "request to be deleted"):
+            try:
+                request.refresh(ctx)
+            except NoNodeError:
+                break
+        for _ in iterate_timeout(10, "node to be deleted"):
+            try:
+                node.refresh(ctx)
+            except NoNodeError:
+                break

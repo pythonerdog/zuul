@@ -162,11 +162,11 @@ class BaseReporter(object, metaclass=abc.ABCMeta):
         return format_methods[action]
 
     def _formatItemReport(self, item, change=None,
-                          with_jobs=True, action=None):
+                          with_jobs=True, action=None, short=False):
         """Format a report from the given items. Usually to provide results to
         a reporter taking free-form text."""
         action = action or self._action
-        ret = self._getFormatter(action)(item, change, with_jobs)
+        ret = self._getFormatter(action)(item, change, with_jobs, short)
 
         config_warnings = item.getConfigErrors(errors=False, warnings=True)
         if config_warnings:
@@ -185,26 +185,26 @@ class BaseReporter(object, metaclass=abc.ABCMeta):
 
         return ret
 
-    def _formatItemReportEnqueue(self, item, change, with_jobs=True):
+    def _formatItemReportEnqueue(self, item, change, with_jobs, short):
         return item.manager.pipeline.enqueue_message.format(
             pipeline=item.manager.pipeline.getSafeAttributes(),
             item_url=item.formatItemUrl())
 
-    def _formatItemReportStart(self, item, change, with_jobs=True):
+    def _formatItemReportStart(self, item, change, with_jobs, short):
         return item.manager.pipeline.start_message.format(
             pipeline=item.manager.pipeline.getSafeAttributes(),
             item_url=item.formatItemUrl())
 
-    def _formatItemReportSuccess(self, item, change, with_jobs=True):
+    def _formatItemReportSuccess(self, item, change, with_jobs, short):
         msg = item.manager.pipeline.success_message
         if with_jobs:
             item_url = item.formatItemUrl()
             if item_url is not None:
                 msg += '\n' + item_url
-            msg += '\n\n' + self._formatItemReportJobs(item)
+            msg += '\n\n' + self._formatItemReportJobs(item, short)
         return msg
 
-    def _formatItemReportFailure(self, item, change, with_jobs=True):
+    def _formatItemReportFailure(self, item, change, with_jobs, short):
         if len(item.changes) > 1:
             _this_change = 'These changes'
             _depends = 'depend'
@@ -237,7 +237,8 @@ class BaseReporter(object, metaclass=abc.ABCMeta):
             change_annotations = {c: ' (config error)'
                                   for c in changes_with_errors}
             if with_jobs:
-                msg = '{}\n{}'.format(msg, self._formatItemReportJobs(item))
+                msg = '{}\n{}'.format(msg, self._formatItemReportJobs(
+                    item, short))
             msg = "{}\n{}".format(
                 msg, self._formatItemReportOtherChanges(item,
                                                         change_annotations))
@@ -252,7 +253,7 @@ class BaseReporter(object, metaclass=abc.ABCMeta):
                 item_url = item.formatItemUrl()
                 if item_url is not None:
                     msg += '\n' + item_url
-                msg += '\n\n' + self._formatItemReportJobs(item)
+                msg += '\n\n' + self._formatItemReportJobs(item, short)
         return msg
 
     def _getChangesWithErrors(self, item):
@@ -268,36 +269,39 @@ class BaseReporter(object, metaclass=abc.ABCMeta):
                     ret.append(change)
         return ret
 
-    def _formatItemReportMergeConflict(self, item, change, with_jobs=True):
+    def _formatItemReportMergeConflict(self, item, change, with_jobs, short):
         return item.manager.pipeline.merge_conflict_message
 
-    def _formatItemReportMergeFailure(self, item, change, with_jobs=True):
+    def _formatItemReportMergeFailure(self, item, change, with_jobs, short):
         return 'This change was not merged by the code review system.\n'
 
-    def _formatItemReportConfigError(self, item, change, with_jobs=True):
+    def _formatItemReportConfigError(self, item, change, with_jobs, short):
         if item.getConfigErrors():
             msg = str(item.getConfigErrors()[0].error)
         else:
             msg = "Unknown configuration error"
         return msg
 
-    def _formatItemReportNoJobs(self, item, change, with_jobs=True):
+    def _formatItemReportNoJobs(self, item, change, with_jobs, short):
         return item.manager.pipeline.no_jobs_message.format(
             pipeline=item.manager.pipeline.getSafeAttributes(),
             item_url=item.formatItemUrl())
 
-    def _formatItemReportDisabled(self, item, change, with_jobs=True):
+    def _formatItemReportDisabled(self, item, change, with_jobs=True,
+                                  short=False):
         if item.current_build_set.result == 'SUCCESS':
-            return self._formatItemReportSuccess(item, change)
+            return self._formatItemReportSuccess(item, change,
+                                                 with_jobs, short)
         elif item.current_build_set.result == 'FAILURE':
-            return self._formatItemReportFailure(item, change)
+            return self._formatItemReportFailure(item, change,
+                                                 with_jobs, short)
         else:
-            return self._formatItemReport(item, change)
+            return self._formatItemReport(item, change, with_jobs, short)
 
-    def _formatItemReportDequeue(self, item, change, with_jobs=True):
+    def _formatItemReportDequeue(self, item, change, with_jobs, short):
         msg = item.manager.pipeline.dequeue_message
         if with_jobs:
-            msg += '\n\n' + self._formatItemReportJobs(item)
+            msg += '\n\n' + self._formatItemReportJobs(item, short)
         return msg
 
     def _formatItemReportOtherChanges(self, item, change_annotations):
@@ -366,13 +370,18 @@ class BaseReporter(object, metaclass=abc.ABCMeta):
                 (name, url, result, error, elapsed, voting, success_message))
         return jobs_fields, skipped
 
-    def _formatItemReportJobs(self, item):
+    def _formatItemReportJobs(self, item, short):
         # Return the list of jobs portion of the report
+        # If short is true, omit successful jobs for brevity
         ret = ''
         jobs_fields, skipped = self._getItemReportJobsFields(item)
         for job_fields in jobs_fields:
+            if short and job_fields[2] == 'SUCCESS':
+                continue
             ret += '- %s%s : %s%s%s%s\n' % job_fields[:6]
         if skipped:
             jobtext = 'job' if skipped == 1 else 'jobs'
             ret += 'Skipped %i %s\n' % (skipped, jobtext)
+        if short:
+            ret += 'Successful jobs omitted due to length restrictions\n'
         return ret

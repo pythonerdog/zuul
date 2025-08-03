@@ -12,7 +12,7 @@ When making a model change:
   easier to clean up backwards-compatibility handling in the future.
 * Make sure code that special cases model versions either references a
   ``model_api`` variable or has a comment like `MODEL_API: >
-  {version}` so that we can grep for that and clean up compatability
+  {version}` so that we can grep for that and clean up compatibility
   code that is no longer needed.
 * Add a test to ``test_model_upgrade.py``.
 * Add an entry to this log so we can decide when to remove
@@ -36,7 +36,7 @@ Version 2
 ---------
 
 :Prior Zuul version: 5.0.0
-:Description: Changes the sempahore handle format from `<item_uuid>-<job_name>`
+:Description: Changes the semaphore handle format from `<item_uuid>-<job_name>`
               to a dictionary with buildset path and job name.
 
 Version 3
@@ -92,7 +92,7 @@ Version 9
 
 :Prior Zuul version: 6.3.0
 :Description: Adds nodeset_alternatives and nodeset_index to frozen job.
-              Removes nodset from frozen job.  Affects schedulers and executors.
+              Removes nodeset from frozen job.  Affects schedulers and executors.
 
 Version 10
 ----------
@@ -141,7 +141,7 @@ Version 16
 Version 17
 ----------
 :Prior Zuul version: 9.1.0
-:Description: Adds ZuulRegex and adjusts SourceContext serialialization.
+:Description: Adds ZuulRegex and adjusts SourceContext serialization.
               Affects schedulers and web.
 
 Version 18
@@ -178,7 +178,7 @@ Version 22
 Version 23
 ----------
 :Prior Zuul version: 9.3.0
-:Description: Add model_version field to bulid sets.
+:Description: Add model_version field to build sets.
               Affects schedulers.
 
 Version 24
@@ -246,3 +246,9 @@ Version 34
 :Prior Zuul version: 11.3.0
 :Description: Don't store deprecated web ``status_url`` in system attributes anymore.
               Affects schedulers and web.
+
+Version 35
+----------
+:Prior Zuul version: 11.3.0
+:Description: Updated Secret configuration format to support OIDC token.
+              Affects schedulers and executors.

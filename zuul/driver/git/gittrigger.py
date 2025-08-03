@@ -39,7 +39,8 @@ class GitTrigger(BaseTrigger):
                 types=to_list(trigger['event']),
                 refs=refs,
                 ignore_deletes=trigger.get(
-                    'ignore-deletes', True)
+                    'ignore-deletes', True),
+                debug=trigger.get('debug'),
             )
             efilters.append(f)
 
@@ -52,6 +53,7 @@ def getSchema():
             scalar_or_list(v.Any('ref-updated')),
         'ref': scalar_or_list(v.Any(ZUUL_REGEX, str)),
         'ignore-deletes': bool,
+        'debug': bool,
     }
 
     return git_trigger

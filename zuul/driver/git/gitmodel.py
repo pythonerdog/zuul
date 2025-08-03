@@ -39,9 +39,9 @@ class GitTriggerEvent(TriggerEvent):
 
 class GitEventFilter(EventFilter):
     def __init__(self, connection_name, trigger, types=None, refs=None,
-                 ignore_deletes=True):
+                 ignore_deletes=True, debug=None):
 
-        super().__init__(connection_name, trigger)
+        super().__init__(connection_name, trigger, debug)
 
         refs = refs if refs is not None else []
         self._refs = [x.pattern for x in refs]

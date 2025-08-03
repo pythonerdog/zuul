@@ -97,6 +97,12 @@ Glossary
       incorporate any cross-project dependencies into the context
       for the change declaring that dependency relationship.
 
+   data secret
+
+      A :ref:`secret` that consists of user-defined data, whether
+      encrypted or not.  Useful for securely supplying information about
+      remote resources (eg, usernames, passwords, urls, etc) to jobs.
+
    deploy
 
       By convention, the name of a continuous-deployment pipeline.
@@ -348,6 +354,13 @@ Glossary
       more than one tenant.  Zuul's HTTP API methods and Web
       dashboard are scoped per tenant, in order to support distinct
       tenant-specific authentication and authorization.
+
+   token secret
+
+      A :ref:`secret` that consists of an automatically generated
+      OpenID Connect token that uniquely identifies the secret as well
+      as information about the job using it.  Useful for
+      authenticating to federated third-party services.
 
    trigger
 

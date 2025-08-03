@@ -24,10 +24,6 @@
   shell: |
     egrep "^.+\| {{ item.node }} \| Exception: Test module failure exception loop" {{ item.filename }}
 
-- name: Validate output - binary data
-  shell: |
-    egrep "^.*\| {{ item.node }} \| \\\\x80abc" {{ item.filename }}
-
 - name: Validate output - no waiting on logger
   shell: |
     egrep -v "Waiting on logger" {{ item.filename }}

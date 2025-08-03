@@ -125,6 +125,9 @@ class PagureSource(BaseSource):
     def getProjectBranches(self, project, tenant, min_ltime=-1):
         return self.connection.getProjectBranches(project, tenant, min_ltime)
 
+    def getProjectBranchSha(self, project, branch_name):
+        return self.connection.getProjectBranchSha(project, branch_name)
+
     def getProjectBranchCacheLtime(self):
         return self.connection._branch_cache.ltime
 

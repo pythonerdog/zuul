@@ -482,9 +482,14 @@ class FakeUser(object):
 
 
 class FakeBranch(object):
-    def __init__(self, fake_repo, branch='master', protected=False):
+    def __init__(self, fake_repo, github_data, branch='master',
+                 protected=False):
         self.name = branch
         self._fake_repo = fake_repo
+        upstream_root = github_data.fake_github_connection.upstream_root
+        repo_path = os.path.join(upstream_root, fake_repo.name)
+        repo = git.Repo(repo_path)
+        self.sha = repo.heads[branch].commit.hexsha
 
     @property
     def protected(self):
@@ -493,7 +498,10 @@ class FakeBranch(object):
     def as_dict(self):
         return {
             'name': self.name,
-            'protected': self.protected
+            'protected': self.protected,
+            'commit': {
+                'sha': self.sha,
+            }
         }
 
 
@@ -686,11 +694,11 @@ class FakeCommit:
 
 class FakeRepository(object):
     def __init__(self, name, data):
-        self._api = FAKE_BASE_URL
-        self._branches = [FakeBranch(self)]
-        self._commits = {}
         self.data = data
         self.name = name
+        self._api = FAKE_BASE_URL
+        self._branches = [FakeBranch(self, data)]
+        self._commits = {}
 
         # Simple dictionary to store permission values per feature (e.g.
         # checks, Repository contents, Pull requests, Commit statuses, ...).
@@ -755,7 +763,7 @@ class FakeRepository(object):
         return client.session.get(url, headers)
 
     def _create_branch(self, branch):
-        self._branches.append((FakeBranch(self, branch=branch)))
+        self._branches.append((FakeBranch(self, self.data, branch=branch)))
 
     def _delete_branch(self, branch_name):
         self._branches = [b for b in self._branches if b.name != branch_name]

@@ -53,6 +53,18 @@ class ImageBuildRegistry(LockableZKObjectCache):
         arts = sorted(arts, key=lambda x: x.timestamp)
         return arts
 
+    def getAllArtifacts(self):
+        keys = []
+        for image_canonical_name in self.builds_by_image_name.keys():
+            keys.extend(self.builds_by_image_name[image_canonical_name])
+        arts = [self._cached_objects.get(key) for key in keys]
+        arts = [a for a in arts if a is not None]
+        # Sort in a stable order, primarily by timestamp, then format
+        # for identical timestamps.
+        arts = sorted(arts, key=lambda x: x.format)
+        arts = sorted(arts, key=lambda x: x.timestamp)
+        return arts
+
 
 class ImageUploadRegistry(LockableZKObjectCache):
 

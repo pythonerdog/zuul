@@ -2,13 +2,17 @@
 # if we set zuul_console_disabled, we don't try to connect at all.  If
 # there is a log streamer running when we run this test, then we have
 # no indication that we avoid the connection step.
+- name: Disable zuul console
+  hosts: node
+  tasks:
+    - set_fact:
+        zuul_console_disabled: true
+
 - name: Run command to show skipping works without zuul_console running
-  vars:
-    zuul_console_disabled: true
   hosts: node
   tasks:
     - name: Run quiet command
-      command: echo 'This command should not stream'
+      command: echo 'This command should not stream 1'
       when: new_console | default(false)
 
 - name: Start zuul stream daemon
@@ -25,12 +29,16 @@
       when: new_console | default(false)
 
 - name: Run command to show skipping works with zuul_console running
-  vars:
-    zuul_console_disabled: true
   hosts: node
   tasks:
     - name: Run quiet command
-      command: echo 'This command should not stream'
+      command: echo 'This command should not stream 2'
+
+- name: Enable zuul console
+  hosts: node
+  tasks:
+    - set_fact:
+        zuul_console_disabled: false
 
 - name: Run some commands to show that logging works
   hosts: node
@@ -82,9 +90,6 @@
         - item2
         - item3
       failed_when: false
-
-    - name: Print binary data
-      command: echo -e '\x80abc'
 
     - name: Find any console log files
       find:

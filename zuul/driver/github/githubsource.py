@@ -152,6 +152,9 @@ class GithubSource(BaseSource):
             return super().getProjectDefaultBranch(project, tenant, min_ltime)
         return default_branch
 
+    def getProjectBranchSha(self, project, branch_name):
+        return self.connection.getProjectBranchSha(project, branch_name)
+
     def getProjectBranchCacheLtime(self):
         return self.connection._branch_cache.ltime
 

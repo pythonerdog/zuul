@@ -247,6 +247,20 @@ a.refresh {
     padding-right: var(--pf-global--spacer--sm);
 }
 
+.zuul-build-attributes .pf-c-code-block__content {
+    padding: 12px;
+}
+
+.zuul-build-attributes .pf-c-code-block__pre {
+    font-size: var(--pf-global--FontSize--xs);
+    border: none;
+}
+
+.zuul-build-attributes .pf-c-expandable-section__toggle {
+    font-size: var(--pf-global--FontSize--sm);
+    padding-bottom: 0;
+}
+
 /* Status page */
 
 .zuul-show-all-switch {

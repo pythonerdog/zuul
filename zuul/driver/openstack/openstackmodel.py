@@ -22,11 +22,13 @@ class OpenstackProviderNode(model.ProviderNode, subclass_id="openstack"):
         super().__init__()
         self._set(
             openstack_server_id=None,
+            openstack_floating_ip_id=None,
         )
 
     def getDriverData(self):
         return dict(
             openstack_server_id=self.openstack_server_id,
+            openstack_floating_ip_id=self.openstack_floating_ip_id,
         )
 
 

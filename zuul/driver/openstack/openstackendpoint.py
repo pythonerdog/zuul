@@ -39,6 +39,7 @@ from zuul.driver.util import (
 )
 from zuul.model import QuotaInformation
 from zuul.provider import (
+    BaseImageUploadJob,
     BaseProviderEndpoint,
     statemachine
 )
@@ -75,6 +76,21 @@ def quota_from_limits(compute, volume):
         args['volume-gb'] = bound_value(
             volume['absolute']['maxTotalVolumeGigabytes'])
     return QuotaInformation(**args)
+
+
+def is_message_about_quota(msg):
+    msg = msg.lower()
+    if 'quota' in msg:
+        return True
+    if 'ports exceeded' in msg:
+        return True
+    if all(s in msg for s in ('insufficient', 'resources')):
+        # Exceeded maximum number of retries. Exceeded max scheduling
+        # attempts 6 for instance
+        # f9daa9f2-1181-4693-827f-ba84cd4b002c. Last exception:
+        # Insufficient compute resources: Free vcpu 0.00 VCPU <
+        # requested 8 VCPU.
+        return True
 
 
 class ZuulOpenstackServer(UserDict):
@@ -126,7 +142,6 @@ class ZuulOpenstackServer(UserDict):
 
 class OpenstackDeleteStateMachine(statemachine.StateMachine):
     FLOATING_IP_DELETING = 'deleting floating ip'
-    SERVER_DELETE_SUBMIT = 'submit delete server'
     SERVER_DELETE = 'delete server'
     SERVER_DELETING = 'deleting server'
     COMPLETE = 'complete'
@@ -136,23 +151,28 @@ class OpenstackDeleteStateMachine(statemachine.StateMachine):
         self.endpoint = endpoint
         self.node = node
         super().__init__(node.delete_state)
-        self.floating_ips = None
+        self.delete_future = None
+
+        # Restore local objects
+        self.server = None
+        self.floating_ips = []
+        if self.node.openstack_server_id:
+            self.server = self.endpoint._getServer(
+                self.node.openstack_server_id)
+            if (self.server and
+                self.endpoint._hasFloatingIps() and
+                self.server.get('addresses')):
+                self.floating_ips = self.endpoint._getFloatingIps(
+                    self.server)
 
     def advance(self):
         if self.state == self.START:
             if self.node.openstack_server_id:
-                self.server = self.endpoint._getServer(
-                    self.node.openstack_server_id)
-                if (self.server and
-                    self.endpoint._hasFloatingIps() and
-                    self.server.get('addresses')):
-                    self.floating_ips = self.endpoint._getFloatingIps(
-                        self.server)
-                    for fip in self.floating_ips:
-                        self.endpoint._deleteFloatingIp(fip)
-                        self.state = self.FLOATING_IP_DELETING
+                for fip in self.floating_ips:
+                    self.endpoint._deleteFloatingIp(fip)
+                    self.state = self.FLOATING_IP_DELETING
                 if not self.floating_ips:
-                    self.state = self.SERVER_DELETE_SUBMIT
+                    self.state = self.SERVER_DELETE
             else:
                 self.state = self.COMPLETE
 
@@ -168,15 +188,13 @@ class OpenstackDeleteStateMachine(statemachine.StateMachine):
             if self.floating_ips:
                 return
             else:
-                self.state = self.SERVER_DELETE_SUBMIT
-
-        if self.state == self.SERVER_DELETE_SUBMIT:
-            self.delete_future = self.endpoint._submitApi(
-                self.endpoint._deleteServer,
-                self.node.openstack_server_id)
-            self.state = self.SERVER_DELETE
+                self.state = self.SERVER_DELETE
 
         if self.state == self.SERVER_DELETE:
+            if not self.delete_future:
+                self.delete_future = self.endpoint._submitApi(
+                    self.endpoint._deleteServer,
+                    self.node.openstack_server_id)
             if self.endpoint._completeApi(self.delete_future):
                 self.state = self.SERVER_DELETING
 
@@ -206,9 +224,9 @@ class OpenstackCreateStateMachine(statemachine.StateMachine):
         self.label = label
         self.flavor = flavor
         self.image = image
-        self.server = None
         self.hostname = hostname
         self.az = label.az
+        self.create_future = None
         super().__init__(node.create_state)
         self.attempts = node.create_state.get("attempts", 0)
         self.image_external_id = node.create_state.get(
@@ -234,7 +252,26 @@ class OpenstackCreateStateMachine(statemachine.StateMachine):
             flavor_name=flavor.flavor_name,
         )
         self.node.quota = quota_from_flavor(self.os_flavor, label=self.label)
-        self.node.openstack_server_id = None
+
+        if self.state == self.SERVER_CREATING_SUBMIT:
+            for instance in self.endpoint.listInstances():
+                if instance.metadata.get('zuul_node_uuid') == node.uuid:
+                    self.node.openstack_server_id =\
+                        instance.openstack_server_id
+            if self.node.openstack_server_id:
+                self.state = self.SERVER_CREATING
+
+        self.server = None
+        if self.node.openstack_server_id:
+            self.server = self.endpoint._refreshServer(
+                dict(
+                    id=self.node.openstack_server_id,
+                    status='_unknown',
+                ))
+        self.floating_ip = None
+        if self.node.openstack_floating_ip_id:
+            self.floating_ip = self.endpoint._refreshFloatingIp(
+                dict(id=self.node.openstack_floating_ip_id))
 
     def _handleServerFault(self):
         # Return True if this is a quota fault
@@ -248,33 +285,41 @@ class OpenstackCreateStateMachine(statemachine.StateMachine):
             fault = server.get('fault', {}).get('message')
             if fault:
                 self.log.error('Detailed node error: %s', fault)
-                if 'quota' in fault:
+                if is_message_about_quota(fault):
                     return True
         except Exception:
             self.log.exception(
                 'Failed to retrieve node error information:')
 
+    def toDict(self):
+        data = super().toDict()
+        data.update(
+            attempts=self.attempts,
+            image_external_id=self.image_external_id,
+        )
+        return data
+
     def advance(self):
         if self.state == self.START:
-            self.node.openstack_server_id = None
-            self.create_future = self.endpoint._submitApi(
-                self.endpoint._createServer,
-                self.hostname,
-                image=self.image_external,
-                flavor=self.os_flavor,
-                key_name=self.label.key_name,
-                az=self.az,
-                config_drive=self.config_drive,
-                networks=self.label.networks,
-                security_groups=self.label.security_groups,
-                boot_from_volume=self.label.boot_from_volume,
-                volume_size=self.label.volume_size,
-                instance_properties=self.metadata,
-                userdata=self.label.userdata,
-            )
             self.state = self.SERVER_CREATING_SUBMIT
 
         if self.state == self.SERVER_CREATING_SUBMIT:
+            if not self.create_future:
+                self.create_future = self.endpoint._submitApi(
+                    self.endpoint._createServer,
+                    self.hostname,
+                    image=self.image_external,
+                    flavor=self.os_flavor,
+                    key_name=self.label.key_name,
+                    az=self.az,
+                    config_drive=self.config_drive,
+                    networks=self.label.networks,
+                    security_groups=self.label.security_groups,
+                    boot_from_volume=self.label.boot_from_volume,
+                    volume_size=self.label.volume_size,
+                    instance_properties=self.metadata,
+                    userdata=self.label.userdata,
+                )
             try:
                 try:
                     self.server = self.endpoint._completeApi(
@@ -287,15 +332,12 @@ class OpenstackCreateStateMachine(statemachine.StateMachine):
                     if e.resource_id:
                         self.node.openstack_server_id = e.resource_id
                         if self._handleServerFault():
-                            self.log.exception("Launch attempt failed:")
+                            self.log.error("Launch attempt failed: %s", str(e))
                             raise exceptions.QuotaException("Quota exceeded")
                         raise
             except Exception as e:
-                if 'quota exceeded' in str(e).lower():
-                    self.log.exception("Launch attempt failed:")
-                    raise exceptions.QuotaException("Quota exceeded")
-                if 'number of ports exceeded' in str(e).lower():
-                    self.log.exception("Launch attempt failed:")
+                if is_message_about_quota(str(e)):
+                    self.log.error("Launch attempt failed: %s", str(e))
                     raise exceptions.QuotaException("Quota exceeded")
                 raise
 
@@ -307,6 +349,7 @@ class OpenstackCreateStateMachine(statemachine.StateMachine):
                     self.endpoint._needsFloatingIp(self.server)):
                     self.floating_ip = self.endpoint._createFloatingIp(
                         self.server)
+                    self.node.openstack_floating_ip_id = self.floating_ip['id']
                     self.state = self.FLOATING_IP_CREATING
                 else:
                     self.state = self.COMPLETE
@@ -317,8 +360,8 @@ class OpenstackCreateStateMachine(statemachine.StateMachine):
                         "Error in creating the server."
                         " Compute service reports fault: {reason}".format(
                             reason=self.server['fault']['message']))
-                    error_message = self.server['fault']['message'].lower()
-                    if all(s in error_message for s in ('exceeds', 'quota')):
+                    error_message = self.server['fault']['message']
+                    if is_message_about_quota(error_message):
                         raise exceptions.QuotaException("Quota exceeded")
                 raise exceptions.LaunchStatusException("Server in error state")
             else:
@@ -348,6 +391,30 @@ class OpenstackCreateStateMachine(statemachine.StateMachine):
         if self.state == self.COMPLETE:
             self.complete = True
             return self.endpoint._getInstance(self.server, self.node.quota)
+
+
+class OpenstackImageUploadJob(BaseImageUploadJob):
+    def __init__(self, endpoint,
+                 provider_image, image_name, filename,
+                 image_format, metadata,
+                 md5, sha256):
+        self.endpoint = endpoint
+        self.provider_image = provider_image
+        self.image_name = image_name
+        self.filename = filename
+        self.image_format = image_format
+        self.metadata = metadata
+        self.md5 = md5
+        self.sha256 = sha256
+
+    def run(self):
+        self.endpoint.log.debug(f"Uploading image {self.image_name}")
+
+        image_id = self.endpoint._uploadImage(
+            self.provider_image, self.image_name,
+            self.filename, self.image_format, self.metadata,
+            self.md5, self.sha256)
+        return image_id
 
 
 class OpenstackProviderEndpoint(BaseProviderEndpoint):
@@ -463,9 +530,9 @@ class OpenstackProviderEndpoint(BaseProviderEndpoint):
             volume = None
         return quota_from_limits(compute, volume)
 
-    def getQuotaForLabel(self, label):
-        flavor = self._findFlavor(label.flavor_name, label.min_ram)
-        return quota_from_flavor(flavor, label=label)
+    def getQuotaForLabel(self, label, flavor):
+        os_flavor = self._findFlavorByName(flavor.flavor_name)
+        return quota_from_flavor(os_flavor, label=label)
 
     def getAZs(self):
         # TODO: This is currently unused; it's unclear if we will need
@@ -509,8 +576,15 @@ class OpenstackProviderEndpoint(BaseProviderEndpoint):
             return False
         return True
 
-    def uploadImage(self, provider_image, image_name, filename,
-                    image_format, metadata, md5, sha256):
+    def getImageUploadJob(self, provider_image, image_name, filename,
+                          image_format, metadata, md5, sha256):
+        return OpenstackImageUploadJob(
+            self,
+            provider_image, image_name, filename,
+            image_format, metadata, md5, sha256)
+
+    def _uploadImage(self, provider_image, image_name, filename,
+                     image_format, metadata, md5, sha256):
         # configure glance and upload image.  Note the meta flags
         # are provided as custom glance properties
         # NOTE: we have wait=True set here. This is not how we normally

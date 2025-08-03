@@ -42,6 +42,7 @@ from zuul.lib.varnames import check_varnames
 from zuul.zk.components import COMPONENT_REGISTRY
 from zuul.zk.semaphore import SemaphoreHandler
 from zuul.exceptions import (
+    AlgorithmNotSupportedException,
     CleanupRunDeprecation,
     DuplicateGroupError,
     DuplicateNodeError,
@@ -72,20 +73,18 @@ def to_list(x):
     return vs.Any([x], x)
 
 
-def override_list(x):
-    def validator(v):
-        if isinstance(v, yaml.OverrideValue):
-            v = v.value
-        vs.Any([x], x)(v)
-    return validator
-
-
 def override_value(x):
+    schema = vs.Schema(x)
+
     def validator(v):
         if isinstance(v, yaml.OverrideValue):
             v = v.value
-        vs.Schema(x)(v)
+        schema(v)
     return validator
+
+
+def override_list(x):
+    return override_value(to_list(x))
 
 
 def as_list(item):
@@ -638,12 +637,26 @@ class SecretParser(object):
         self.pcontext = pcontext
         self.schema = self.getSchema()
 
+    def _checkMissingAttribute(self, secret):
+        if 'data' not in secret and 'oidc' not in secret:
+            raise vs.Invalid("Either 'data' or 'oidc' must be present.")
+        return secret
+
     def getSchema(self):
-        secret = {vs.Required('name'): str,
-                  vs.Required('data'): dict,
-                  '_source_context': model.SourceContext,
-                  '_start_mark': model.ZuulMark,
-                  }
+        oidc_schema = vs.Any({
+            'algorithm': str,
+            'ttl': int,
+            'iss': str,
+            'claims': dict,
+        }, None)
+
+        secret = vs.All({
+            vs.Required('name'): str,
+            vs.Exclusive('data', 'secret_type'): dict,
+            vs.Exclusive('oidc', 'secret_type'): oidc_schema,
+            '_source_context': model.SourceContext,
+            '_start_mark': model.ZuulMark,
+        }, self._checkMissingAttribute)
 
         return vs.Schema(secret)
 
@@ -652,7 +665,25 @@ class SecretParser(object):
         s = model.Secret(conf['name'], conf['_source_context'])
         s.source_context = conf['_source_context']
         s.start_mark = conf['_start_mark']
-        s.secret_data = conf['data']
+        if 'data' in conf:
+            s.secret_data = conf['data']
+        else:
+            # TODO: A change to the global config would require
+            # reloading the file where the secret is defined; this may
+            # not be obvious to users, but it's also probably not
+            # something we need to immediately solve.  It probably
+            # would be fixed by a full reconfiguration.
+            glbl = self.pcontext.scheduler.globals
+            if conf['oidc'] is None:
+                conf['oidc'] = {}
+            algorithm = conf['oidc'].get('algorithm')
+            if not algorithm:
+                conf['oidc']['algorithm'] = glbl.oidc_default_signing_algorithm
+            elif algorithm not in glbl.oidc_supported_signing_algorithms:
+                raise AlgorithmNotSupportedException(
+                    f"Algorithm '{algorithm}' is not supported")
+
+            s.secret_oidc = conf['oidc']
         return s
 
 
@@ -858,6 +889,20 @@ class JobParser(object):
         self.log = logging.getLogger("zuul.JobParser")
         self.pcontext = pcontext
 
+    @staticmethod
+    def _makeVariantDescription(conf):
+        parts = []
+        for b in as_list(conf.get('branches')):
+            if isinstance(b, dict):
+                if b.get('negate'):
+                    part = b['regex'] + ' (negated)'
+                else:
+                    part = b['regex']
+            else:
+                part = b
+            parts.append(part)
+        return ' '.join(parts)
+
     def fromYaml(self, conf,
                  project_pipeline=False, name=None, validate=True):
         if validate:
@@ -876,10 +921,7 @@ class JobParser(object):
         job.source_context = conf['_source_context']
         job.start_mark = conf['_start_mark']
         job.project_pipeline = project_pipeline
-        job.variant_description = conf.get(
-            'variant-description', " ".join([
-                str(x) for x in as_list(conf.get('branches'))
-            ]))
+        job.variant_description = JobParser._makeVariantDescription(conf)
 
         if 'parent' in conf:
             if conf['parent'] is not None:
@@ -1877,6 +1919,8 @@ class TenantParser(object):
                   'max-dependencies': int,
                   'max-nodes-per-job': int,
                   'max-job-timeout': int,
+                  'max-oidc-ttl': int,
+                  'allowed-oidc-issuers': to_list(str),
                   'source': self.validateTenantSources(),
                   'exclude-unprotected-branches': bool,
                   'exclude-locked-branches': bool,
@@ -1893,6 +1937,8 @@ class TenantParser(object):
                   'authentication-realm': str,
                   # TODO: Ignored, allowed for backwards compat, remove for v5.
                   'report-build-page': bool,
+                  # TODO: Remove after nodepool transitions
+                  'use-nodepool': bool,
                   'web-root': str,
                   }
         return vs.Schema(tenant)
@@ -1920,6 +1966,12 @@ class TenantParser(object):
             tenant.max_nodes_per_job = conf['max-nodes-per-job']
         if conf.get('max-job-timeout') is not None:
             tenant.max_job_timeout = int(conf['max-job-timeout'])
+        if conf.get('max-oidc-ttl') is not None:
+            tenant.max_oidc_ttl = int(conf['max-oidc-ttl'])
+        if conf.get('default-oidc-ttl') is not None:
+            tenant.default_oidc_ttl = int(conf['default-oidc-ttl'])
+        if conf.get('allowed-oidc-issuers') is not None:
+            tenant.allowed_oidc_issuers = as_list(conf['allowed-oidc-issuers'])
         if conf.get('exclude-unprotected-branches') is not None:
             tenant.exclude_unprotected_branches = \
                 conf['exclude-unprotected-branches']
@@ -1945,6 +1997,8 @@ class TenantParser(object):
         tenant.allowed_labels = conf.get('allowed-labels')
         tenant.disallowed_labels = conf.get('disallowed-labels')
         tenant.default_base_job = conf.get('default-parent', 'base')
+        # TODO: switch default value after nodepool transition
+        tenant.use_nodepool = conf.get('use-nodepool', True)
 
         tenant.unparsed_config = conf
         # tpcs is TenantProjectConfigs
@@ -2826,23 +2880,6 @@ class TenantParser(object):
                             "Skipped adding job %s which shadows "
                             "an existing job", job)
 
-        # Now that all the jobs are loaded, verify references to other
-        # config objects.
-        for nodeset in layout.nodesets.values():
-            with parse_context.errorContext(stanza='nodeset', conf=nodeset):
-                with parse_context.accumulator.catchErrors():
-                    nodeset.validateReferences(layout)
-        for jobs in layout.jobs.values():
-            for job in jobs:
-                with parse_context.errorContext(stanza='job', conf=job):
-                    with parse_context.accumulator.catchErrors():
-                        job.validateReferences(layout)
-        for manager in layout.pipeline_managers.values():
-            pipeline = manager.pipeline
-            with parse_context.errorContext(stanza='pipeline', conf=pipeline):
-                with parse_context.accumulator.catchErrors():
-                    pipeline.validateReferences(layout)
-
         if dynamic_layout:
             # We should not actually update the layout with new
             # semaphores, but so that we can validate that the config
@@ -2922,6 +2959,23 @@ class TenantParser(object):
                         flat_config,
                         parse_context.system.system_id)
                     shadow_layout.addProvider(provider)
+
+        # Now that all the objects are added, verify references to
+        # other config objects.
+        for nodeset in layout.nodesets.values():
+            with parse_context.errorContext(stanza='nodeset', conf=nodeset):
+                with parse_context.accumulator.catchErrors():
+                    nodeset.validateReferences(layout)
+        for jobs in layout.jobs.values():
+            for job in jobs:
+                with parse_context.errorContext(stanza='job', conf=job):
+                    with parse_context.accumulator.catchErrors():
+                        job.validateReferences(layout)
+        for manager in layout.pipeline_managers.values():
+            pipeline = manager.pipeline
+            with parse_context.errorContext(stanza='pipeline', conf=pipeline):
+                with parse_context.accumulator.catchErrors():
+                    pipeline.validateReferences(layout)
 
         for e in parsed_config.queue_errors:
             layout.loading_errors.addError(e)
@@ -3278,6 +3332,7 @@ class ConfigLoader(object):
     def _loadDynamicProjectData(self, abide, parsed_config, project,
                                 files, additional_project_branches,
                                 trusted, item, pcontext):
+        log = get_annotated_logger(self.log, item.event)
         tenant = item.manager.tenant
         tpc = tenant.project_configs[project.canonical_name]
         if trusted:
@@ -3311,6 +3366,9 @@ class ConfigLoader(object):
             # If there is no files entry at all for this
             # project-branch, then use the cached config.
             if files_entry is None:
+                # Don't use the cached config for a dynamic branch
+                if tpc.isAlwaysDynamicBranch(branch):
+                    continue
                 config_object_cache = abide.getConfigObjectCache(
                     project.canonical_name, branch)
                 branch_config = config_object_cache.get(tpc, ZUUL_CONF_ROOT)
@@ -3351,7 +3409,7 @@ class ConfigLoader(object):
                         # project-branch (unless an "extra" file/dir).
                         if (conf_root in ZUUL_CONF_ROOT):
                             if loaded and loaded != conf_root:
-                                self.log.warning(
+                                log.warning(
                                     "Configuration in %s ignored because "
                                     "project-branch is already configured",
                                     source_context)
@@ -3362,7 +3420,7 @@ class ConfigLoader(object):
                                 continue
                             loaded = conf_root
 
-                        self.log.info(
+                        log.info(
                             "Loading configuration dynamically from %s" %
                             (source_context,))
                         branch_config = self.tenant_parser.loadProjectYAML(
@@ -3375,11 +3433,11 @@ class ConfigLoader(object):
     def createDynamicLayout(self, item, files,
                             additional_project_branches,
                             ansible_manager,
-                            include_config_projects=False,
-                            zuul_event_id=None):
+                            include_config_projects=False):
         abide = self.scheduler.abide
         tenant = item.manager.tenant
-        log = get_annotated_logger(self.log, zuul_event_id)
+        event_id = item.event
+        log = get_annotated_logger(self.log, event_id)
         pcontext = ParseContext(self.connections, self.scheduler,
                                 self.system, ansible_manager)
         config = model.ParsedConfig()

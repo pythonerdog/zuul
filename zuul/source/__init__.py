@@ -232,6 +232,10 @@ class BaseSource(object, metaclass=abc.ABCMeta):
         return 'master'
 
     @abc.abstractmethod
+    def getProjectBranchSha(self, project, branch_name):
+        """Return the SHA of the specified branch"""
+
+    @abc.abstractmethod
     def getProjectBranchCacheLtime(self):
         """Return the current ltime of the project branch cache."""
 

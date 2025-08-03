@@ -190,3 +190,11 @@ class TestGitDriver(ZuulTestCase):
         self.waitUntilSettled()
         # Make sure no job as run as ignore-delete is True by default
         self.assertEqual(len(self.history), 0)
+
+    @simple_layout('layouts/basic-git.yaml', driver='git')
+    def test_get_project_branch_sha(self):
+        # Exercise this method since it's only called from timer
+        # triggers
+        source = self.scheds.first.sched.connections.getSource('git')
+        project = source.getProject('org/project')
+        self.assertIsNotNone(source.getProjectBranchSha(project, 'master'))

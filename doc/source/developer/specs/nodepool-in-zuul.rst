@@ -58,7 +58,7 @@ a Zuul job.  By moving the actual image build into a Zuul job, we can
 make the activity more visible to users of the system.  It will be
 easier for users to test changes to image builds (inasmuch as they can
 propose a change and a check job can run on that change to see if the
-image builds sucessfully).  Build history and logs will be visible in
+image builds successfully).  Build history and logs will be visible in
 the usual way in the Zuul web interface.
 
 A frequently requested feature is the ability to verify images before
@@ -333,9 +333,9 @@ score. For that we will use `Rendezvous/HRW (highest random weight) hashing
 candidate launchers. The launcher with the highest score will lock and process
 a request or node.
 
-The the hash will consist of the unique launcher indentifiers (e.g. the
+The hash will consist of the unique launcher identifiers (e.g. the
 hostnames from the component registry) and the UUID of the request or node. The
-choosen hash function here needs to  be fast and doesn't have to be a
+chosen hash function here needs to  be fast and doesn't have to be a
 cryptographic hash function (e.g MurmurHash).
 
 With this approach nodes/requests are essentially sharded between the available
@@ -358,7 +358,7 @@ the request (in other words, individual nodes may be declined by
 providers).
 
 All drivers for providers should implement the state machine
-interface.  Any state machine information currently storen in memory
+interface.  Any state machine information currently stored in memory
 in nodepool-launcher will need to move to ZooKeeper so that other
 launchers can resume state machine processing.
 
@@ -684,7 +684,7 @@ Here is a potential static node configuration:
        labels:
          - big-static-node
 
-Each of the the above stanzas may only appear once in a tenant for a
+Each of the above stanzas may only appear once in a tenant for a
 given name (like pipelines or semaphores, they are singleton objects).
 If they appear in more than one branch of a project, the definitions
 must be identical; otherwise, or if they appear in more than one repo,
@@ -718,7 +718,7 @@ in another.  Therefore the node request will internally specify the
 canonical label name instead of the short name.  Users will never use
 canonical names, only short names.
 
-For static nodes, there is some repitition to labels: first labels
+For static nodes, there is some repetition to labels: first labels
 must be associated with the individual nodes defined on the section,
 then the labels must appear again on a provider.  This allows an
 operator to define a collection of static nodes centrally on a
@@ -750,7 +750,7 @@ sent to ``/zuul/node-requests``.  Once a tenant has completely
 converted, a configuration flag may be set in the tenant configuration
 and that will allow Zuul to treat nodesets that reference unknown
 labels as configuration errors.  A later version of Zuul will remove
-the backwards compatability and make this the standard behavior.
+the backwards compatibility and make this the standard behavior.
 
 Because each of the systems will have unique metadata, they will not
 recognize each others nodes, and it will appear to each that another

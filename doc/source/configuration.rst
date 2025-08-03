@@ -214,6 +214,33 @@ Database
       if you rely on external databases which are not under your control.
       The default is to have no prefix.
 
+OIDC
+~~~~
+
+.. attr:: oidc
+
+   This optional section of ``zuul.conf``, if present, can be used to
+   customize the configuration of Zuul as an OpenId Connect (OIDC)
+   Identity Provider.
+
+   .. attr:: supported_signing_algorithms
+      :default: RS256
+
+      Algorithms that should be supported for signing the OIDC tokens,
+      a string of algorithm names separated by ``,``. Currently
+      ``RS256`` is supported.
+
+   .. attr:: default_signing_algorithm
+      :default: RS256
+
+      The default algorithm used for signing the OIDC tokens if not
+      specified in secret configuration.
+
+   .. attr:: signing_key_rotation_interval
+      :default: 604800
+
+      The rotation interval of the signing key, in seconds.
+
 .. _scheduler:
 
 Scheduler
@@ -311,8 +338,8 @@ The following sections of ``zuul.conf`` are used by the scheduler:
 
       After the first 10 changes, the relative priority becomes more
       coarse (batching groups of 10 changes at the same priority).
-      Likewise, after 100 changes they are batchen in groups of 100.
-      This is to avoid causing additional load with unecessary
+      Likewise, after 100 changes they are batched in groups of 100.
+      This is to avoid causing additional load with unnecessary
       priority changes if queues are long.
 
       If this value is ``False`` (the default), then node requests are
@@ -641,7 +668,7 @@ The following sections of ``zuul.conf`` are used by the executor:
    .. attr:: manage_ansible
       :default: True
 
-      Specifies wether the zuul-executor should install the supported ansible
+      Specifies whether the zuul-executor should install the supported ansible
       versions during startup or not. If this is ``True`` the zuul-executor
       will install the ansible versions into :attr:`executor.ansible_root`.
 
@@ -800,7 +827,7 @@ The following sections of ``zuul.conf`` are used by the executor:
       Name of the nodepool executor-zone to exclusively execute all jobs that
       have nodes with the specified executor-zone attribute.  As an example,
       it is possible for nodepool nodes to exist in a cloud without public
-      accessable IP address. By adding an executor to a zone nodepool nodes
+      accessible IP address. By adding an executor to a zone nodepool nodes
       could be configured to use private ip addresses.
 
       To enable this in nodepool, you'll use the node-attributes setting in a
@@ -987,7 +1014,7 @@ sections of ``zuul.conf`` are used by the web server:
       there are executors with different zones in the environment and
       not all executors are directly addressable from zuul-web. The
       parameter specifies the zone where the executors are directly
-      adressable. Live log streaming will go directly to the executors
+      addressable. Live log streaming will go directly to the executors
       of the same zone and be routed to a finger gateway of the target
       zone if the zones are different.
 
@@ -1073,7 +1100,7 @@ protected endpoints and configure JWT validation:
 
       Optional value to ensure a JWT cannot be valid for more than this amount
       of time in seconds. This is useful if the Zuul operator has no control
-      over the service issueing JWTs, and the tokens are too long-lived.
+      over the service issuing JWTs, and the tokens are too long-lived.
 
    .. attr:: skew
       :default: 0
@@ -1231,7 +1258,7 @@ the following purposes:
 * Allowing end-users to connect to the finger port to stream logs.
 
 * Providing an accessible log streaming port for remote zoned
-  executors which are otherwise inacessible.
+  executors which are otherwise inaccessible.
 
   In this case, log streaming requests from finger gateways or
   zuul-web will route to the executors via finger gateways in the same

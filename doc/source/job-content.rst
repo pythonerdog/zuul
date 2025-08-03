@@ -357,7 +357,7 @@ described above) are available:
          ``!unsafe`` YAML tag so that Ansible will not interpolate
          values into it.  Note, however, that the `inventory.yaml`
          file placed in the build's workspace for debugging and
-         inspection purposes does not inclued the ``!unsafe`` tag.
+         inspection purposes does not include the ``!unsafe`` tag.
 
    .. var:: change_url
 
@@ -439,9 +439,12 @@ described above) are available:
       This field is present for the following item types:
 
       Branch
-         If the item was enqueued as the result of a change merging
-         or being pushed to the branch, the git sha of the new
-         revision will be included here.
+         If the item was enqueued as the result of a change merging or
+         being pushed to the branch, the git sha of the new revision
+         will be included here.  If the item was enqueued due to a
+         timer and the ``dereference`` flag was set on the timer
+         trigger, it will contain the git sha of the branch at the
+         time it was enqueued.
 
       Tag
          If the item was enqueued as the result of a tag being
@@ -549,7 +552,7 @@ The following variables related to the queue item are available:
             ``!unsafe`` YAML tag so that Ansible will not interpolate
             values into it.  Note, however, that the `inventory.yaml`
             file placed in the build's workspace for debugging and
-            inspection purposes does not inclued the ``!unsafe`` tag.
+            inspection purposes does not include the ``!unsafe`` tag.
 
       .. var:: change_url
 
@@ -715,7 +718,7 @@ The following variables related to the queue item are available:
             ``!unsafe`` YAML tag so that Ansible will not interpolate
             values into it.  Note, however, that the `inventory.yaml`
             file placed in the build's workspace for debugging and
-            inspection purposes does not inclued the ``!unsafe`` tag.
+            inspection purposes does not include the ``!unsafe`` tag.
 
       .. var:: change_url
 
@@ -875,7 +878,7 @@ The following variables related to the queue item are available:
             ``!unsafe`` YAML tag so that Ansible will not interpolate
             values into it.  Note, however, that the `inventory.yaml`
             file placed in the build's workspace for debugging and
-            inspection purposes does not inclued the ``!unsafe`` tag.
+            inspection purposes does not include the ``!unsafe`` tag.
 
       .. var:: change_url
 
@@ -1053,7 +1056,7 @@ The following variables related to the job are available:
       may be re-enqueued in which case another build may run.  In
       dependent pipelines, the same job may run multiple times for the
       same item as circumstances change ahead in the queue.  Each time
-      a job is run, for whatever reason, it is acompanied with a new
+      a job is run, for whatever reason, it is accompanied with a new
       unique id.
 
    .. var:: buildset
@@ -1719,7 +1722,7 @@ the elements of `zuul.file_comments` from each invocation will be appended.
 Pausing the job
 ~~~~~~~~~~~~~~~
 
-A job can be paused after the run phase by notifing zuul during the run phase.
+A job can be paused after the run phase by notifying zuul during the run phase.
 In this case the dependent jobs can start and the prior job stays paused until
 all dependent jobs are finished. This for example can be useful to start
 a docker registry in a job that will be used by the dependent job.
@@ -1805,6 +1808,6 @@ A job build may have the following status:
   One of the build dependencies failed and this job was not executed.
 
 **NODE_FAILURE**
-  The test instance provider was unable to fullfill the nodeset request.
+  The test instance provider was unable to fulfill the nodeset request.
   This can happen if Nodepool is unable to provide the requested node(s)
   for the request.

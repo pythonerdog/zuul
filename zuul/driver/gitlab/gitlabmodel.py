@@ -159,8 +159,8 @@ class GitlabEventFilter(EventFilter):
     def __init__(
             self, connection_name, trigger, types=None, actions=None,
             comments=None, refs=None, labels=None, unlabels=None,
-            ignore_deletes=True):
-        super().__init__(connection_name, trigger)
+            ignore_deletes=True, debug=None):
+        super().__init__(connection_name, trigger, debug)
 
         types = types if types is not None else []
         refs = refs if refs is not None else []

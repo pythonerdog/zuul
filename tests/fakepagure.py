@@ -280,7 +280,7 @@ class FakePagureAPIClient(pagureconnection.PagureAPIClient):
             return self.gen_error("GET")
         return pr
 
-    def get(self, url):
+    def get(self, url, params=None):
         self.log.debug("Getting resource %s ..." % url)
 
         match = re.match(r'.+/api/0/(.+)/pull-request/(\d+)$', url)
@@ -307,7 +307,13 @@ class FakePagureAPIClient(pagureconnection.PagureAPIClient):
         match = re.match('.+/api/0/(.+)/git/branches$', url)
         if match:
             # project = match.groups()[0]
-            return {'branches': ['master']}, 200, "", "GET"
+            if params and params.get('with_commits'):
+                branches = {
+                    'master': '16ae2a4df107658b52750063ae203f978cf02ff7'
+                }
+            else:
+                branches = ['master']
+            return {'branches': branches}, 200, "", "GET"
 
         match = re.match(r'.+/api/0/(.+)/pull-request/(\d+)/diffstats$', url)
         if match:

@@ -28,6 +28,8 @@ import jwt
 import testtools
 import sqlalchemy
 
+from zuul.lib import encryption
+from zuul.lib.keystorage import OIDCSigningKeys
 from zuul.zk import ZooKeeperClient
 from zuul.zk.locks import SessionAwareLock
 from zuul.cmd.client import parse_cutoff
@@ -350,6 +352,55 @@ class TestKeyOperations(ZuulTestCase):
             data.get('/keystorage/gerrit/org/org%2Fproject2'))
         self.assertIsNone(
             data.get('/keystorage/gerrit/org'))
+
+
+class TestOIDCSigningKeyOperation(ZuulTestCase):
+    tenant_config_file = 'config/single-tenant/main.yaml'
+
+    def test_delete_oidc_signing_keys(self):
+        algorithm = "RS256"
+        keystore = self.scheds.first.sched.keystore
+
+        # Makesure keys are created by calling getLatestOidcSigningKeys()
+        private_key1, _, version1 = keystore.getLatestOidcSigningKeys(
+            algorithm)
+
+        with keystore.createZKContext() as context:
+            # Check that the keys are there
+            test_keys1 = OIDCSigningKeys.loadKeys(
+                context, algorithm)
+            self.assertEqual(len(test_keys1.keys), 1)
+            self.assertEqual(version1, 0)
+
+            # Config and exeute the delete command
+            config_file = os.path.join(self.test_root, 'zuul.conf')
+            with open(config_file, 'w') as f:
+                self.config.write(f)
+
+            p = subprocess.Popen(
+                [os.path.join(sys.prefix, 'bin/zuul-admin'),
+                 '-c', config_file,
+                 'delete-oidc-signing-keys',
+                 algorithm,
+                 ],
+                stdout=subprocess.PIPE)
+            out, _ = p.communicate()
+            self.log.debug(out.decode('utf8'))
+            self.assertEqual(p.returncode, 0)
+
+            # Keys should be gone
+            test_keys2 = OIDCSigningKeys.loadKeys(
+                context, algorithm)
+            self.assertIsNone(test_keys2)
+
+        # New keys are auto generated when calling getLatestOidcSigningKeys()
+        private_key2, _, version2 = keystore.getLatestOidcSigningKeys(
+            algorithm)
+        self.assertEqual(4096, private_key2.key_size)
+        self.assertNotEqual(
+            encryption.serialize_rsa_private_key(private_key2),
+            encryption.serialize_rsa_private_key(private_key1))
+        self.assertEqual(version2, 0)
 
 
 class TestOfflineZKOperations(ZuulTestCase):

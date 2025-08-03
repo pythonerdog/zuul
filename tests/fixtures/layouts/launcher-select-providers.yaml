@@ -1,0 +1,111 @@
+- pipeline:
+    name: check
+    manager: independent
+    trigger:
+      gerrit:
+        - event: patchset-created
+    success:
+      gerrit:
+        Verified: 1
+    failure:
+      gerrit:
+        Verified: -1
+
+- job:
+    name: base
+    parent: null
+    run: playbooks/base.yaml
+    nodeset:
+      nodes:
+        - label: debian-normal
+          name: controller
+
+- job:
+    name: check-job
+    run: playbooks/check.yaml
+
+- project:
+    name: org/project
+    check:
+      jobs:
+        - check-job
+
+- image:
+    name: debian
+    type: cloud
+
+- flavor:
+    name: normal
+
+- flavor:
+    name: large
+
+- flavor:
+    name: small
+
+- label:
+    name: debian-normal
+    image: debian
+    flavor: normal
+
+- label:
+    name: debian-large
+    image: debian
+    flavor: large
+
+- label:
+    name: debian-small
+    image: debian
+    flavor: small
+
+- section:
+    name: aws-base
+    abstract: true
+    connection: aws
+    host-key-checking: false
+    boot-timeout: 300
+    launch-timeout: 600
+    launch-attempts: 2
+    object-storage:
+      bucket-name: zuul
+    key-name: zuul
+    flavors:
+      - name: normal
+        instance-type: t3.medium
+      - name: large
+        instance-type: t3.large
+      - name: small
+        instance-type: t3.small
+    images:
+      - name: debian
+        image-id: ami-1e749f67
+
+- section:
+    name: aws-us-east-1
+    parent: aws-base
+    region: us-east-1
+
+- section:
+    name: aws-us-west-1
+    parent: aws-base
+    region: us-west-1
+
+- provider:
+    name: east
+    section: aws-us-east-1
+    labels:
+      - name: debian-normal
+      - name: debian-small
+
+- provider:
+    name: west
+    section: aws-us-west-1
+    labels:
+      - name: debian-normal
+      - name: debian-large
+
+- provider:
+    name: unused
+    section: aws-us-west-1
+    labels:
+      - name: debian-normal

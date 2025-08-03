@@ -127,6 +127,7 @@ class GithubTrigger(BaseTrigger):
                 required_statuses=to_list(trigger.get('require-status')),
                 require=trigger.get('require'),
                 reject=trigger.get('reject'),
+                debug=trigger.get('debug'),
             )
             efilters.append(f)
 
@@ -147,6 +148,7 @@ def getNewSchema():
                                      'check_run'),
         'require': githubsource.getRequireSchema(),
         'reject': githubsource.getRejectSchema(),
+        'debug': bool,
     })
 
     # Pull request
@@ -270,6 +272,7 @@ def getSchema():
         'reject': githubsource.getRejectSchema(),
         'status': scalar_or_list(str),
         'check': scalar_or_list(str),
+        'debug': bool,
     })
 
     return old_schema

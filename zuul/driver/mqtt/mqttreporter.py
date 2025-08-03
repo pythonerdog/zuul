@@ -49,6 +49,7 @@ class MQTTReporter(BaseReporter):
                 'commit_id': getattr(change, 'commit_id', ''),
                 'owner': getattr(change, 'owner', ''),
                 'ref': getattr(change, 'ref', ''),
+                'topic': getattr(change, 'topic', ''),
             }
             for change in item.changes
         ]

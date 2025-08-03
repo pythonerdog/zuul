@@ -22,6 +22,17 @@ from zuul.lib.logutil import get_annotated_logger
 from zuul.model import Change
 from zuul.reporter import BaseReporter
 
+# commentSizeLimit default set by Gerrit.  Gerrit is a bit
+# vague about what this means, it says
+#
+#  Comments which exceed this size will be rejected ... Size
+#  computation is approximate and may be off by roughly 1% ...
+#  Default is 16k
+#
+# This magic number is int((16 << 10) * 0.98).  Robot comments
+# are accounted for separately.
+GERRIT_HUMAN_MESSAGE_LIMIT = 16056
+
 
 class GerritReporter(BaseReporter):
     """Sends off reports to Gerrit."""
@@ -71,6 +82,18 @@ class GerritReporter(BaseReporter):
         comments = self.getFileComments(item, change)
         if self._create_comment:
             message = self._formatItemReport(item, change=change)
+
+            b_len = len(message.encode('utf-8'))
+            if b_len >= GERRIT_HUMAN_MESSAGE_LIMIT:
+                log.info("Message too long, using short form")
+                message = self._formatItemReport(item, change=change,
+                                                 short=True)
+            b_len = len(message.encode('utf-8'))
+            if b_len >= GERRIT_HUMAN_MESSAGE_LIMIT:
+                log.info("Message truncated %d > %d" %
+                         (b_len, GERRIT_HUMAN_MESSAGE_LIMIT))
+                message = ("%s... (truncated)" %
+                           message[:GERRIT_HUMAN_MESSAGE_LIMIT - 20])
         else:
             message = ''
 

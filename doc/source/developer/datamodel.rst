@@ -7,7 +7,7 @@ basic organizational structure that everything else hangs off.
 .. autoclass:: zuul.model.Pipeline
 
 Pipelines have a configured
-:py:class:`~zuul.manager.PipelineManager` which controlls how
+:py:class:`~zuul.manager.PipelineManager` which controls how
 the :py:class:`Ref <zuul.model.Ref>` objects are enqueued and
 processed.
 

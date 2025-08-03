@@ -1,5 +1,5 @@
 # Copyright 2012 Hewlett-Packard Development Company, L.P.
-# Copyright 2021-2024 Acme Gating, LLC
+# Copyright 2021-2025 Acme Gating, LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may
 # not use this file except in compliance with the License. You may obtain
@@ -25,6 +25,7 @@ import time
 import textwrap
 import types
 import urllib.parse
+import uuid
 from collections import OrderedDict, defaultdict, namedtuple, UserDict
 from enum import StrEnum
 from functools import partial, total_ordering
@@ -40,9 +41,13 @@ from zuul import change_matcher
 from zuul.exceptions import (
     SEVERITY_ERROR,
     SEVERITY_WARNING,
+    OIDCIssuerNotAllowedError,
     LabelForbiddenError,
+    MaxOIDCTTLError,
     MaxTimeoutError,
+    LabelNotFoundError,
     NodesetNotFoundError,
+    PreTimeoutExceedsTimeoutError,
     ProjectNotFoundError,
     ProjectNotPermittedError,
     UnknownConnection,
@@ -1223,7 +1228,7 @@ class ChangeQueue(zkobject.ZKObject):
         return (project_cname, branch) in self.project_branches
 
     def enqueueChanges(self, changes, event, span_info=None,
-                       enqueue_time=None):
+                       enqueue_time=None, debug=False):
         if enqueue_time is None:
             enqueue_time = time.time()
 
@@ -1255,7 +1260,8 @@ class ChangeQueue(zkobject.ZKObject):
                              changes=changes,
                              event=event_info,
                              span_info=span_info,
-                             enqueue_time=enqueue_time)
+                             enqueue_time=enqueue_time,
+                             debug=debug)
         self.enqueueItem(item)
         return item
 
@@ -1434,6 +1440,7 @@ class ImageBuildArtifact(zkobject.LockableZKObject):
             # Attributes that are not serialized
             lock=None,
             is_locked=False,
+            lock_holder=None,
         )
 
     @property
@@ -1516,6 +1523,23 @@ class ImageUpload(zkobject.LockableZKObject):
             # Attributes that are not serialized
             lock=None,
             is_locked=False,
+            lock_holder=None,
+        )
+
+    def copy(self, context):
+        upload_uuid = uuid.uuid4().hex
+        return ImageUpload.new(
+            context,
+            uuid=upload_uuid,
+            canonical_name=self.canonical_name,
+            artifact_uuid=self.artifact_uuid,
+            endpoint_name=self.endpoint_name,
+            providers=self.providers,
+            config_hash=self.config_hash,
+            timestamp=self.timestamp,
+            validated=self.validated,
+            _state=ImageUpload.State.PENDING,
+            state_time=time.time(),
         )
 
     @property
@@ -1558,6 +1582,14 @@ class ImageUpload(zkobject.LockableZKObject):
             state_time=self.state_time,
         )
         return json.dumps(data, sort_keys=True).encode("utf-8")
+
+    def isPermittedForProvider(self, image, provider):
+        if provider.canonical_name in self.providers:
+            return True
+
+        endpoint = provider.getEndpoint()
+        return (self.config_hash == image.config_hash and
+                endpoint.canonical_name == self.endpoint_name)
 
 
 class Image(ConfigObject):
@@ -2202,6 +2234,12 @@ class NodeSet(ConfigObject):
     def validateReferences(self, layout):
         self.flattenAlternatives(layout)
 
+        if not layout.tenant.use_nodepool:
+            requested_labels = self.flattenAlternativeLabels()
+            for name in requested_labels:
+                if name not in layout.labels:
+                    raise LabelNotFoundError(name)
+
     def __repr__(self):
         if self.name:
             name = self.name + ' '
@@ -2416,6 +2454,9 @@ class NodesetRequest(zkobject.LockableZKObject):
             request_time=time.time(),
             zuul_event_id="",
             span_info=None,
+            image_names=None,
+            image_upload_uuid=None,
+            preferred_provider=None,
             # Revisable attributes
             _relative_priority=0,
             # A dict of info about the node we have assigned to each label
@@ -2423,6 +2464,7 @@ class NodesetRequest(zkobject.LockableZKObject):
             # Attributes that are not serialized
             lock=None,
             is_locked=False,
+            lock_holder=None,
             _revision=revision,
             # Attributes set by the launcher
             _lscores=None,
@@ -2481,6 +2523,10 @@ class NodesetRequest(zkobject.LockableZKObject):
     def created_time(self):
         return self.request_time
 
+    @property
+    def id(self):
+        return self.uuid
+
     def getPath(self):
         return self._getPath(self.uuid)
 
@@ -2505,6 +2551,9 @@ class NodesetRequest(zkobject.LockableZKObject):
             request_time=self.request_time,
             zuul_event_id=self.zuul_event_id,
             span_info=self.span_info,
+            image_names=self.image_names,
+            image_upload_uuid=self.image_upload_uuid,
+            preferred_provider=self.preferred_provider,
             provider_node_data=self.provider_node_data,
             _relative_priority=self.relative_priority,
         )
@@ -2521,6 +2570,14 @@ class NodesetRequest(zkobject.LockableZKObject):
     def __repr__(self):
         return (f"<NodesetRequest uuid={self.uuid}, state={self.state},"
                 f" labels={self.labels}, path={self.getPath()}>")
+
+    def getSpanAttributes(self):
+        return dict(
+            uuid=self.uuid,
+            state=self.state,
+            job=self.job_name,
+            zuul_event_id=self.zuul_event_id,
+        )
 
 
 class NodesetRequestRevision(zkobject.ZKObject):
@@ -2584,6 +2641,11 @@ class ProviderNode(zkobject.PolymorphicZKObjectMixin,
         State.FAILED,
     )
 
+    FAILED_STATES = (
+        State.TEMPFAILED,
+        State.FAILED,
+    )
+
     CREATE_STATES = (
         State.REQUESTED,
         State.BUILDING,
@@ -2608,6 +2670,7 @@ class ProviderNode(zkobject.PolymorphicZKObjectMixin,
             request_id=None,
             min_request_version=None,
             zuul_event_id=None,
+            span_info=None,
             max_ready_age=None,
             state=self.State.REQUESTED,
             state_time=time.time(),
@@ -2615,9 +2678,11 @@ class ProviderNode(zkobject.PolymorphicZKObjectMixin,
             label_config_hash=None,
             tags={},
             connection_name="",
+            endpoint_name=None,
             create_state={},
             delete_state={},
             host_key_checking=None,
+            comment=None,
             # Node data
             boot_timeout=None,
             executor_zone=None,
@@ -2640,10 +2705,12 @@ class ProviderNode(zkobject.PolymorphicZKObjectMixin,
             tenant_name=None,
             host_keys=[],
             quota=QuotaInformation(),
+            image_upload_uuid=None,
             # This is provided to the job verbatim
             node_properties={},
             # Attributes that are not serialized
             is_locked=False,
+            lock_holder=None,
             create_state_machine=None,
             delete_state_machine=None,
             nodescan_request=None,
@@ -2654,7 +2721,7 @@ class ProviderNode(zkobject.PolymorphicZKObjectMixin,
     def __repr__(self):
         return (f"<{self.__class__.__name__} uuid={self.uuid},"
                 f" label={self.label}, state={self.state},"
-                f" path={self.getPath()}>")
+                f" provider={self.provider}>")
 
     def getPath(self):
         return self._getPath(self.uuid)
@@ -2683,6 +2750,7 @@ class ProviderNode(zkobject.PolymorphicZKObjectMixin,
             request_id=self.request_id,
             min_request_version=self.min_request_version,
             zuul_event_id=self.zuul_event_id,
+            span_info=self.span_info,
             max_ready_age=self.max_ready_age,
             state=self.state,
             state_time=self.state_time,
@@ -2690,9 +2758,12 @@ class ProviderNode(zkobject.PolymorphicZKObjectMixin,
             label_config_hash=self.label_config_hash,
             tags=self.tags,
             connection_name=self.connection_name,
+            endpoint_name=self.endpoint_name,
+            comment=self.comment,
             create_state=self.create_state,
             delete_state=self.delete_state,
             quota=self.quota.getResources(),
+            image_upload_uuid=self.image_upload_uuid,
             **self.getNodeData(),
             **self.getDriverData(),
         )
@@ -2710,6 +2781,13 @@ class ProviderNode(zkobject.PolymorphicZKObjectMixin,
         if self.state != self.State.READY:
             return False
         return (self.state_time + self.max_ready_age) < time.time()
+
+    def hasHoldExpired(self):
+        if not self.hold_expiration:
+            return False
+        if self.state != self.State.HOLD:
+            return False
+        return (self.state_time + self.hold_expiration) < time.time()
 
     def getDriverData(self):
         return dict()
@@ -2743,6 +2821,39 @@ class ProviderNode(zkobject.PolymorphicZKObjectMixin,
             node_properties=self.node_properties,
         )
 
+    def getSpanAttributes(self):
+        return dict(
+            uuid=self.uuid,
+            request_uuid=self.request_id,
+            state=self.state,
+            provider=self.provider,
+            label=self.label,
+            zuul_event_id=self.zuul_event_id,
+        )
+
+    def isPermittedForProvider(self, provider):
+        if provider.canonical_name == self.provider:
+            return True
+
+        if (provider.connection_name !=
+            self.connection_name):
+            return False
+
+        # TODO: Remove this after opendev has written nodes with
+        # endpoint_name
+        if self.endpoint_name is not None:
+            if (provider.endpoint.canonical_name !=
+                self.endpoint_name):
+                return False
+
+        if not (plabel := provider.labels.get(self.label)):
+            return False
+
+        if self.label_config_hash != plabel.config_hash:
+            return False
+
+        return True
+
 
 class Secret(ConfigObject):
     """A collection of private data.
@@ -2761,6 +2872,9 @@ class Secret(ConfigObject):
         # is named 'secret_data' to make it easy to search for and
         # spot where it is directly used.
         self.secret_data = {}
+        # This attribute stores the oidc token configuration for the
+        # oidc secrets. Mutually exclusive with secret_data.
+        self.secret_oidc = {}
 
     def __ne__(self, other):
         return not self.__eq__(other)
@@ -2769,7 +2883,8 @@ class Secret(ConfigObject):
         if not isinstance(other, Secret):
             return False
         return (self.name == other.name and
-                self.secret_data == other.secret_data)
+                self.secret_data == other.secret_data and
+                self.secret_oidc == other.secret_oidc)
 
     def __repr__(self):
         return '<Secret %s>' % (self.name,)
@@ -2801,8 +2916,29 @@ class Secret(ConfigObject):
         r.secret_data = self._decrypt(private_key, self.secret_data)
         return r
 
-    def serialize(self):
-        return yaml.encrypted_dump(self.secret_data, default_flow_style=False)
+    def serialize(self, layout):
+        # The output of this method is used by the executor
+        # Set the ttl for this tenant
+        if self.secret_oidc:
+            secret_oidc = self.secret_oidc.copy()
+            # We previously checked that it's not greater than the tenant
+            # max.
+            secret_oidc['ttl'] = secret_oidc.get(
+                'ttl', layout.tenant.default_oidc_ttl)
+            # The original name needs to be passed for generating
+            # the value of the 'sub' claim
+            secret_oidc['name'] = self.name
+        else:
+            secret_oidc = {}
+
+        if COMPONENT_REGISTRY.model_api >= 35:
+            data = {
+                "secret_data": self.secret_data,
+                "secret_oidc": secret_oidc
+            }
+        else:
+            data = self.secret_data
+        return yaml.encrypted_dump(data, default_flow_style=False)
 
 
 class SecretUse(ConfigObject):
@@ -3025,7 +3161,7 @@ class PlaybookContext(ConfigObject):
         for secret_use in self.secrets:
             secret = layout.secrets.get(secret_use.name)
             secret_name = secret_use.alias
-            encrypted_secret_data = secret.serialize()
+            encrypted_secret_data = secret.serialize(layout)
             # Use *our* project, not the secret's, because we want to decrypt
             # with *our* key.
             project = layout.tenant.getProject(
@@ -3626,6 +3762,18 @@ class FrozenJob(zkobject.ZKObject):
             playbooks = getattr(self, k)
             yield from playbooks
 
+    def incrementNodesetIndex(self):
+        if len(self.nodeset_alternatives) <= self.nodeset_index + 1:
+            # No alternatives to fall back upon
+            return False
+
+        context = self.buildset.item.manager.current_context
+        # Increment the nodeset index
+        with self.activeContext(context):
+            self.nodeset_index = self.nodeset_index + 1
+
+        return True
+
 
 class Job(ConfigObject):
     """A Job represents the defintion of actions to perform.
@@ -3963,6 +4111,17 @@ class Job(ConfigObject):
                   redact_secrets_and_keys):
         buildset = item.current_build_set
         kw = {}
+
+        # It is an error to have a pre-timeout that is larger than
+        # timeout, because pre-timeout is counted as part of timeout.
+        # We detect this situation and report the error if it occurs
+        # on a single job definition, but if it happens due to
+        # inheritance, we let the timeout value take priority and
+        # simply cap the pre-timeout as timeout.
+        if (self.pre_timeout and self.timeout and
+            self.pre_timeout > self.timeout):
+            self.pre_timeout = self.timeout
+
         attributes = (set(FrozenJob.attributes) |
                       set(FrozenJob.job_data_attributes))
         # De-duplicate the secrets across all playbooks, store them in
@@ -4257,8 +4416,12 @@ class Job(ConfigObject):
 
         for dependency in self.dependencies:
             layout.getJob(dependency.name)
-        for pb in self.pre_run + self.run + self.post_run + self.cleanup_run:
+        for pb in self.all_playbooks:
             pb.validateReferences(layout)
+
+        if not layout.tenant.use_nodepool:
+            if isinstance(self.nodeset, NodeSet):
+                self.nodeset.validateReferences(layout)
 
     def assertImagePermissions(self, image_build_name, config_object, layout):
         # config_object may be a project or an anonymous job variant
@@ -4573,7 +4736,7 @@ class Job(ConfigObject):
                     raise SecretNotFoundError(
                         "Secret %s not found" % (secret_use.name,))
                 secret_name = secret_use.alias
-                encrypted_secret_data = secret.serialize()
+                encrypted_secret_data = secret.serialize(layout)
                 # Use the other project, not the secret's, because we
                 # want to decrypt with the other project's key key.
                 connection_name = other.source_context.project_connection_name
@@ -4653,7 +4816,7 @@ class Job(ConfigObject):
             self.failure_output = tuple(sorted(failure_output))
 
         pb_semaphores = set()
-        for pb in self.run + self.pre_run + self.post_run + self.cleanup_run:
+        for pb in self.all_playbooks:
             pb_semaphores.update([x['name'] for x in pb.frozen_semaphores])
         common = (set([x.name for x in self.semaphores]) &
                   pb_semaphores)
@@ -4731,6 +4894,12 @@ class Job(ConfigObject):
             return True
 
         return False
+
+    @property
+    def all_playbooks(self):
+        for k in ('pre_run', 'run', 'post_run', 'cleanup_run'):
+            playbooks = getattr(self, k)
+            yield from playbooks
 
 
 class JobIncludeVars(ConfigObject):
@@ -5431,6 +5600,7 @@ class Build(zkobject.ZKObject):
             paused=False,
             retry=False,
             held=False,
+            unreachable=False,
             zuul_event_id=None,
             build_request_ref=None,
             span_info=None,
@@ -5454,6 +5624,7 @@ class Build(zkobject.ZKObject):
             "pre_fail": self.pre_fail,
             "retry": self.retry,
             "held": self.held,
+            "unreachable": self.unreachable,
             "zuul_event_id": self.zuul_event_id,
             "build_request_ref": self.build_request_ref,
             "span_info": self.span_info,
@@ -6278,6 +6449,30 @@ class EventInfo:
         tinfo.image_build_uuid = d.get("image_build_uuid")
         return tinfo
 
+    def isSuperset(self, other):
+        other_image_names = getattr(other, 'image_names', None)
+        image_names = self.image_names
+        if image_names is None:
+            # We will build all images
+            return True
+        if other_image_names is None:
+            # They want to build all images, and if we passed the test
+            # above, we are building a subset.
+            return False
+
+        if self.image_upload_uuid:
+            # This is an image-validate event so we need to compare
+            # the image upload UUID.
+            return self.image_upload_uuid == other.image_upload_uuid
+        elif self.image_build_uuid:
+            # This is an image-delete event so we need to compare
+            # the image build UUID.
+            return self.image_build_uuid == other.image_build_uuid
+
+        # This is an image-build event so check if we include all
+        # requested images.
+        return set(image_names) >= set(other_image_names)
+
     def toDict(self):
         return {
             "zuul_event_id": self.zuul_event_id,
@@ -6325,7 +6520,7 @@ class QueueItem(zkobject.ZKObject):
             layout_uuid=None,
             _cached_sql_results={},
             event=None,  # Info about the event that lead to this queue item
-
+            debug=False,
             # Additional container for connection specifig information to be
             # used by reporters throughout the lifecycle
             dynamic_state=defaultdict(dict),
@@ -6406,6 +6601,7 @@ class QueueItem(zkobject.ZKObject):
             },
             "dynamic_state": self.dynamic_state,
             "first_job_start_time": self.first_job_start_time,
+            "debug": self.debug,
         }
         return json.dumps(data, sort_keys=True).encode("utf8")
 
@@ -7435,6 +7631,33 @@ class QueueItem(zkobject.ZKObject):
 
     def updatesJobConfig(self, job, change, layout):
         log = self.annotateLogger(self.log)
+
+        if hasattr(change, 'files'):
+            files = {c for c in change.files if c != '/COMMIT_MSG'}
+        else:
+            files = set()
+        project_cn = change.project.canonical_name
+
+        for iv in job.include_vars:
+            _, iv_project = layout.tenant.getProject(iv.project_name)
+            if iv_project is None:
+                raise ProjectNotFoundError(iv.project_name)
+            if iv_project.canonical_name in (project_cn, None):
+                # Either the include-vars explicitly matches this
+                # change's project, or we are instructed to look in
+                # the Zuul project, which is this change's project.
+                if iv.name in files:
+                    log.debug("Include-vars %s is altered in this change",
+                              iv.name)
+                    return True
+
+        for pb in job.all_playbooks:
+            if pb.source_context.project_canonical_name == project_cn:
+                if pb.path in files:
+                    log.debug("Playbook %s is altered in this change",
+                              pb.path)
+                    return True
+
         layout_ahead = None
         if self.manager:
             layout_ahead = self.manager.getFallbackLayout(self)
@@ -8617,10 +8840,11 @@ class BaseFilter(ConfigObject):
 
 class EventFilter(BaseFilter):
     """Allows a Pipeline to only respond to certain events."""
-    def __init__(self, connection_name, trigger):
+    def __init__(self, connection_name, trigger, debug=None):
         super(EventFilter, self).__init__()
         self.connection_name = connection_name
         self.trigger = trigger
+        self.debug = bool(debug)
 
     def matches(self, event, ref):
         # TODO(jeblair): consider removing ref argument
@@ -8908,6 +9132,12 @@ class SystemAttributes:
     all schedulers and will be synchronized via Zookeeper.
     """
 
+    _default_oidc_signing_key_rotation_interval = 60 * 60 * 24 * 7  # 1 week
+    # TODO: When more algorithms are supported, this should be
+    # fallback to all supported algorithms
+    _default_oidc_supported_signing_algorithms = ['RS256']
+    _default_oidc_default_signing_algorithm = "RS256"
+
     def __init__(self):
         self.use_relative_priority = False
         self.max_hold_expiration = 0
@@ -8915,6 +9145,9 @@ class SystemAttributes:
         self.default_ansible_version = None
         self.web_root = None
         self.websocket_url = None
+        self.oidc_signing_key_rotation_interval = None
+        self.oidc_supported_signing_algorithms = None
+        self.oidc_default_signing_algorithm = None
 
     def __eq__(self, other):
         if not isinstance(other, self.__class__):
@@ -8925,7 +9158,13 @@ class SystemAttributes:
             and self.default_hold_expiration == other.default_hold_expiration
             and self.default_ansible_version == other.default_ansible_version
             and self.web_root == other.web_root
-            and self.websocket_url == other.websocket_url)
+            and self.websocket_url == other.websocket_url
+            and (self.oidc_signing_key_rotation_interval ==
+                 other.oidc_signing_key_rotation_interval)
+            and (self.oidc_supported_signing_algorithms ==
+                 other.oidc_supported_signing_algorithms)
+            and (self.oidc_default_signing_algorithm ==
+                 other.oidc_default_signing_algorithm))
 
     @classmethod
     def fromConfig(cls, config):
@@ -8963,6 +9202,20 @@ class SystemAttributes:
         self.web_root = web_root
 
         self.websocket_url = get_default(config, 'web', 'websocket_url', None)
+        self.oidc_signing_key_rotation_interval = int(get_default(
+            config, 'oidc', 'signing_key_rotation_interval',
+            self._default_oidc_signing_key_rotation_interval))
+
+        oidc_signing_algorithms_config = get_default(
+            config, 'oidc', 'supported_signing_algorithms', None)
+        self.oidc_supported_signing_algorithms = [
+            alg.strip() for alg in oidc_signing_algorithms_config.split(',')
+        ] if oidc_signing_algorithms_config else \
+            self._default_oidc_supported_signing_algorithms
+
+        self.oidc_default_signing_algorithm = get_default(
+            config, 'oidc', 'default_signing_algorithm',
+            self._default_oidc_default_signing_algorithm)
 
     def toDict(self):
         attributes = {
@@ -8972,6 +9225,12 @@ class SystemAttributes:
             "default_ansible_version": self.default_ansible_version,
             "web_root": self.web_root,
             "websocket_url": self.websocket_url,
+            "oidc_signing_key_rotation_interval":
+                self.oidc_signing_key_rotation_interval,
+            "oidc_supported_signing_algorithms":
+                self.oidc_supported_signing_algorithms,
+            "oidc_default_signing_algorithm":
+                self.oidc_default_signing_algorithm,
         }
         if COMPONENT_REGISTRY.model_api < 34:
             attributes["web_status_url"] = ""
@@ -8986,6 +9245,17 @@ class SystemAttributes:
         sys_attrs.default_ansible_version = data["default_ansible_version"]
         sys_attrs.web_root = data["web_root"]
         sys_attrs.websocket_url = data["websocket_url"]
+        # For the newly added system attributes, we need to use get()
+        # method to avoid KeyError in scheduler prime() method.
+        sys_attrs.oidc_signing_key_rotation_interval = data.get(
+            "oidc_signing_key_rotation_interval",
+            cls._default_oidc_signing_key_rotation_interval)
+        sys_attrs.oidc_supported_signing_algorithms = data.get(
+            "oidc_supported_signing_algorithms",
+            cls._default_oidc_supported_signing_algorithms)
+        sys_attrs.oidc_default_signing_algorithm = data.get(
+            "oidc_default_signing_algorithm",
+            cls._default_oidc_default_signing_algorithm)
         return sys_attrs
 
 
@@ -9452,7 +9722,7 @@ class Layout(object):
         # timeout
         if (job.pre_timeout and job.timeout and
             job.pre_timeout > job.timeout):
-            raise MaxTimeoutError(job, self.tenant)
+            raise PreTimeoutExceedsTimeoutError(job)
 
         if (job.timeout and
             self.tenant.max_job_timeout != -1 and
@@ -9541,24 +9811,39 @@ class Layout(object):
     def _checkAddNodeset(self, nodeset):
         # Verify that we can add a nodeset; used by top-level nodeset
         # objects as well as nested nodesets.
-        allowed_labels = self.tenant.allowed_labels
-        disallowed_labels = self.tenant.disallowed_labels
+        # Not applicable to NIZ since we which labels are
+        # allowed/disallowed is implicit due to their presence in
+        # configuration.
+        if self.tenant.use_nodepool:
+            allowed_labels = self.tenant.allowed_labels
+            disallowed_labels = self.tenant.disallowed_labels
 
-        requested_labels = nodeset.flattenAlternativeLabels()
-        filtered_labels = set(filter_allowed_disallowed(
-            requested_labels, allowed_labels, disallowed_labels))
-        rejected_labels = requested_labels - filtered_labels
-        for name in rejected_labels:
-            raise LabelForbiddenError(
-                label=name,
-                allowed_labels=allowed_labels,
-                disallowed_labels=disallowed_labels)
+            requested_labels = nodeset.flattenAlternativeLabels()
+            filtered_labels = set(filter_allowed_disallowed(
+                requested_labels, allowed_labels, disallowed_labels))
+            rejected_labels = requested_labels - filtered_labels
+            for name in rejected_labels:
+                raise LabelForbiddenError(
+                    label=name,
+                    allowed_labels=allowed_labels,
+                    disallowed_labels=disallowed_labels)
 
     def addNodeSet(self, nodeset):
         self._checkAddNodeset(nodeset)
         self._addIdenticalObject('Nodeset', self.nodesets, nodeset)
 
+    def _checkAddSecret(self, secret):
+        if secret.secret_oidc:
+            ttl = secret.secret_oidc.get('ttl', self.tenant.default_oidc_ttl)
+            if int(ttl) > self.tenant.max_oidc_ttl:
+                raise MaxOIDCTTLError(secret, self.tenant)
+
+            iss = secret.secret_oidc.get('iss')
+            if iss and iss not in self.tenant.allowed_oidc_issuers:
+                raise OIDCIssuerNotAllowedError(secret, iss)
+
     def addSecret(self, secret):
+        self._checkAddSecret(secret)
         self._addIdenticalObject('Secret', self.secrets, secret)
 
     def addSemaphore(self, semaphore):
@@ -10020,7 +10305,7 @@ class Layout(object):
         """Find or create actual matching jobs for this item's change and
         store the resulting job tree."""
 
-        enable_debug = False
+        enable_debug = item.debug
         fail_fast = item.current_build_set.fail_fast
         debug_messages = []
         if old:
@@ -10122,6 +10407,9 @@ class Tenant(object):
         self.name = name
         self.max_nodes_per_job = 5
         self.max_job_timeout = 10800
+        self.max_oidc_ttl = 10800
+        self.default_oidc_ttl = 3600
+        self.allowed_oidc_issuers = []
         self.max_changes_per_pipeline = None
         self.max_dependencies = None
         self.exclude_unprotected_branches = False
@@ -10130,6 +10418,7 @@ class Tenant(object):
         self.layout = None
         self.allowed_triggers = None
         self.allowed_reporters = None
+        self.use_nodepool = True
         # The unparsed configuration from the main zuul config for
         # this tenant.
         self.unparsed_config = None
@@ -10879,3 +11168,51 @@ class AuthZRuleTree(object):
 
     def __repr__(self):
         return '<AuthZRuleTree [ %s ]>' % self.ruletree
+
+
+class TenantEventState(zkobject.ZKObject):
+    def __init__(self, path):
+        super().__init__()
+        self._set(_path=path)
+        self.reset()
+
+    def reset(self):
+        self._set(
+            trigger_queue_discarding=False,
+            trigger_queue_paused=False,
+            result_queue_paused=False,
+            reason=None,
+        )
+
+    def getPath(self):
+        return self._path
+
+    def toDict(self):
+        data = {
+            "trigger_queue_discarding": self.trigger_queue_discarding,
+            "trigger_queue_paused": self.trigger_queue_paused,
+            "result_queue_paused": self.result_queue_paused,
+            "reason": self.reason,
+        }
+        return data
+
+    def serialize(self, context):
+        data = self.toDict()
+        r = json.dumps(data, sort_keys=True).encode("utf8")
+        return r
+
+    def deserialize(self, raw, context, extra=None):
+        if not raw:
+            raw = {}
+        r = super().deserialize(raw, context)
+        return r
+
+    def internalCreate(self, context):
+        data = self._trySerialize(context)
+        try:
+            self._save(context, data)
+        except NoNodeError:
+            try:
+                self._save(context, data, create=True)
+            except NodeExistsError:
+                self._save(context, data)

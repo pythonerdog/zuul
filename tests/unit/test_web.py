@@ -14,6 +14,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+import collections
 import os
 import urllib.parse
 import socket
@@ -25,6 +26,7 @@ import subprocess
 import threading
 from unittest import skip, mock
 
+from kazoo.exceptions import NoNodeError
 import requests
 
 from zuul.lib.statsd import normalize_statsd_name
@@ -56,6 +58,8 @@ class FakeConfig(object):
 
 class WebMixin:
     config_ini_data = {}
+    stats_interval = None
+    default_token_groups = None
 
     def startWebServer(self):
         self.zuul_ini_config = FakeConfig(self.config_ini_data)
@@ -67,7 +71,8 @@ class WebMixin:
                            self.git_url_with_auth, self.addCleanup,
                            self.test_root,
                            info=zuul.model.WebInfo.fromConfig(
-                               self.zuul_ini_config)))
+                               self.zuul_ini_config),
+                           stats_interval=self.stats_interval))
 
         self.executor_server.hold_jobs_in_build = True
 
@@ -91,6 +96,10 @@ class WebMixin:
         return requests.post(
             urllib.parse.urljoin(self.base_url, url), *args, **kwargs)
 
+    def put_url(self, url, *args, **kwargs):
+        return requests.put(
+            urllib.parse.urljoin(self.base_url, url), *args, **kwargs)
+
     def delete_url(self, url, *args, **kwargs):
         return requests.delete(
             urllib.parse.urljoin(self.base_url, url), *args, **kwargs)
@@ -98,6 +107,24 @@ class WebMixin:
     def options_url(self, url, *args, **kwargs):
         return requests.options(
             urllib.parse.urljoin(self.base_url, url), *args, **kwargs)
+
+    def _getToken(self, admin=None, groups=None):
+        if admin is None:
+            admin = ['tenant-one']
+        if groups is None:
+            groups = self.default_token_groups
+        authz = {'iss': 'zuul_operator',
+                 'aud': 'zuul.example.com',
+                 'sub': 'testuser',
+                 'zuul': {
+                     'admin': admin,
+                 },
+                 'exp': int(time.time()) + 3600}
+        if groups:
+            authz['groups'] = groups
+        token = jwt.encode(authz, key='NoDanaOnlyZuul',
+                           algorithm='HS256')
+        return token
 
 
 class BaseTestWeb(ZuulTestCase, WebMixin):
@@ -1491,8 +1518,26 @@ class TestWeb(BaseTestWeb):
         self.assertEqual(job_params, resp.json())
 
 
+class TestWebStatsReporting(BaseTestWeb):
+    stats_interval = 1
+
+    def test_default_statsd_reporting(self):
+        # Let the system settle out then wait 2x the reporting interval
+        # before we check that things have reported.
+        self.waitUntilSettled()
+        time.sleep(2)
+        hostname = normalize_statsd_name(socket.getfqdn())
+        self.assertReportedStat(
+            f'zuul.web.server.{hostname}.threadpool.idle',
+            value='10', kind='g')
+        self.assertReportedStat(
+            f'zuul.web.server.{hostname}.threadpool.queue',
+            value='0', kind='g')
+
+
 class TestWebProviders(LauncherBaseTestCase, WebMixin):
     config_file = 'zuul-connections-nodepool.conf'
+    tenant_config_file = 'config/multi-tenant-provider/main.yaml'
 
     @simple_layout('layouts/nodepool.yaml', enable_nodepool=True)
     def test_web_providers(self):
@@ -1541,9 +1586,9 @@ class TestWebProviders(LauncherBaseTestCase, WebMixin):
         'refs/heads/master',
         LauncherBaseTestCase.ubuntu_return_data,
     )
-    @mock.patch('zuul.driver.aws.awsendpoint.AwsProviderEndpoint.uploadImage',
+    @mock.patch('zuul.driver.aws.awsendpoint.AwsImageUploadJob.run',
                 return_value="test_external_id")
-    def test_web_images(self, mock_uploadImage):
+    def test_web_images(self, mock_image_upload_run):
         self.waitUntilSettled()
         self.startWebServer()
         self.assertHistory([
@@ -1559,6 +1604,12 @@ class TestWebProviders(LauncherBaseTestCase, WebMixin):
         self.assertEqual(1, len(data[2]['build_artifacts']))
         self.assertEqual(1, len(data[1]['build_artifacts'][0]['uploads']))
         self.assertEqual(1, len(data[2]['build_artifacts'][0]['uploads']))
+        ba = data[1]['build_artifacts'][0]
+        self.assertFalse(ba['is_locked'])
+        self.assertIsNone(ba['lock_holder'])
+        upload = data[1]['build_artifacts'][0]['uploads'][0]
+        self.assertFalse(upload['is_locked'])
+        self.assertIsNone(upload['lock_holder'])
         # The builds have a lot of random data
         data[1].pop('build_artifacts')
         data[2].pop('build_artifacts')
@@ -1590,7 +1641,6 @@ class TestWebProviders(LauncherBaseTestCase, WebMixin):
         ]
         self.assertEqual(expected, data)
 
-    @simple_layout('layouts/nodepool-image.yaml', enable_nodepool=True)
     @return_data(
         'build-debian-local-image',
         'refs/heads/master',
@@ -1601,9 +1651,9 @@ class TestWebProviders(LauncherBaseTestCase, WebMixin):
         'refs/heads/master',
         LauncherBaseTestCase.ubuntu_return_data,
     )
-    @mock.patch('zuul.driver.aws.awsendpoint.AwsProviderEndpoint.uploadImage',
+    @mock.patch('zuul.driver.aws.awsendpoint.AwsImageUploadJob.run',
                 return_value="test_external_id")
-    def test_web_image_delete(self, mock_uploadImage):
+    def test_web_image_delete(self, mock_image_upload_run):
         self.waitUntilSettled()
         self.startWebServer()
         self.assertHistory([
@@ -1625,16 +1675,14 @@ class TestWebProviders(LauncherBaseTestCase, WebMixin):
             f"api/tenant/tenant-one/image-build-artifact/{art['uuid']}"
         )
         self.assertEqual(401, resp.status_code, resp.text)
+        # Test that the wrong tenant fails, even with auth
+        token = self._getToken(['tenant-two'])
+        resp = self.delete_url(
+            f"api/tenant/tenant-two/image-build-artifact/{art['uuid']}",
+            headers={'Authorization': 'Bearer %s' % token})
+        self.assertEqual(404, resp.status_code, resp.text)
         # Do it again with auth
-        authz = {'iss': 'zuul_operator',
-                 'aud': 'zuul.example.com',
-                 'sub': 'testuser',
-                 'zuul': {
-                     'admin': ['tenant-one', ]
-                 },
-                 'exp': int(time.time()) + 3600}
-        token = jwt.encode(authz, key='NoDanaOnlyZuul',
-                           algorithm='HS256')
+        token = self._getToken(['tenant-one'])
         resp = self.delete_url(
             f"api/tenant/tenant-one/image-build-artifact/{art['uuid']}",
             headers={'Authorization': 'Bearer %s' % token})
@@ -1645,7 +1693,6 @@ class TestWebProviders(LauncherBaseTestCase, WebMixin):
             if 'build_artifacts' not in data[1]:
                 break
 
-    @simple_layout('layouts/nodepool-image.yaml', enable_nodepool=True)
     @return_data(
         'build-debian-local-image',
         'refs/heads/master',
@@ -1656,9 +1703,9 @@ class TestWebProviders(LauncherBaseTestCase, WebMixin):
         'refs/heads/master',
         LauncherBaseTestCase.ubuntu_return_data,
     )
-    @mock.patch('zuul.driver.aws.awsendpoint.AwsProviderEndpoint.uploadImage',
+    @mock.patch('zuul.driver.aws.awsendpoint.AwsImageUploadJob.run',
                 return_value="test_external_id")
-    def test_web_upload_delete(self, mock_uploadImage):
+    def test_web_upload_delete(self, mock_image_upload_run):
         self.waitUntilSettled()
         self.startWebServer()
         self.assertHistory([
@@ -1680,16 +1727,14 @@ class TestWebProviders(LauncherBaseTestCase, WebMixin):
             f"api/tenant/tenant-one/image-upload/{upload['uuid']}"
         )
         self.assertEqual(401, resp.status_code, resp.text)
+        # Test that the wrong tenant fails, even with auth
+        token = self._getToken(['tenant-two'])
+        resp = self.delete_url(
+            f"api/tenant/tenant-two/image-upload/{upload['uuid']}",
+            headers={'Authorization': 'Bearer %s' % token})
+        self.assertEqual(404, resp.status_code, resp.text)
         # Do it again with auth
-        authz = {'iss': 'zuul_operator',
-                 'aud': 'zuul.example.com',
-                 'sub': 'testuser',
-                 'zuul': {
-                     'admin': ['tenant-one', ]
-                 },
-                 'exp': int(time.time()) + 3600}
-        token = jwt.encode(authz, key='NoDanaOnlyZuul',
-                           algorithm='HS256')
+        token = self._getToken(['tenant-one'])
         resp = self.delete_url(
             f"api/tenant/tenant-one/image-upload/{upload['uuid']}",
             headers={'Authorization': 'Bearer %s' % token})
@@ -1700,7 +1745,6 @@ class TestWebProviders(LauncherBaseTestCase, WebMixin):
             if 'build_artifacts' not in data[1]:
                 break
 
-    @simple_layout('layouts/nodepool-image.yaml', enable_nodepool=True)
     @return_data(
         'build-debian-local-image',
         'refs/heads/master',
@@ -1711,9 +1755,9 @@ class TestWebProviders(LauncherBaseTestCase, WebMixin):
         'refs/heads/master',
         LauncherBaseTestCase.ubuntu_return_data,
     )
-    @mock.patch('zuul.driver.aws.awsendpoint.AwsProviderEndpoint.uploadImage',
+    @mock.patch('zuul.driver.aws.awsendpoint.AwsImageUploadJob.run',
                 return_value="test_external_id")
-    def test_web_image_post(self, mock_uploadImage):
+    def test_web_image_post(self, mock_image_upload_run):
         self.waitUntilSettled()
         self.startWebServer()
         self.executor_server.hold_jobs_in_build = False
@@ -1736,15 +1780,7 @@ class TestWebProviders(LauncherBaseTestCase, WebMixin):
         )
         self.assertEqual(401, resp.status_code, resp.text)
         # Do it again with auth
-        authz = {'iss': 'zuul_operator',
-                 'aud': 'zuul.example.com',
-                 'sub': 'testuser',
-                 'zuul': {
-                     'admin': ['tenant-one', ]
-                 },
-                 'exp': int(time.time()) + 3600}
-        token = jwt.encode(authz, key='NoDanaOnlyZuul',
-                           algorithm='HS256')
+        token = self._getToken(['tenant-one'])
         resp = self.post_url(
             "api/tenant/tenant-one/image/ubuntu-local/build",
             headers={'Authorization': 'Bearer %s' % token})
@@ -1754,6 +1790,66 @@ class TestWebProviders(LauncherBaseTestCase, WebMixin):
             dict(name='build-debian-local-image', result='SUCCESS'),
             dict(name='build-ubuntu-local-image', result='SUCCESS'),
             dict(name='build-ubuntu-local-image', result='SUCCESS'),
+        ], ordered=False)
+        # Try again with the wrong tenant
+        token = self._getToken(['tenant-two'])
+        resp = self.post_url(
+            "api/tenant/tenant-two/image/ubuntu-local/build",
+            headers={'Authorization': 'Bearer %s' % token})
+        self.assertEqual(200, resp.status_code, resp.text)
+        self.waitUntilSettled("image rebuild")
+        self.assertHistory([
+            dict(name='build-debian-local-image', result='SUCCESS'),
+            dict(name='build-ubuntu-local-image', result='SUCCESS'),
+            dict(name='build-ubuntu-local-image', result='SUCCESS'),
+        ], ordered=False)
+
+    @return_data(
+        'build-debian-local-image',
+        'refs/heads/master',
+        LauncherBaseTestCase.debian_return_data,
+    )
+    @return_data(
+        'build-ubuntu-local-image',
+        'refs/heads/master',
+        LauncherBaseTestCase.ubuntu_return_data,
+    )
+    @mock.patch('zuul.driver.aws.awsendpoint.AwsImageUploadJob.run',
+                return_value="test_external_id")
+    def test_web_image_post_duplicate(self, mock_image_upload_run):
+        # Test that we can enqueue multiple items for the same project
+        # if they are different image builds.
+        self.waitUntilSettled()
+        self.startWebServer()
+        self.executor_server.hold_jobs_in_build = False
+        self.assertHistory([
+            dict(name='build-debian-local-image', result='SUCCESS'),
+            dict(name='build-ubuntu-local-image', result='SUCCESS'),
+        ], ordered=False)
+
+        self.executor_server.hold_jobs_in_build = True
+        token = self._getToken(['tenant-one'])
+        resp = self.post_url(
+            "api/tenant/tenant-one/image/ubuntu-local/build",
+            headers={'Authorization': 'Bearer %s' % token})
+        self.assertEqual(200, resp.status_code, resp.text)
+        resp = self.post_url(
+            "api/tenant/tenant-one/image/ubuntu-local/build",
+            headers={'Authorization': 'Bearer %s' % token})
+        self.assertEqual(200, resp.status_code, resp.text)
+        resp = self.post_url(
+            "api/tenant/tenant-one/image/debian-local/build",
+            headers={'Authorization': 'Bearer %s' % token})
+        self.assertEqual(200, resp.status_code, resp.text)
+        self.waitUntilSettled("queues empty")
+        self.executor_server.hold_jobs_in_build = False
+        self.executor_server.release()
+        self.waitUntilSettled("image rebuild")
+        self.assertHistory([
+            dict(name='build-debian-local-image', result='SUCCESS'),
+            dict(name='build-ubuntu-local-image', result='SUCCESS'),
+            dict(name='build-ubuntu-local-image', result='SUCCESS'),
+            dict(name='build-debian-local-image', result='SUCCESS'),
         ], ordered=False)
 
     @simple_layout('layouts/nodepool.yaml', enable_nodepool=True)
@@ -1807,7 +1903,7 @@ class TestWebProviders(LauncherBaseTestCase, WebMixin):
         ]
         self.assertEqual(expected, data)
 
-    @simple_layout('layouts/nodepool.yaml', enable_nodepool=True)
+    @simple_layout('layouts/nodepool-min-ready.yaml', enable_nodepool=True)
     def test_web_nodes_list_niz(self):
         self.waitUntilSettled()
         self.startWebServer()
@@ -1816,11 +1912,114 @@ class TestWebProviders(LauncherBaseTestCase, WebMixin):
         self.fake_gerrit.addEvent(A.addApproval('Approved', 1))
         self.waitUntilSettled()
         data = self.get_url('api/tenant/tenant-one/nodes').json()
+        self.assertEqual(len(data), 2)
+        pname = 'review.example.com%2Forg%2Fcommon-config/aws-us-east-1-main'
+        for node in data:
+            if node['label'] == 'debian-normal':
+                self.assertEqual(pname, node["provider"])
+            else:
+                self.assertIsNone(node["provider"])
+        labels = collections.Counter(x['label'] for x in data)
+        self.assertEqual({'debian-normal': 1, 'debian-large': 1},
+                         labels)
+        self.executor_server.hold_jobs_in_build = False
+        self.executor_server.release()
+        self.waitUntilSettled()
+
+    @simple_layout('layouts/nodepool.yaml', enable_nodepool=True)
+    def test_web_nodes_hold_delete(self):
+        # This tests 3 things (since they are lifecycle related):
+        # * Setting the node state to hold
+        # * Setting the node state to delete
+        # * Deleting the request
+        self.waitUntilSettled()
+        self.startWebServer()
+
+        request = self.requestNodes(['debian-normal'])
+        self.assertEqual(request.state,
+                         zuul.model.NodesetRequest.State.FULFILLED)
+        self.assertEqual(len(request.nodes), 1)
+
+        nodes = self.get_url('api/tenant/tenant-one/nodes').json()
+        self.assertEqual(len(nodes), 1)
+
+        token = self._getToken(['tenant-one'])
+        resp = self.put_url(
+            f"api/tenant/tenant-one/nodes/{nodes[0]['uuid']}",
+            headers={'Authorization': 'Bearer %s' % token},
+            json={'state': 'hold'},
+        )
+        self.assertEqual(201, resp.status_code)
+        self.waitUntilSettled()
+
+        node = self.launcher.api.nodes_cache.getItem(nodes[0]['uuid'])
+        self.assertEqual(node.State.HOLD, node.state)
+
+        resp = self.put_url(
+            f"api/tenant/tenant-one/nodes/{nodes[0]['uuid']}",
+            headers={'Authorization': 'Bearer %s' % token},
+            json={'state': 'used'},
+        )
+        self.assertEqual(201, resp.status_code)
+        self.waitUntilSettled()
+
+        requests = self.get_url(
+            'api/tenant/tenant-one/nodeset-requests').json()
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(request.uuid, requests[0]['uuid'])
+
+        resp = self.delete_url(
+            f"api/tenant/tenant-one/nodeset-requests/{requests[0]['uuid']}",
+            headers={'Authorization': 'Bearer %s' % token},
+        )
+        self.assertEqual(204, resp.status_code)
+        self.waitUntilSettled()
+
+        ctx = self.createZKContext(None)
+        for _ in iterate_timeout(10, "request to be deleted"):
+            try:
+                request.refresh(ctx)
+            except NoNodeError:
+                break
+        for _ in iterate_timeout(10, "node to be deleted"):
+            try:
+                node.refresh(ctx)
+            except NoNodeError:
+                break
+
+    @simple_layout('layouts/nodepool.yaml', enable_nodepool=True)
+    def test_web_nodeset_list(self):
+        self.waitUntilSettled()
+        self.hold_nodeset_requests_in_queue = True
+        self.startWebServer()
+        A = self.fake_gerrit.addFakeChange('org/project', 'master', 'A')
+        A.addApproval('Code-Review', 2)
+        self.fake_gerrit.addEvent(A.addApproval('Approved', 1))
+        self.waitUntilSettled()
+        data = self.get_url('api/tenant/tenant-one/nodeset-requests').json()
         self.assertEqual(len(data), 1)
-        self.assertEqual(
-            'review.example.com%2Forg%2Fcommon-config/aws-us-east-1-main',
-            data[0]["provider"])
-        self.assertEqual("debian-normal", data[0]["label"])
+        for k in ['uuid', 'buildset_uuid', 'request_time',
+                  'zuul_event_id']:
+            # This asserts the keys are present, but the data are
+            # random so we don't check below.
+            del data[0][k]
+        expected = {
+            'state': 'test-hold',
+            'pipeline_name': 'gate',
+            'job_name': 'check-job',
+            'labels': ['debian-normal'],
+            'priority': 100,
+            'image_names': None,
+            'image_upload_uuid': None,
+            'relative_priority': 0,
+            'provider_node_data': [],
+            'is_locked': False,
+            'lock_holder': None,
+        }
+        self.assertEqual(expected, data[0])
+        self.hold_nodeset_requests_in_queue = False
+        self.releaseNodesetRequests()
+        self.waitUntilSettled()
         self.executor_server.hold_jobs_in_build = False
         self.executor_server.release()
         self.waitUntilSettled()
@@ -3592,6 +3791,113 @@ class TestTenantScopedWebApi(BaseTestWeb):
         self.assertTrue(data['zuul']['admin'] is False, data)
         self.assertTrue(data['zuul']['scope'] == ['tenant-one'], data)
 
+    def test_state_post(self):
+        self.executor_server.hold_jobs_in_build = False
+        A = self.fake_gerrit.addFakeChange('org/project', 'master', 'A')
+        self.fake_gerrit.addEvent(A.getPatchsetCreatedEvent(1))
+        self.waitUntilSettled()
+        self.assertHistory([
+            dict(name='project-merge', result='SUCCESS', changes='1,1'),
+            dict(name='project-test1', result='SUCCESS', changes='1,1'),
+            dict(name='project-test2', result='SUCCESS', changes='1,1'),
+        ], ordered=False)
+
+        authz = {'iss': 'zuul_operator',
+                 'aud': 'zuul.example.com',
+                 'sub': 'testuser',
+                 'zuul': {
+                     'admin': ['tenant-one', ],
+                 },
+                 'exp': int(time.time()) + 3600,
+                 'iat': int(time.time())}
+        token = jwt.encode(authz, key='NoDanaOnlyZuul',
+                           algorithm='HS256')
+        args = {
+            'trigger_queue_paused': True,
+            'reason': 'test trigger paused',
+        }
+        req = self.post_url(
+            'api/tenant/tenant-one/state',
+            headers={'Authorization': 'Bearer %s' % token},
+            json=args)
+        self.assertEqual(200, req.status_code, req.text)
+        time.sleep(1)
+
+        B = self.fake_gerrit.addFakeChange('org/project', 'master', 'B')
+        self.fake_gerrit.addEvent(B.getPatchsetCreatedEvent(1))
+        time.sleep(5)
+
+        self.assertHistory([
+            dict(name='project-merge', result='SUCCESS', changes='1,1'),
+            dict(name='project-test1', result='SUCCESS', changes='1,1'),
+            dict(name='project-test2', result='SUCCESS', changes='1,1'),
+        ], ordered=False)
+        self.assertEqual(0, len(self.builds))
+
+        args = {
+            'trigger_queue_paused': True,
+            'result_queue_paused': True,
+            'reason': "test result paused",
+        }
+        req = self.post_url(
+            'api/tenant/tenant-one/state',
+            headers={'Authorization': 'Bearer %s' % token},
+            json=args)
+        self.assertEqual(200, req.status_code, req.text)
+
+        time.sleep(5)
+        self.assertHistory([
+            dict(name='project-merge', result='SUCCESS', changes='1,1'),
+            dict(name='project-test1', result='SUCCESS', changes='1,1'),
+            dict(name='project-test2', result='SUCCESS', changes='1,1'),
+        ], ordered=False)
+        self.assertEqual(0, len(self.builds))
+
+        args = {
+            'trigger_queue_paused': False,
+            'result_queue_paused': False,
+            'reason': None,
+        }
+        req = self.post_url(
+            'api/tenant/tenant-one/state',
+            headers={'Authorization': 'Bearer %s' % token},
+            json=args)
+        self.assertEqual(200, req.status_code, req.text)
+
+        self.waitUntilSettled()
+        self.assertHistory([
+            dict(name='project-merge', result='SUCCESS', changes='1,1'),
+            dict(name='project-test1', result='SUCCESS', changes='1,1'),
+            dict(name='project-test2', result='SUCCESS', changes='1,1'),
+            dict(name='project-merge', result='SUCCESS', changes='2,1'),
+            dict(name='project-test1', result='SUCCESS', changes='2,1'),
+            dict(name='project-test2', result='SUCCESS', changes='2,1'),
+        ], ordered=False)
+
+        args = {
+            'trigger_queue_discarding': True,
+            'reason': 'test discarding',
+        }
+        req = self.post_url(
+            'api/tenant/tenant-one/state',
+            headers={'Authorization': 'Bearer %s' % token},
+            json=args)
+        self.assertEqual(200, req.status_code, req.text)
+        time.sleep(1)
+
+        C = self.fake_gerrit.addFakeChange('org/project', 'master', 'C')
+        self.fake_gerrit.addEvent(C.getPatchsetCreatedEvent(1))
+
+        self.waitUntilSettled()
+        self.assertHistory([
+            dict(name='project-merge', result='SUCCESS', changes='1,1'),
+            dict(name='project-test1', result='SUCCESS', changes='1,1'),
+            dict(name='project-test2', result='SUCCESS', changes='1,1'),
+            dict(name='project-merge', result='SUCCESS', changes='2,1'),
+            dict(name='project-test1', result='SUCCESS', changes='2,1'),
+            dict(name='project-test2', result='SUCCESS', changes='2,1'),
+        ], ordered=False)
+
 
 class TestTenantScopedWebApiWithAccessRules(TestTenantScopedWebApi):
     config_file = 'zuul-admin-web.conf'
@@ -4440,3 +4746,89 @@ class TestWebApiAccessRules(BaseTestWeb):
             info = resp.json()
             self.assertTrue(
                 info['info']['capabilities']['auth']['read_protected'])
+
+
+class TestWebOIDCEndpoints(BaseTestWeb):
+    tenant_config_file = 'config/multi-tenant/main.yaml'
+
+    def test_global_webroot(self):
+        """
+        Test that OIDC endpoinds accessed from the global webroot
+        should return correct content
+        """
+        self._test_oidc_endpoints(None, 'https://zuul.example.com')
+        # If tenant config does not specify webroot,
+        # it should default to global webroot
+        self._test_oidc_endpoints('tenant-two', 'https://zuul.example.com')
+        # If tenant does exist, it should default to global webroot
+        self._test_oidc_endpoints(
+            'tenant-not-exist', 'https://zuul.example.com')
+
+    def test_tenant_webroot(self):
+        """
+        Test tht OIDC endpoints accessed from the tenant webroot
+        should return correct content
+        """
+        self._test_oidc_endpoints(
+            "tenant-one", 'https://tenant-one.example.com')
+
+    def test_multiple_jwt_keys(self):
+        """
+        Test multiple keys returned in jwks endpoint
+        """
+        keystore = self.web.web.keystore
+        # Make sure the fist signning key is created
+        keystore.getLatestOidcSigningKeys(algorithm="RS256")
+
+        jwks_data = self.get_url('oidc/.well-known/jwks').json()
+        self.assertEqual(len(jwks_data["keys"]), 1)
+        for idx, key in enumerate(jwks_data["keys"]):
+            self._validate_oidc_key(key, expected_kid=f'RS256-{idx}')
+
+        # call the rotateOidcSigningKeys method to create the second key
+        time.sleep(2)
+        keystore.rotateOidcSigningKeys(
+            algorithm="RS256", rotation_interval=1, max_ttl=100)
+
+        # Both api and web cache should be refreshed
+        for _ in iterate_timeout(10, 'cache to sync'):
+            test_keys = keystore.getOidcSigningKeyData(algorithm="RS256")
+            if len(test_keys.keys) == 2:
+                break
+
+        jwks_data = self.get_url('oidc/.well-known/jwks').json()
+        self.assertEqual(len(jwks_data["keys"]), 2)
+        for idx, key in enumerate(jwks_data["keys"]):
+            self._validate_oidc_key(key, expected_kid=f'RS256-{idx}')
+
+    def _test_oidc_endpoints(self, tenant_name, expected_webroot):
+        well_known_url = 'oidc/.well-known'
+        if tenant_name:
+            well_known_url = f'oidc/{tenant_name}/.well-known'
+
+        # Test that the openid-configuration content is correct
+        config_data = self.get_url(
+            f'{well_known_url}/openid-configuration').json()
+        self.assertEqual(config_data['issuer'], expected_webroot)
+        self.assertEqual(config_data['jwks_uri'],
+                         f'{expected_webroot}/oidc/.well-known/jwks')
+        self.assertEqual(config_data['claims_supported'],
+                         ['aud', 'iat', 'iss', 'name', 'sub', 'custom'])
+        self.assertEqual(config_data['response_types_supported'], ['id_token'])
+        self.assertEqual(config_data['id_token_signing_alg_values_supported'],
+                         ['RS256'])
+        self.assertEqual(config_data['subject_types_supported'], ['public'])
+
+        # Test that the jwks content is correct
+        jwks_data = self.get_url(f'{well_known_url}/jwks').json()
+        self.assertEqual(len(jwks_data["keys"]), 1)
+        key = jwks_data["keys"][0]
+        self._validate_oidc_key(key)
+
+    def _validate_oidc_key(self, key, expected_kid='RS256-0'):
+        jwk = jwt.PyJWK.from_dict(key)
+        self.assertEqual(jwk.key_type, 'RSA')
+        self.assertEqual(jwk.algorithm_name, 'RS256')
+        self.assertEqual(jwk.key_id, expected_kid)
+        self.assertEqual(jwk.public_key_use, 'sig')
+        self.assertIsInstance(jwk.Algorithm, jwt.algorithms.RSAAlgorithm)

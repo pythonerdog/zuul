@@ -91,6 +91,34 @@ intended to process events should not set this option on any
 schedulers.  To use this option on a standby or testing cluster, set
 it on all schedulers.
 
+Managing Event Processing
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+If an issue with external systems is affecting Zuul, tenant
+administrators may suspend event processing until the issue is resolved.
+Three options are available:
+
+* Pausing trigger event queue processing to prevent Zuul from adding
+  new items into pipelines until the queue is unpaused
+
+* Pausing trigger and result queue processing to prevent Zuul from
+  adding new items into pipelines or reporting items that are already
+  in existing pipelines until it is unpaused.  This may include
+  merging changes in the case of a :term:`gate` pipeline.
+
+* Discarding trigger events to cause Zuul to disregard trigger events
+  (with no processing of the backlog) until further notice.
+
+If any of the above settings are enabled for a tenant, a banner will
+be displayed on the status page indicating that queue processing is
+paused, and including a reason (if any was supplied).
+
+There are two ways to manage queue processing for a tenant.  The first
+is using the web interface: authenticate as a tenant administrator,
+and a "Manage Queues" button will appear at the top of the status
+page; click that and fill out the form.  The second is using the
+``zuul-client tenant-state`` command.
+
 .. _backup:
 
 Backup and Restoration
